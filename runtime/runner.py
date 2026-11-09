@@ -190,8 +190,15 @@ class PaperRunner:
             "tau_s": max(0.0, round(self.window_end - now, 1)),
             "spot": spot.price,
             "open_px": getattr(self, "open_price", 0.0),
-            "pos_up": {"shares": self.pos_up.shares, "cash": round(self.pos_up.cash, 4)},
-            "pos_down": {"shares": self.pos_down.shares, "cash": round(self.pos_down.cash, 4)},
+            "return_bps": round(spot.return_bps, 2),
+            "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
+            "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
+            "working_orders": [
+                {"side": o.side, "price": o.price, "size": o.remaining}
+                for o in self.working_orders if o.remaining > 1e-6
+            ],
+            "pos_up": {"shares": self.pos_up.shares, "cash": round(self.pos_up.cash, 4), "avg_px": round(self.pos_up.avg_price, 4)},
+            "pos_down": {"shares": self.pos_down.shares, "cash": round(self.pos_down.cash, 4), "avg_px": round(self.pos_down.avg_price, 4)},
             "fills_count": len(self.fills),
             "insurance_paid": round(self.insurance_paid, 4),
             "last_decision": self.decisions[-1] if self.decisions else None

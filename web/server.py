@@ -93,6 +93,13 @@ class QuantHandler(BaseHTTPRequestHandler):
         elif path == "/api/batches":
             batches = [p.name for p in config.LEDGERS_DIR.iterdir() if p.is_dir()]
             self.send_json({"batches": sorted(batches, reverse=True)})
+        elif path == "/api/params":
+            self.send_json({
+                "batch_id": config.BATCH_ID,
+                "version": config.VERSION,
+                "revision": config.REVISION,
+                "params": config.PARAMS
+            })
         else:
             # Serve static files
             rel_path = path.lstrip("/")
