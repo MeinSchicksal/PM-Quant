@@ -104,9 +104,16 @@ class PaperRunner:
             return
         self.open_price = poly_open
         self.poly_open_is_provisional = False
+        # Cancel resting working orders placed under provisional strike to prevent execution on stale baseline
+        if self.working_orders:
+            for o in self.working_orders:
+                o.cancel_at = time.time()
+            self.working_orders = []
         if self.price_history:
             self.price_history[0]["poly_price"] = round(poly_open, 2)
-            self.price_history[0]["poly_return_bps"] = 0.0
+            for pt in self.price_history:
+                if pt.get("poly_price"):
+                    pt["poly_return_bps"] = round(((pt["poly_price"] - poly_open) / poly_open) * 10000.0, 2)
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
@@ -193,7 +200,8 @@ class PaperRunner:
 
         decision = plan_decision(
             self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
-            circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason
+            circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
+            p_fair=p_fair
         )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,

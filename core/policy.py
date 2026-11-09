@@ -152,7 +152,8 @@ def plan_decision(
     tau_s: float,
     params: Dict[str, float],
     circuit_breaker_active: bool = False,
-    circuit_breaker_reason: str = ""
+    circuit_breaker_reason: str = "",
+    p_fair: Optional[float] = None
 ) -> Decision:
     """Master decision cycle called every tick/event.
     
@@ -171,7 +172,16 @@ def plan_decision(
     )
     
     # 1. Calculate Fair Prob & Dynamic Volatility Adaptive Bounds
-    p_fair = estimate_fair_prob(spot.price, spot.open_price, tau_s, spot.realized_vol_bps)
+    # Ensure consistent reference basis to avoid exchange spread contamination
+    if p_fair is None:
+        poly_spot = getattr(spot, "poly_price", None)
+        bin_open = getattr(spot, "binance_open_price", None)
+        if poly_spot and poly_spot > 0 and spot.open_price > 0:
+            p_fair = estimate_fair_prob(poly_spot, spot.open_price, tau_s, spot.realized_vol_bps)
+        elif bin_open and bin_open > 0 and spot.price > 0:
+            p_fair = estimate_fair_prob(spot.price, bin_open, tau_s, spot.realized_vol_bps)
+        else:
+            p_fair = estimate_fair_prob(spot.price, spot.open_price, tau_s, spot.realized_vol_bps)
     
     adaptive_edge, adaptive_k, regime = calculate_adaptive_spread_params(
         spot.realized_vol_bps, 

@@ -305,7 +305,13 @@ class MarketFeed:
 
         return getattr(self, "_last_poly_btc", None)
 
-    def fetch_spot_state(self, open_price: float, now: float = None) -> SpotState:
+    def fetch_spot_state(
+        self,
+        open_price: float,
+        now: float = None,
+        binance_open_price: float = None,
+        poly_spot: float = None
+    ) -> SpotState:
         """Fetch current Binance BTC spot, compute 3s velocity, return bps, and rolling volatility."""
         t = now or time.time()
         url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
@@ -332,10 +338,11 @@ class MarketFeed:
                     velocity_3s = ((current_px - old_px) / old_px) * 10000.0
                 break
 
-        # Calculate return in bps from window open
+        # Calculate return in bps from window open (strictly Binance vs Binance open baseline)
+        bin_open = binance_open_price or open_price
         return_bps = 0.0
-        if open_price > 0:
-            return_bps = ((current_px - open_price) / open_price) * 10000.0
+        if bin_open > 0:
+            return_bps = ((current_px - bin_open) / bin_open) * 10000.0
 
         is_shock = abs(velocity_3s) >= config.PARAMS["TOXICITY_SHOCK_BPS"]
 
@@ -356,7 +363,9 @@ class MarketFeed:
             return_bps=return_bps,
             realized_vol_bps=realized_vol_bps,
             is_toxic_shock=is_shock,
-            regime=regime
+            regime=regime,
+            poly_price=poly_spot,
+            binance_open_price=binance_open_price
         )
 
     def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:

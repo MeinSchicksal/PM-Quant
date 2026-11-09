@@ -239,14 +239,18 @@ class PipelineDriver:
 
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
-                    spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
+                    poly_spot = self.feed.get_polymarket_btc_price(loop_start)
+                    spot = self.feed.fetch_spot_state(
+                        self.runner.open_price,
+                        loop_start,
+                        binance_open_price=self.runner.binance_open_price,
+                        poly_spot=poly_spot
+                    )
                     b_up = self.feed.fetch_order_book(active_tokens["token_up"], "Up")
                     b_dn = self.feed.fetch_order_book(active_tokens["token_down"], "Down")
 
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
-
-                    poly_spot = self.feed.get_polymarket_btc_price(loop_start)
 
                     self.runner.step(
                         loop_start, spot, b_up, b_dn,

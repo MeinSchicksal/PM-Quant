@@ -181,6 +181,34 @@ class TestMathematicalInvariants(unittest.TestCase):
         
         self.assertEqual(last_rec["winner"], "Up")
         self.assertEqual(last_rec["proceeds"], 5.00)
+
+    def test_consistent_basis_fair_probability_in_plan_decision(self):
+        """Invariant 11: plan_decision must maintain consistent basis and avoid exchange spread distortion."""
+        from core.policy import plan_decision
+        import config
+
+        # Scenario: Binance spot is $75,200 (Binance open is $75,200, return = 0 bps)
+        # Polymarket open is $75,000 (a $200 basis difference)
+        # Polymarket live TWAP is $75,000 (Poly return = 0 bps)
+        pos_up = Position(0.0, 0.0)
+        pos_down = Position(0.0, 0.0)
+        book_up = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+        book_down = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+
+        spot = SpotState(
+            timestamp=1000.0,
+            price=75200.0,
+            open_price=75000.0,
+            binance_open_price=75200.0,
+            poly_price=75000.0,
+            realized_vol_bps=15.0
+        )
+        # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
+        # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
+        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
+        # With 0 bps move, no edge exists outside uncertainty band
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("No edge", dec.reason)
         self.assertEqual(last_rec["total_cost"], 4.80)
         self.assertAlmostEqual(last_rec["net_pnl"], 0.20, places=4)
         self.assertTrue(last_rec["traded"])
@@ -254,6 +282,34 @@ class TestMathematicalInvariants(unittest.TestCase):
         last_rec = json.loads(lines[-1])
         self.assertEqual(last_rec["winner"], "Up")
         self.assertEqual(last_rec["proceeds"], 5.00)
+
+    def test_consistent_basis_fair_probability_in_plan_decision(self):
+        """Invariant 11: plan_decision must maintain consistent basis and avoid exchange spread distortion."""
+        from core.policy import plan_decision
+        import config
+
+        # Scenario: Binance spot is $75,200 (Binance open is $75,200, return = 0 bps)
+        # Polymarket open is $75,000 (a $200 basis difference)
+        # Polymarket live TWAP is $75,000 (Poly return = 0 bps)
+        pos_up = Position(0.0, 0.0)
+        pos_down = Position(0.0, 0.0)
+        book_up = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+        book_down = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+
+        spot = SpotState(
+            timestamp=1000.0,
+            price=75200.0,
+            open_price=75000.0,
+            binance_open_price=75200.0,
+            poly_price=75000.0,
+            realized_vol_bps=15.0
+        )
+        # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
+        # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
+        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
+        # With 0 bps move, no edge exists outside uncertainty band
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("No edge", dec.reason)
 
 
 if __name__ == "__main__":
