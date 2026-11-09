@@ -472,10 +472,18 @@
     for (const pt of history) {
       if (pt.price > highPx) highPx = pt.price;
       if (pt.price < lowPx) lowPx = pt.price;
+      if (pt.poly_price && pt.poly_price > 0) {
+        if (pt.poly_price > highPx) highPx = pt.poly_price;
+        if (pt.poly_price < lowPx) lowPx = pt.poly_price;
+      }
     }
     if (live.spot) {
       if (live.spot > highPx) highPx = live.spot;
       if (live.spot < lowPx) lowPx = live.spot;
+    }
+    if (live.poly_spot && live.poly_spot > 0) {
+      if (live.poly_spot > highPx) highPx = live.poly_spot;
+      if (live.poly_spot < lowPx) lowPx = live.poly_spot;
     }
 
     const rangeDiff = highPx - lowPx;
@@ -490,10 +498,31 @@
     const statRange = document.getElementById('chart-stat-range');
     if (statRange) statRange.textContent = `${rangeBps} bps`;
 
+    const lastHistoryPt = history[history.length - 1];
+    const curPolySpot = live.poly_spot || (lastHistoryPt ? lastHistoryPt.poly_price : null);
+    const curBinanceSpot = (lastHistoryPt ? lastHistoryPt.price : live.spot) || openPx;
+
+    const statPolySpot = document.getElementById('chart-stat-poly-spot');
+    if (statPolySpot) {
+      statPolySpot.textContent = curPolySpot ? `$${curPolySpot.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '--';
+      statPolySpot.style.color = '#2563eb';
+    }
+
+    const statBasis = document.getElementById('chart-stat-basis');
+    if (statBasis) {
+      if (curPolySpot && curBinanceSpot) {
+        const basisDiff = curBinanceSpot - curPolySpot;
+        const sign = basisDiff >= 0 ? '+' : '';
+        statBasis.textContent = `${sign}$${basisDiff.toFixed(2)}`;
+        statBasis.style.color = Math.abs(basisDiff) > 15.0 ? '#f59e0b' : '#64748b';
+      } else {
+        statBasis.textContent = '--';
+      }
+    }
+
     // Polymarket live orderbook mid price (Implied Probability) vs Model Theoretical Probability
     const bUp = live.book_up || {};
     const bDn = live.book_down || {};
-    const lastHistoryPt = history[history.length - 1];
 
     let livePolyUp = 0.5;
     if (bUp.best_bid !== null && bUp.best_bid !== undefined && bUp.best_ask !== null && bUp.best_ask !== undefined) {
@@ -602,13 +631,13 @@
       ctx.fillText(timeLabels[idx], x, H - 8);
     });
 
-    // 2. Render Price Track (if dual or price)
+    // 2. Render Price Track: Binance Spot vs Polymarket Official Chainlink Oracle
     if (mode === 'dual' || mode === 'price') {
       // Track Title Label
       ctx.fillStyle = '#64748b';
       ctx.font = '600 11px sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText('BTC 现货基准波动 (BTC/USD)', padLeft + 6, t1Top + 12);
+      ctx.fillText('BTC 走势: 币安现货 (绿/红) vs Polymarket 官方 (蓝)', padLeft + 6, t1Top + 12);
 
       // Price bounds
       const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
@@ -641,7 +670,7 @@
         ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselineY + 4);
       }
 
-      // Build points for Price
+      // Build points for Binance Spot Price
       const pts = history.map(pt => ({
         x: timeToX(pt.t),
         y: priceToY(pt.price),
@@ -650,9 +679,20 @@
         t: pt.t
       }));
 
-      const lastP = pts[pts.length - 1];
+      // Build points for Polymarket Official Price
+      const polyPts = history
+        .filter(pt => pt.poly_price && pt.poly_price > 0)
+        .map(pt => ({
+          x: timeToX(pt.t),
+          y: priceToY(pt.poly_price),
+          price: pt.poly_price,
+          t: pt.t
+        }));
 
-      // Fill underneath price curve
+      const lastP = pts[pts.length - 1];
+      const lastPolyP = polyPts.length > 0 ? polyPts[polyPts.length - 1] : null;
+
+      // Fill underneath Binance price curve
       const pGrad = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
       pGrad.addColorStop(0, priceFillTop);
       pGrad.addColorStop(1, priceFillBot);
@@ -668,7 +708,34 @@
       ctx.fillStyle = pGrad;
       ctx.fill();
 
-      // Stroke price curve: 开盘价上方用绿，跌到下方用红
+      // Stroke Curve 1: Polymarket Official Price Curve (Deep Blue)
+      if (polyPts.length >= 2) {
+        ctx.beginPath();
+        ctx.moveTo(polyPts[0].x, polyPts[0].y);
+        for (let i = 1; i < polyPts.length; i++) {
+          ctx.lineTo(polyPts[i].x, polyPts[i].y);
+        }
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2.2;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Pulse dot on latest Polymarket official price
+        if (lastPolyP) {
+          ctx.beginPath();
+          ctx.arc(lastPolyP.x, lastPolyP.y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(37, 99, 235, 0.22)';
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(lastPolyP.x, lastPolyP.y, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#2563eb';
+          ctx.fill();
+        }
+      }
+
+      // Stroke Curve 2: Binance Spot Price Curve: 开盘价上方用绿，跌到下方用红
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) {
@@ -700,7 +767,7 @@
         ctx.fill();
       }
 
-      // Live Pulse Dot on latest price
+      // Live Pulse Dot on latest Binance spot price
       ctx.beginPath();
       ctx.arc(lastP.x, lastP.y, 6, 0, Math.PI * 2);
       ctx.fillStyle = isAboveOpen ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
@@ -711,26 +778,59 @@
       ctx.fillStyle = priceColor;
       ctx.fill();
 
-      // Right tag pill: 开盘价上方用绿，跌到下方用红
-      const tagW = 122;
-      const tagH = 22;
+      // Right tag pills with Anti-Collision Logic
+      const tagW = 126;
+      const tagH = 20;
       const tagX = padLeft + plotW + 8;
-      const tagY = Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastP.y - tagH / 2));
 
+      let tagY_binance = Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastP.y - tagH / 2));
+      let tagY_poly = lastPolyP ? Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastPolyP.y - tagH / 2)) : null;
+
+      if (tagY_poly !== null) {
+        const gap = tagH + 4; // 24px vertical separation
+        const diff = tagY_binance - tagY_poly;
+        if (Math.abs(diff) < gap) {
+          const shift = (gap - Math.abs(diff)) / 2;
+          if (diff >= 0) {
+            tagY_binance = Math.min(t1Top + t1H - tagH, tagY_binance + shift);
+            tagY_poly = Math.max(t1Top, tagY_poly - shift);
+          } else {
+            tagY_binance = Math.max(t1Top, tagY_binance - shift);
+            tagY_poly = Math.min(t1Top + t1H - tagH, tagY_poly + shift);
+          }
+        }
+      }
+
+      // Draw Binance Tag Pill
       ctx.fillStyle = priceColor;
       if (ctx.roundRect) {
         ctx.beginPath();
-        ctx.roundRect(tagX, tagY, tagW, tagH, 4);
+        ctx.roundRect(tagX, tagY_binance, tagW, tagH, 4);
         ctx.fill();
       } else {
-        ctx.fillRect(tagX, tagY, tagW, tagH);
+        ctx.fillRect(tagX, tagY_binance, tagW, tagH);
       }
-
       ctx.fillStyle = '#ffffff';
-      ctx.font = '600 11px monospace';
+      ctx.font = '600 10.5px monospace';
       ctx.textAlign = 'center';
       const bpsSign = lastP.bps >= 0 ? '+' : '';
-      ctx.fillText(`$${lastP.price.toFixed(2)} (${bpsSign}${lastP.bps.toFixed(1)})`, tagX + tagW / 2, tagY + 15);
+      ctx.fillText(`币安 $${lastP.price.toFixed(2)} (${bpsSign}${lastP.bps.toFixed(1)})`, tagX + tagW / 2, tagY_binance + 14);
+
+      // Draw Polymarket Official Tag Pill (if available)
+      if (lastPolyP && tagY_poly !== null) {
+        ctx.fillStyle = '#2563eb';
+        if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(tagX, tagY_poly, tagW, tagH, 4);
+          ctx.fill();
+        } else {
+          ctx.fillRect(tagX, tagY_poly, tagW, tagH);
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '600 10.5px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Poly $${lastPolyP.price.toFixed(2)}`, tagX + tagW / 2, tagY_poly + 14);
+      }
     }
 
     // 3. Render Dual Probability Track: Market Implied Probability vs Model Theoretical Probability

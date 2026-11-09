@@ -155,7 +155,8 @@ class PipelineDriver:
                         spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
                         open_px = spot_initial.price
                     
-                    self.runner.start_window(slug, start_t, end_t, open_px)
+                    poly_spot_init = self.feed.get_polymarket_btc_price(start_t)
+                    self.runner.start_window(slug, start_t, end_t, open_px, poly_spot=poly_spot_init)
                     last_slug = slug
                     last_start_t = start_t
                     tokens_label = f"UP={active_tokens.get('token_up', 'Pending')[:10]}..." if active_tokens.get('token_up') else "Pending"
@@ -199,10 +200,13 @@ class PipelineDriver:
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
 
+                    poly_spot = self.feed.get_polymarket_btc_price(start_t)
+
                     self.runner.step(
                         loop_start, spot, b_up, b_dn,
                         net_stats=self.feed.get_net_summary(),
-                        trade_prints=trades
+                        trade_prints=trades,
+                        poly_spot=poly_spot
                     )
 
                     # Formatted terminal status line

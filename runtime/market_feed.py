@@ -37,6 +37,11 @@ class MarketFeed:
         self.slug_cache = {}
         self.spot_history = deque(maxlen=60)  # (timestamp, price) history for velocity & volatility
 
+        # Polymarket official real-time Chainlink price cache & poller state
+        self._last_poly_btc = None
+        self._last_poly_poll_t = 0.0
+        self._poly_btc_poller_active = False
+
         # Real-time network speed, latency, and traffic accounting
         self.net_stats = {
             "poly_latency_ms": 0.0,
@@ -240,6 +245,37 @@ class MarketFeed:
         except Exception:
             pass
         return None
+
+    def get_polymarket_btc_price(self, start_t: float) -> Optional[float]:
+        """Fetch Polymarket official real-time Chainlink BTC/USD price asynchronously."""
+        now = time.time()
+        if not getattr(self, "_poly_btc_poller_active", False) and (now - getattr(self, "_last_poly_poll_t", 0.0) >= 1.8):
+            self._poly_btc_poller_active = True
+            import threading
+            def _worker():
+                try:
+                    iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                    url = "https://polymarket.com/api/crypto/crypto-price"
+                    params = {"symbol": "BTC", "eventStartTime": iso_start}
+                    resp = self.session.get(url, params=params, timeout=3.0)
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        px = body.get("closePrice") or body.get("openPrice")
+                        if px and float(px) > 0:
+                            self._last_poly_btc = float(px)
+                            self.record_raw_event("oracle", {
+                                "t": time.time(), "kind": "poly_spot", "price": self._last_poly_btc, "start_t": start_t
+                            })
+                except Exception:
+                    pass
+                finally:
+                    self._last_poly_poll_t = time.time()
+                    self._poly_btc_poller_active = False
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+
+        return getattr(self, "_last_poly_btc", None)
 
     def fetch_spot_state(self, open_price: float, now: float = None) -> SpotState:
         """Fetch current Binance BTC spot, compute 3s velocity, return bps, and rolling volatility."""

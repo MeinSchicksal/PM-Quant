@@ -914,6 +914,17 @@ body {
   font-weight: 700;
 }
 
+.poly-tag {
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.basis-tag {
+  color: #64748b;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
 .chart-stat-item strong.down {
   color: var(--down);
 }

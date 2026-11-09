@@ -64,13 +64,14 @@ class PaperRunner:
         except Exception:
             pass
 
-    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float):
+    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float, poly_spot: float = None):
         """Initialize fresh 5-minute session."""
         self.current_slug = slug
         self.window_start = start_t
         self.window_end = end_t
         self.open_price = open_px
         self.last_spot_price = open_px
+        self.last_poly_spot = poly_spot
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
@@ -80,7 +81,7 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
-            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0, "prob_up": 0.5, "poly_up": 0.5, "poly_down": 0.5}
+            {"t": round(start_t, 1), "price": round(open_px, 2), "poly_price": round(poly_spot, 2) if poly_spot else None, "return_bps": 0.0, "prob_up": 0.5, "poly_up": 0.5, "poly_down": 0.5}
         ] if open_px > 0 else []
         self.last_prob_up = 0.5
         self.last_poly_up = 0.5
@@ -102,7 +103,8 @@ class PaperRunner:
         book_up: OrderBook,
         book_down: OrderBook,
         net_stats: dict = None,
-        trade_prints: list = None
+        trade_prints: list = None,
+        poly_spot: float = None
     ):
         """Execute one evaluation tick with circuit breaker, Kelly sizing, and live trade prints."""
         tau = max(0.0, self.window_end - now)
@@ -116,11 +118,15 @@ class PaperRunner:
         self.last_poly_up = poly_up
         self.last_poly_down = poly_down
 
+        if poly_spot is not None and poly_spot > 0:
+            self.last_poly_spot = poly_spot
+
         self.last_spot_price = spot.price
         if spot.price > 0:
             self.price_history.append({
                 "t": round(now, 1),
                 "price": round(spot.price, 2),
+                "poly_price": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
                 "return_bps": round(spot.return_bps, 2),
                 "prob_up": round(p_fair, 4),
                 "poly_up": round(poly_up, 4),
@@ -330,6 +336,7 @@ class PaperRunner:
             "now": round(now, 2),
             "tau_s": max(0.0, round(self.window_end - now, 1)),
             "spot": spot.price,
+            "poly_spot": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
             "open_px": getattr(self, "open_price", 0.0),
             "return_bps": round(spot.return_bps, 2),
             "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
