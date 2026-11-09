@@ -48,7 +48,8 @@ class TestInvestorDashboard(unittest.TestCase):
         detail = {"decisions": [{"reason": "U_hedge > U_hold"}], "fills": []}
         result = _public_round(record, detail)
         self.assertEqual(result["result"], "win")
-        self.assertNotIn("open_px", result)
+        self.assertEqual(result["open_px"], 75000.0)
+        self.assertEqual(result["close_px"], 75100.0)
         self.assertNotIn("decisions", result)
         self.assertNotIn("reason", result)
 
