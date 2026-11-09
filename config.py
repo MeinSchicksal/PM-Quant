@@ -1,14 +1,13 @@
 """PM-Quant Configuration & Single Source of Truth.
 
-All model parameters, batch identity, and filesystem layout are derived here.
+All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
 """
 from pathlib import Path
 
-# Batch & Revision Identity
-VERSION = "v1"
-REVISION = 1
-BATCH_ID = f"{VERSION}_r{REVISION}"
+# Semantic Version Identity (v<Major>.<Minor>)
+VERSION = "v1.0"
+BATCH_ID = VERSION
 
 # Root Directory
 ROOT = Path(__file__).resolve().parent
@@ -19,16 +18,16 @@ PARAMS = {
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MAX_LOTS": 2,                    # Maximum entry lots (2 lots = 10 shares, ~4 to 7 USD exposure)
     "LATENCY_S": 0.30,                # Estimated round-trip wire + engine order insertion delay
-    
+
     # 2. Probability Estimation & Margin of Safety
     "BASE_EDGE": 0.025,               # Minimum price edge demanded over uncertainty band (2.5 ticks)
     "UNCERTAINTY_K": 1.2,             # Scaling multiplier for real-time uncertainty bandwidth
-    
+
     # 3. Inventory & Utility Arbitration
     "RISK_AVERSION_GAMMA": 0.15,      # Avellaneda-Stoikov risk aversion factor for inventory penalty
     "MAX_QUEUE_WAIT_S": 15.0,         # Maximum acceptable passive queue waiting time based on trade rate
     "TOXICITY_SHOCK_BPS": 3.5,        # 3-second rapid price shock threshold indicating informed toxicity
-    
+
     # 4. Lifecycle & Catastrophic Boundaries
     "TAIL_FREEZE_S": 60.0,            # Seconds before expiration where new leg-1 entries are disabled
     "MAX_WINDOW_LOSS_USD": 2.00,      # Hard bounded catastrophic drawdown envelope per window
@@ -38,7 +37,7 @@ PARAMS = {
 DATA_DIR = ROOT / "data"
 MARKET_DIR = DATA_DIR / "1_market"
 LEDGERS_DIR = DATA_DIR / "2_ledgers"
-CURRENT_LEDGER_DIR = LEDGERS_DIR / BATCH_ID
+CURRENT_LEDGER_DIR = LEDGERS_DIR / VERSION
 REPORTS_DIR = DATA_DIR / "3_reports"
 RUNTIME_DIR = DATA_DIR / "4_runtime"
 LOGS_DIR = RUNTIME_DIR / "logs"

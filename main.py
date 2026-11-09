@@ -3,13 +3,12 @@
 Usage:
   python main.py run       - Start continuous live paper trading pipeline
   python main.py web [p]   - Start web dashboard server (default port: 8900)
-  python main.py test      - Run all mathematical invariant unit tests
-  python main.py replay    - Run offline scenario simulation benchmark
-  python main.py seal      - Seal current batch with code snapshot & manifest
-  python main.py status    - Show current batch identity and parameters
+  python main.py test      - Run all mathematical & dashboard unit tests
+  python main.py replay    - Replay recorded historical market streams
+  python main.py seal      - Seal current version with code snapshot & manifest
+  python main.py status    - Show current version identity and parameters
 """
 import sys
-import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -40,8 +39,8 @@ def cmd_test():
 
 
 def cmd_replay():
-    from sim.replay import run_synthetic_benchmarks
-    run_synthetic_benchmarks()
+    from sim.replay import run_replay
+    run_replay()
 
 
 def cmd_seal():
@@ -50,12 +49,10 @@ def cmd_seal():
 
 
 def cmd_status():
-    print(f"=== PM-Quant Status ===")
+    print("=== PM-Quant Status ===")
     print(f"Version:      {config.VERSION}")
-    print(f"Revision:     {config.REVISION}")
-    print(f"Batch ID:     {config.BATCH_ID}")
     print(f"Ledger Path:  {config.CURRENT_LEDGER_DIR}")
-    print(f"\nCore Mathematical & Economic Parameters (Strictly 10):")
+    print("\nCore Mathematical & Economic Parameters (Strictly 10):")
     for k, v in config.PARAMS.items():
         print(f"  {k:22s}: {v}")
 

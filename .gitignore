@@ -19,4 +19,5 @@ data/2_ledgers/*/summary.jsonl
 venv/
 .idea/
 .vscode/
+.workbuddy/
 .DS_Store

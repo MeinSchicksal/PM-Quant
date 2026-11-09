@@ -1,11 +1,10 @@
-"""PM-Quant Supervisor & Process Management.
+"""PM-Quant Supervisor & Version Sealing.
 
-Manages background services, health monitoring, PID tracking, and revision sealing.
+Manages background services, health monitoring, PID tracking, and version sealing.
 """
 import sys
 import json
 import time
-import subprocess
 import zipfile
 from pathlib import Path
 
@@ -28,28 +27,28 @@ def get_status() -> dict:
 
 
 def seal_batch():
-    """Seal current revision: package code snapshot, generate manifest.json, set to sealed."""
+    """Seal current version: package code snapshot, generate manifest.json."""
     ledger = config.CURRENT_LEDGER_DIR
     ledger.mkdir(parents=True, exist_ok=True)
-    
+
     # 1. Zip snapshot of core/ and config.py
     snapshot_zip = ledger / "code_snapshot.zip"
     with zipfile.ZipFile(snapshot_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(config.ROOT / "config.py", "config.py")
         for f in (config.ROOT / "core").glob("*.py"):
             zf.write(f, f"core/{f.name}")
-            
+
     # 2. Write manifest.json
     manifest = {
-        "batch_id": config.BATCH_ID,
         "version": config.VERSION,
-        "revision": config.REVISION,
         "sealed_at": time.time(),
         "params": config.PARAMS,
-        "code_snapshot": str(snapshot_zip.relative_to(config.ROOT))
+        "code_snapshot": str(snapshot_zip.relative_to(config.ROOT)),
     }
-    (ledger / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Batch {config.BATCH_ID} successfully sealed and archived.")
+    (ledger / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"Version {config.VERSION} successfully sealed and archived.")
 
 
 def main():
@@ -58,7 +57,7 @@ def main():
         seal_batch()
     elif cmd == "status":
         st = get_status()
-        print(f"PM-Quant Status ({config.BATCH_ID}):")
+        print(f"PM-Quant Status ({config.VERSION}):")
         if not st:
             print("  No active services registered.")
         else:
