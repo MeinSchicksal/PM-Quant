@@ -490,13 +490,12 @@
     const statRange = document.getElementById('chart-stat-range');
     if (statRange) statRange.textContent = `${rangeBps} bps`;
 
-    // Polymarket live orderbook mid price (Implied Probability)
+    // Polymarket live orderbook mid price (Implied Probability) vs Model Theoretical Probability
     const bUp = live.book_up || {};
     const bDn = live.book_down || {};
     const lastHistoryPt = history[history.length - 1];
 
     let livePolyUp = 0.5;
-    let livePolyDn = 0.5;
     if (bUp.best_bid !== null && bUp.best_bid !== undefined && bUp.best_ask !== null && bUp.best_ask !== undefined) {
       livePolyUp = (Number(bUp.best_bid) + Number(bUp.best_ask)) / 2.0;
     } else if (live.poly_up !== undefined) {
@@ -505,31 +504,31 @@
       livePolyUp = lastHistoryPt.poly_up;
     }
 
-    if (bDn.best_bid !== null && bDn.best_bid !== undefined && bDn.best_ask !== null && bDn.best_ask !== undefined) {
-      livePolyDn = (Number(bDn.best_bid) + Number(bDn.best_ask)) / 2.0;
-    } else if (live.poly_down !== undefined) {
-      livePolyDn = live.poly_down;
-    } else {
-      livePolyDn = Math.max(0.01, 1.0 - livePolyUp);
-    }
-
-    const pctPolyUp = (livePolyUp * 100).toFixed(1);
-    const pctPolyDn = (livePolyDn * 100).toFixed(1);
-    const modelProbVal = (live.prob_up !== undefined) ? (live.prob_up * 100).toFixed(1) : '--';
+    const curModelUp = (live.prob_up !== undefined) ? live.prob_up : (lastHistoryPt && lastHistoryPt.prob_up !== undefined ? lastHistoryPt.prob_up : 0.5);
+    const edgeVal = (curModelUp - livePolyUp) * 100.0;
 
     const statProbUp = document.getElementById('chart-stat-prob-up');
-    const statProbDn = document.getElementById('chart-stat-prob-dn');
     const statProbModel = document.getElementById('chart-stat-prob-model');
+    const statEdge = document.getElementById('chart-stat-edge');
+
     if (statProbUp) {
-      statProbUp.textContent = `UP ${pctPolyUp}% ($${livePolyUp.toFixed(2)})`;
+      statProbUp.textContent = `UP ${(livePolyUp * 100).toFixed(1)}% ($${livePolyUp.toFixed(2)})`;
       statProbUp.style.color = COLOR_UP; // 绿色
     }
-    if (statProbDn) {
-      statProbDn.textContent = `DN ${pctPolyDn}% ($${livePolyDn.toFixed(2)})`;
-      statProbDn.style.color = COLOR_DOWN; // 红色
-    }
     if (statProbModel) {
-      statProbModel.textContent = `${modelProbVal}%`;
+      statProbModel.textContent = `${(curModelUp * 100).toFixed(1)}%`;
+      statProbModel.style.color = '#8b5cf6'; // 紫色
+    }
+    if (statEdge) {
+      const edgeSign = edgeVal > 0 ? '+' : '';
+      statEdge.textContent = `${edgeSign}${edgeVal.toFixed(1)}%`;
+      if (edgeVal > 1.0) {
+        statEdge.style.color = COLOR_UP; // 绿色 (做多 UP 优势)
+      } else if (edgeVal < -1.0) {
+        statEdge.style.color = COLOR_DOWN; // 红色 (做多 DOWN 优势)
+      } else {
+        statEdge.style.color = '#6b7280';
+      }
     }
 
     // Coordinates setup
@@ -734,15 +733,8 @@
       ctx.fillText(`$${lastP.price.toFixed(2)} (${bpsSign}${lastP.bps.toFixed(1)})`, tagX + tagW / 2, tagY + 15);
     }
 
-    // 3. Render Polymarket Orderbook Implied Probability Track (if dual or prob)
+    // 3. Render Dual Probability Track: Market Implied Probability vs Model Theoretical Probability
     if (mode === 'dual' || mode === 'prob') {
-      // Track Title Label
-      ctx.fillStyle = '#64748b';
-      ctx.font = '600 11px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText('Polymarket 真实盘口价格 / 市场概率走势 (UP 绿 / DOWN 红)', padLeft + 6, t2Top + 12);
-
-      // Prob Mapping: 0.0 to 1.0 -> y
       const probToY = (p) => t2Top + t2H - Math.max(0.0, Math.min(1.0, p)) * t2H;
 
       // 50% Baseline (Dashed)
@@ -757,135 +749,171 @@
       ctx.stroke();
       ctx.restore();
 
-      // 50% text on right
+      // Right axis labels
       ctx.fillStyle = '#94a3b8';
       ctx.textAlign = 'left';
       ctx.font = '10px monospace';
-      ctx.fillText('50% ($0.50)', padLeft + plotW + 8, baseProbY + 3);
+      ctx.fillText('50% 平衡线', padLeft + plotW + 8, baseProbY + 3);
+      ctx.fillText('100%', padLeft + plotW + 8, t2Top + 8);
+      ctx.fillText('0%', padLeft + plotW + 8, t2Top + t2H);
 
-      // 100% and 0% edge markings
-      ctx.fillText('100% ($1.0)', padLeft + plotW + 8, t2Top + 8);
-      ctx.fillText('0% ($0.0)', padLeft + plotW + 8, t2Top + t2H);
-
-      // Build points for Polymarket UP and DOWN token prices
-      const upPts = [];
-      const dnPts = [];
-      const modelPts = [];
-
-      history.forEach(pt => {
-        const u = pt.poly_up !== undefined ? pt.poly_up : (pt.prob_up !== undefined ? pt.prob_up : 0.5);
-        const d = pt.poly_down !== undefined ? pt.poly_down : Math.max(0.01, 1.0 - u);
-        const m = pt.prob_up !== undefined ? pt.prob_up : 0.5;
-        const x = timeToX(pt.t);
-        upPts.push({ x, y: probToY(u), val: u });
-        dnPts.push({ x, y: probToY(d), val: d });
-        modelPts.push({ x, y: probToY(m), val: m });
-      });
-
-      const lastUp = upPts[upPts.length - 1];
-      const lastDn = dnPts[dnPts.length - 1];
-
-      // Draw Model Theoretical Fair Value as subtle dashed guide line
-      if (modelPts.length > 1) {
+      if (mode === 'prob') {
+        const y75 = probToY(0.75);
+        const y25 = probToY(0.25);
         ctx.save();
-        ctx.setLineDash([2, 3]);
-        ctx.strokeStyle = 'rgba(139, 92, 246, 0.45)'; // subtle purple
-        ctx.lineWidth = 1.2;
+        ctx.setLineDash([2, 4]);
+        ctx.strokeStyle = '#e2e8f0';
         ctx.beginPath();
-        ctx.moveTo(modelPts[0].x, modelPts[0].y);
-        for (let i = 1; i < modelPts.length; i++) {
-          ctx.lineTo(modelPts[i].x, modelPts[i].y);
-        }
+        ctx.moveTo(padLeft, y75); ctx.lineTo(padLeft + plotW, y75);
+        ctx.moveTo(padLeft, y25); ctx.lineTo(padLeft + plotW, y25);
         ctx.stroke();
         ctx.restore();
+        ctx.fillText('75%', padLeft + plotW + 8, y75 + 3);
+        ctx.fillText('25%', padLeft + plotW + 8, y25 + 3);
       }
 
-      // Draw UP Curve (Green: #05b169)
-      if (upPts.length > 1) {
+      // Track Title & Interactive Legend in top-left
+      const COLOR_MARKET = COLOR_UP; // 绿色 (#05b169)
+      const COLOR_MODEL = '#8b5cf6';  // 紫色 (#8b5cf6)
+
+      ctx.font = '600 11px sans-serif';
+      ctx.textAlign = 'left';
+
+      ctx.fillStyle = '#4b5563';
+      ctx.fillText('胜率与定价走势对比:', padLeft + 6, t2Top + 12);
+
+      // Legend 1: 市场盘口
+      ctx.fillStyle = COLOR_MARKET;
+      ctx.fillRect(padLeft + 120, t2Top + 7, 10, 3);
+      ctx.fillText('市场盘口概率 (Polymarket)', padLeft + 134, t2Top + 12);
+
+      // Legend 2: 模型理论
+      ctx.fillStyle = COLOR_MODEL;
+      ctx.fillRect(padLeft + 280, t2Top + 7, 10, 3);
+      ctx.fillText('模型理论公允胜率', padLeft + 294, t2Top + 12);
+
+      // Extract points
+      const pts = history.map(pt => {
+        const pMarket = pt.poly_up !== undefined ? pt.poly_up : (pt.price >= openPx ? 0.6 : 0.4);
+        const pModel = pt.prob_up !== undefined ? pt.prob_up : 0.5;
+        const x = timeToX(pt.t);
+        return {
+          x,
+          yMarket: probToY(pMarket),
+          yModel: probToY(pModel),
+          pMarket,
+          pModel,
+          t: pt.t
+        };
+      });
+
+      if (pts.length > 1) {
+        // 1. Shading the Edge / Arbitrage Spread between Model and Market curves
+        ctx.save();
         ctx.beginPath();
-        ctx.moveTo(upPts[0].x, upPts[0].y);
-        for (let i = 1; i < upPts.length; i++) {
-          ctx.lineTo(upPts[i].x, upPts[i].y);
+        ctx.moveTo(pts[0].x, pts[0].yModel);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].yModel);
         }
-        ctx.strokeStyle = COLOR_UP;
-        ctx.lineWidth = 2.0;
+        for (let i = pts.length - 1; i >= 0; i--) {
+          ctx.lineTo(pts[i].x, pts[i].yMarket);
+        }
+        ctx.closePath();
+        ctx.fillStyle = curModelUp >= livePolyUp ? 'rgba(5, 177, 105, 0.12)' : 'rgba(139, 92, 246, 0.12)';
+        ctx.fill();
+        ctx.restore();
+
+        // 2. Stroke Curve 1: 市场盘口概率 (绿色实线)
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].yMarket);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].yMarket);
+        }
+        ctx.strokeStyle = COLOR_MARKET;
+        ctx.lineWidth = 2.2;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
         ctx.stroke();
-      }
 
-      // Draw DOWN Curve (Red: #cf202f)
-      if (dnPts.length > 1) {
+        // 3. Stroke Curve 2: 模型理论概率 (紫色实线)
         ctx.beginPath();
-        ctx.moveTo(dnPts[0].x, dnPts[0].y);
-        for (let i = 1; i < dnPts.length; i++) {
-          ctx.lineTo(dnPts[i].x, dnPts[i].y);
+        ctx.moveTo(pts[0].x, pts[0].yModel);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].yModel);
         }
-        ctx.strokeStyle = COLOR_DOWN;
-        ctx.lineWidth = 2.0;
+        ctx.strokeStyle = COLOR_MODEL;
+        ctx.lineWidth = 2.2;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
         ctx.stroke();
-      }
 
-      // Live Pulse Dots on latest points
-      // UP Dot
-      ctx.beginPath();
-      ctx.arc(lastUp.x, lastUp.y, 5, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(5, 177, 105, 0.25)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(lastUp.x, lastUp.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = COLOR_UP;
-      ctx.fill();
+        const lastP = pts[pts.length - 1];
 
-      // DOWN Dot
-      ctx.beginPath();
-      ctx.arc(lastDn.x, lastDn.y, 5, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(207, 32, 47, 0.25)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(lastDn.x, lastDn.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = COLOR_DOWN;
-      ctx.fill();
-
-      // Right Tag Pills for UP and DOWN
-      const probTagW = 110;
-      const probTagH = 18;
-      const probTagX = padLeft + plotW + 8;
-
-      // Position UP tag near lastUp.y
-      const upTagY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastUp.y - probTagH / 2));
-      ctx.fillStyle = COLOR_UP;
-      if (ctx.roundRect) {
+        // 4. Live Pulse Dots on latest points
+        // Market dot (Green)
         ctx.beginPath();
-        ctx.roundRect(probTagX, upTagY, probTagW, probTagH, 3);
+        ctx.arc(lastP.x, lastP.yMarket, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(5, 177, 105, 0.25)';
         ctx.fill();
-      } else {
-        ctx.fillRect(probTagX, upTagY, probTagW, probTagH);
-      }
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(`UP ${pctPolyUp}% ($${livePolyUp.toFixed(2)})`, probTagX + probTagW / 2, upTagY + 13);
-
-      // Position DOWN tag near lastDn.y (offset if overlapping)
-      let dnTagY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastDn.y - probTagH / 2));
-      if (Math.abs(dnTagY - upTagY) < (probTagH + 3)) {
-        dnTagY = upTagY > (t2Top + t2H / 2) ? (upTagY - probTagH - 4) : (upTagY + probTagH + 4);
-      }
-      ctx.fillStyle = COLOR_DOWN;
-      if (ctx.roundRect) {
         ctx.beginPath();
-        ctx.roundRect(probTagX, dnTagY, probTagW, probTagH, 3);
+        ctx.arc(lastP.x, lastP.yMarket, 3, 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_MARKET;
         ctx.fill();
-      } else {
-        ctx.fillRect(probTagX, dnTagY, probTagW, probTagH);
+
+        // Model dot (Purple)
+        ctx.beginPath();
+        ctx.arc(lastP.x, lastP.yModel, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(139, 92, 246, 0.25)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(lastP.x, lastP.yModel, 3, 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_MODEL;
+        ctx.fill();
+
+        // 5. Right Tag Pills (Intelligently unstacked to prevent overlap)
+        const probTagW = 100;
+        const probTagH = 18;
+        const probTagX = padLeft + plotW + 8;
+
+        let tagMarketY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastP.yMarket - probTagH / 2));
+        let tagModelY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastP.yModel - probTagH / 2));
+
+        if (Math.abs(tagMarketY - tagModelY) < (probTagH + 3)) {
+          if (tagModelY >= tagMarketY) {
+            tagModelY = Math.min(t2Top + t2H - probTagH, tagMarketY + probTagH + 3);
+          } else {
+            tagModelY = Math.max(t2Top, tagMarketY - probTagH - 3);
+          }
+        }
+
+        // Draw Market Tag (Green)
+        ctx.fillStyle = COLOR_MARKET;
+        if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(probTagX, tagMarketY, probTagW, probTagH, 3);
+          ctx.fill();
+        } else {
+          ctx.fillRect(probTagX, tagMarketY, probTagW, probTagH);
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`盘口 ${(livePolyUp * 100).toFixed(1)}%`, probTagX + probTagW / 2, tagMarketY + 13);
+
+        // Draw Model Tag (Purple)
+        ctx.fillStyle = COLOR_MODEL;
+        if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(probTagX, tagModelY, probTagW, probTagH, 3);
+          ctx.fill();
+        } else {
+          ctx.fillRect(probTagX, tagModelY, probTagW, probTagH);
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`模型 ${(curModelUp * 100).toFixed(1)}%`, probTagX + probTagW / 2, tagModelY + 13);
       }
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(`DN ${pctPolyDn}% ($${livePolyDn.toFixed(2)})`, probTagX + probTagW / 2, dnTagY + 13);
     }
 
     ctx.restore();

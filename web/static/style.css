@@ -909,6 +909,11 @@ body {
   font-weight: 700;
 }
 
+.prob-tag-model {
+  color: #8b5cf6;
+  font-weight: 700;
+}
+
 .chart-stat-item strong.down {
   color: var(--down);
 }
