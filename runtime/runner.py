@@ -64,8 +64,10 @@ class PaperRunner:
         to_cancel, action = plan_order_actions(self.working_orders, decision, now)
         for o in to_cancel:
             o.cancel_at = now
+            if o in self.working_orders:
+                self.working_orders.remove(o)
             
-        # Taker execution simulation
+        # 1. Taker execution simulation
         if action and action.action in ("taker_hedge", "taker_unwind"):
             sz = action.size or 0.0
             px = action.price or 0.0
@@ -90,7 +92,48 @@ class PaperRunner:
             self.fills.append({
                 "t": round(now, 2), "side": action.side, "price": px, "size": sz, "kind": "taker"
             })
-            
+
+        # 2. Maker quote placement
+        elif action and action.action == "quote":
+            new_order = Order(
+                id=int(now * 1000) % 1000000,
+                client_order_id=f"pm_{int(now * 1000)}",
+                side=action.side,
+                price=action.price,
+                size=action.size,
+                remaining=action.size,
+                filled_size=0.0,
+                placed_at=now,
+                live_at=now + config.PARAMS["LATENCY_S"]
+            )
+            self.working_orders.append(new_order)
+
+        # 3. Maker queue fill evaluation against order books
+        remaining_working = []
+        for o in self.working_orders:
+            if o.live_at is not None and now >= o.live_at:
+                is_filled = False
+                if o.side == "Up" and book_up.best_ask is not None and book_up.best_ask <= o.price:
+                    self.pos_up.shares += o.remaining
+                    self.pos_up.cash += (o.remaining * o.price)
+                    self.fills.append({
+                        "t": round(now, 2), "side": "Up", "price": o.price, "size": o.remaining, "kind": "maker"
+                    })
+                    is_filled = True
+                elif o.side == "Down" and book_down.best_ask is not None and book_down.best_ask <= o.price:
+                    self.pos_down.shares += o.remaining
+                    self.pos_down.cash += (o.remaining * o.price)
+                    self.fills.append({
+                        "t": round(now, 2), "side": "Down", "price": o.price, "size": o.remaining, "kind": "maker"
+                    })
+                    is_filled = True
+
+                if not is_filled:
+                    remaining_working.append(o)
+            else:
+                remaining_working.append(o)
+        self.working_orders = remaining_working
+
         # Update atomic live.json
         self._write_live(now, spot, book_up, book_down)
 

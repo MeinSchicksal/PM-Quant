@@ -65,35 +65,29 @@ D:\pm-quant/
 
 ---
 
-## 4. Operational Commands
+## 4. Operational Commands (Master CLI)
 
-### Run Unit Tests
-```bash
-python -m unittest discover -s tests
-```
+The system provides a unified CLI via `main.py`:
 
-### Run Offline Simulation Benchmark
 ```bash
-python -m sim.replay
-```
+# 1. Start continuous live paper trading loop
+python main.py run
 
-### Start Web Monitoring Dashboard
-```bash
-python web/server.py 8900
-```
-Open browser at: `http://localhost:8900`
+# 2. Start Coinbase-style web monitoring dashboard
+python main.py web 8900
 
-### Start Market Data Collector
-```bash
-python runtime/collector.py
-```
+# 3. Run mathematical invariant unit tests
+python main.py test
 
-### Seal Current Revision Batch
-When completing a batch (e.g. `v1_r1`), seal the ledger with code snapshot and manifest:
-```bash
-python runtime/supervisor.py seal
+# 4. Run offline scenario simulation benchmark
+python main.py replay
+
+# 5. Seal current batch with code snapshot & manifest
+python main.py seal
+
+# 6. Show current batch identity and parameter list
+python main.py status
 ```
-This generates `data/2_ledgers/<BATCH_ID>/manifest.json` and `code_snapshot.zip`.
 
 ---
 
