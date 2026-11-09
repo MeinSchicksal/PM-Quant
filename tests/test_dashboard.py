@@ -61,6 +61,74 @@ class TestInvestorDashboard(unittest.TestCase):
         self.assertEqual(result["result"], "pending")
         self.assertIsNone(result["net_pnl"])
 
+    def test_reconcile_record_synchronizes_summary_and_window_gz(self):
+        import tempfile
+        import shutil
+        import gzip
+        import json
+        from runtime.runner import PaperRunner
+
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            summary_f = temp_dir / "summary.jsonl"
+            windows_d = temp_dir / "windows"
+            windows_d.mkdir(parents=True, exist_ok=True)
+
+            slug = "btc-updown-5m-9999999"
+            init_record = {
+                "slug": slug, "start": 9999999.0, "end": 10000299.0,
+                "winner": "Down", "open_px": 75000.0, "close_px": 74900.0,
+                "pos_up": 10.0, "pos_down": 0.0, "total_cost": 5.0,
+                "proceeds": 0.0, "net_pnl": -5.0, "traded": True, "result": "loss"
+            }
+            summary_f.write_text(json.dumps(init_record) + "\n", encoding="utf-8")
+            with gzip.open(windows_d / f"{slug}.json.gz", "wt", encoding="utf-8") as gz:
+                json.dump(init_record, gz)
+
+            runner = PaperRunner(ledger_dir=temp_dir)
+            # Reconcile with official truth: Up won, open 74800 -> close 74950
+            runner.reconcile_record(slug, 74800.0, 74950.0, "Up")
+
+            # Verify summary.jsonl updated
+            updated_sum = json.loads(summary_f.read_text(encoding="utf-8").strip())
+            self.assertEqual(updated_sum["open_px"], 74800.0)
+            self.assertEqual(updated_sum["close_px"], 74950.0)
+            self.assertEqual(updated_sum["winner"], "Up")
+            self.assertEqual(updated_sum["proceeds"], 10.0)
+            self.assertEqual(updated_sum["net_pnl"], 5.0)
+            self.assertEqual(updated_sum["result"], "win")
+
+            # Verify windows/<slug>.json.gz updated
+            with gzip.open(windows_d / f"{slug}.json.gz", "rt", encoding="utf-8") as gz:
+                updated_gz = json.load(gz)
+            self.assertEqual(updated_gz["open_px"], 74800.0)
+            self.assertEqual(updated_gz["close_px"], 74950.0)
+            self.assertEqual(updated_gz["winner"], "Up")
+            self.assertEqual(updated_gz["net_pnl"], 5.0)
+            self.assertEqual(updated_gz["result"], "win")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_update_open_price_dynamically_calibrates(self):
+        import tempfile
+        import shutil
+        from runtime.runner import PaperRunner
+
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            runner = PaperRunner(ledger_dir=temp_dir)
+            runner.start_window("test-slug", 1000.0, 1300.0, open_px=75100.0, binance_open_px=75100.0)
+            self.assertTrue(runner.poly_open_is_provisional)
+            self.assertEqual(runner.open_price, 75100.0)
+
+            # Official TWAP arrives
+            runner.update_open_price(74950.0)
+            self.assertFalse(runner.poly_open_is_provisional)
+            self.assertEqual(runner.open_price, 74950.0)
+            self.assertEqual(runner.price_history[0]["poly_price"], 74950.0)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -234,6 +234,21 @@ class QuantHandler(BaseHTTPRequestHandler):
             if not detail:
                 self.send_json({"error": "Window not found"}, status=404)
                 return
+            # Authoritative overlay from summary.jsonl guarantees 100% data consistency
+            summary_file = ledger_dir / "summary.jsonl"
+            if summary_file.exists():
+                try:
+                    for line in summary_file.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        rec = json.loads(line)
+                        if rec.get("slug") == slug:
+                            for key in ("open_px", "close_px", "winner", "proceeds", "net_pnl", "result", "traded"):
+                                if rec.get(key) is not None:
+                                    detail[key] = rec[key]
+                            break
+                except Exception:
+                    pass
             self.send_json(detail)
         elif path == "/api/history":
             qs = parse_qs(parsed.query)

@@ -23,8 +23,8 @@ from sim.matcher import QueueMatcher
 
 
 class PaperRunner:
-    def __init__(self):
-        self.ledger_dir = config.CURRENT_LEDGER_DIR
+    def __init__(self, ledger_dir=None):
+        self.ledger_dir = Path(ledger_dir) if ledger_dir else config.CURRENT_LEDGER_DIR
         self.summary_file = self.ledger_dir / "summary.jsonl"
         self.live_file = self.ledger_dir / "live.json"
         self.windows_dir = self.ledger_dir / "windows"
@@ -73,6 +73,7 @@ class PaperRunner:
         self.binance_open_price = binance_open_px or open_px
         self.last_spot_price = self.binance_open_price
         self.last_poly_spot = poly_spot or open_px
+        self.poly_open_is_provisional = (open_px == self.binance_open_price and open_px > 0)
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
@@ -97,6 +98,16 @@ class PaperRunner:
         self.last_poly_up = 0.5
         self.last_poly_down = 0.5
 
+    def update_open_price(self, poly_open: float):
+        """Update provisional open price once Polymarket official TWAP finishes computing."""
+        if poly_open <= 0 or abs(self.open_price - poly_open) < 0.001:
+            return
+        self.open_price = poly_open
+        self.poly_open_is_provisional = False
+        if self.price_history:
+            self.price_history[0]["poly_price"] = round(poly_open, 2)
+            self.price_history[0]["poly_return_bps"] = 0.0
+
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
         fill = {
@@ -120,18 +131,29 @@ class PaperRunner:
         tau = max(0.0, self.window_end - now)
         open_px = getattr(self, "open_price", 0.0)
         vol_bps = getattr(spot, "realized_vol_bps", 15.0)
-        p_fair = estimate_fair_prob(spot.price, open_px, tau, vol_bps) if (open_px > 0 and spot.price > 0) else 0.5
+
+        if poly_spot is not None and poly_spot > 0:
+            self.last_poly_spot = poly_spot
+
+        self.last_spot_price = spot.price
+
+        # Consistent probability estimation:
+        # If Polymarket official live TWAP is available, evaluate Poly spot vs Poly open strike.
+        # Otherwise evaluate Binance spot vs Binance open baseline.
+        if getattr(self, "last_poly_spot", None) and getattr(self, "last_poly_spot", 0) > 0 and open_px > 0:
+            p_fair = estimate_fair_prob(self.last_poly_spot, open_px, tau, vol_bps)
+        elif spot.price > 0 and getattr(self, "binance_open_price", 0) > 0:
+            p_fair = estimate_fair_prob(spot.price, self.binance_open_price, tau, vol_bps)
+        elif open_px > 0 and spot.price > 0:
+            p_fair = estimate_fair_prob(spot.price, open_px, tau, vol_bps)
+        else:
+            p_fair = 0.5
         self.last_prob_up = p_fair
 
         poly_up = getattr(book_up, "mid", None) or getattr(book_up, "best_bid", None) or getattr(book_up, "best_ask", None) or 0.5
         poly_down = getattr(book_down, "mid", None) or getattr(book_down, "best_bid", None) or getattr(book_down, "best_ask", None) or round(1.0 - poly_up, 4)
         self.last_poly_up = poly_up
         self.last_poly_down = poly_down
-
-        if poly_spot is not None and poly_spot > 0:
-            self.last_poly_spot = poly_spot
-
-        self.last_spot_price = spot.price
 
         # Calculate return bps for Binance relative to binance_open_price
         bin_open = getattr(self, "binance_open_price", 0.0) or open_px
@@ -327,6 +349,7 @@ class PaperRunner:
             return
         lines = self.summary_file.read_text(encoding="utf-8").splitlines()
         updated = []
+        pnl_delta = 0.0
         for line in lines:
             if not line.strip():
                 continue
@@ -340,13 +363,40 @@ class PaperRunner:
                     pos_down = float(r.get("pos_down", 0.0))
                     total_cost = float(r.get("total_cost", 0.0))
                     proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
+                    new_pnl = round(proceeds - total_cost, 4)
+                    old_pnl = float(r.get("net_pnl", 0.0))
                     r["proceeds"] = round(proceeds, 4)
-                    r["net_pnl"] = round(proceeds - total_cost, 4)
-                    r["result"] = "win" if r["net_pnl"] > 1e-4 else ("loss" if r["net_pnl"] < -1e-4 else "flat")
+                    r["net_pnl"] = new_pnl
+                    r["result"] = "win" if new_pnl > 1e-4 else ("loss" if new_pnl < -1e-4 else "flat")
+                    if r.get("traded"):
+                        pnl_delta = new_pnl - old_pnl
                 updated.append(json.dumps(r, ensure_ascii=False))
             except Exception:
                 updated.append(line)
         self.summary_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        if abs(pnl_delta) > 1e-6:
+            self.total_pnl += pnl_delta
+
+        # Also reconcile compressed detailed window archive
+        gz_path = self.windows_dir / f"{slug}.json.gz"
+        if gz_path.exists():
+            try:
+                with gzip.open(gz_path, "rt", encoding="utf-8") as handle:
+                    detail = json.load(handle)
+                detail["open_px"] = round(open_px, 2)
+                detail["close_px"] = round(close_px, 2)
+                detail["winner"] = winner
+                pos_up = float(detail.get("pos_up", 0.0))
+                pos_down = float(detail.get("pos_down", 0.0))
+                total_cost = float(detail.get("total_cost", 0.0))
+                proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
+                detail["proceeds"] = round(proceeds, 4)
+                detail["net_pnl"] = round(proceeds - total_cost, 4)
+                detail["result"] = "win" if detail["net_pnl"] > 1e-4 else ("loss" if detail["net_pnl"] < -1e-4 else "flat")
+                with gzip.open(gz_path, "wt", encoding="utf-8") as handle:
+                    json.dump(detail, handle, ensure_ascii=False)
+            except Exception as e:
+                print(f"[Runner] Failed to reconcile window gz {slug}: {e}")
 
     def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
         state = {

@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import signal
+import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,13 +110,19 @@ class PipelineDriver:
                 if loop_start - last_reconcile_t >= 5.0 and pending_settlements:
                     last_reconcile_t = loop_start
                     for item in list(pending_settlements):
-                        p_slug, p_start = item
+                        p_slug = item["slug"] if isinstance(item, dict) else item[0]
+                        p_start = item["start_t"] if isinstance(item, dict) else item[1]
+                        if isinstance(item, dict):
+                            item["attempts"] = item.get("attempts", 0) + 1
                         official_poly = self.feed.fetch_window_settlement_price(p_start)
                         if official_poly:
                             off_open, off_close, off_winner = official_poly
                             self.runner.reconcile_record(p_slug, off_open, off_close, off_winner)
                             pending_settlements.remove(item)
                             print(f"[Pipeline] Official Chainlink TWAP confirmed for {p_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})\n")
+                        elif isinstance(item, dict) and (item["attempts"] >= 30 or (loop_start - item.get("added_at", loop_start)) > 1800):
+                            print(f"[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts). Dropping.\n")
+                            pending_settlements.remove(item)
 
                 # 1. Check Window Rollover / Expiration
                 if last_slug and last_slug != slug:
@@ -129,11 +136,17 @@ class PipelineDriver:
                         official_winner = poly_winner
                     else:
                         close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                        close_px = close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price)
+                        # Prioritize last sampled Polymarket TWAP over raw Binance spot
+                        close_px = getattr(self.runner, "last_poly_spot", None) or (close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price))
                         official = self.feed.verify_official_settlement(last_slug)
                         official_winner = official.get("winner") if official else None
                         if last_start_t:
-                            pending_settlements.append((last_slug, last_start_t))
+                            pending_settlements.append({
+                                "slug": last_slug,
+                                "start_t": last_start_t,
+                                "attempts": 0,
+                                "added_at": loop_start
+                            })
 
                     self.runner.close_window(close_px, official_winner)
                     res_tag = f"Official truth: {official_winner}" if official_winner else f"Close px: ${close_px:,.2f}"
@@ -176,6 +189,34 @@ class PipelineDriver:
                     active_tokens = self.feed.resolve_tokens(slug)
                     if active_tokens.get("token_up"):
                         self.trade_stream.set_active_targets([slug], [active_tokens.get("token_up"), active_tokens.get("token_down")])
+
+                # 2c. Dynamic In-Window Open Price Calibration (resolves 5-15s TWAP delay)
+                if getattr(self.runner, "poly_open_is_provisional", False):
+                    if loop_start - getattr(self, "_last_open_check_t", 0.0) >= 3.0:
+                        self._last_open_check_t = loop_start
+                        iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                        iso_end = datetime.datetime.fromtimestamp(start_t + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                        try:
+                            poly_resp = self.feed.session.get(
+                                "https://polymarket.com/api/crypto/crypto-price",
+                                params={
+                                    "symbol": "BTC",
+                                    "eventStartTime": iso_start,
+                                    "variant": "fiveminute",
+                                    "endDate": iso_end,
+                                    "twapEnabled": "true",
+                                    "twapLookbackSeconds": "60"
+                                },
+                                timeout=3.0
+                            )
+                            if poly_resp.status_code == 200:
+                                body = poly_resp.json()
+                                official_open = body.get("openPrice")
+                                if official_open and float(official_open) > 0:
+                                    self.runner.update_open_price(float(official_open))
+                                    print(f"\n[Pipeline] Dynamic TWAP open calibrated for {slug}: ${float(official_open):,.2f}")
+                        except Exception:
+                            pass
 
                 # 2c. Cross-round Smooth Overlap: Pre-listen and pre-warm next 5m window at tau <= 30s
                 if tau_s <= 30.0:

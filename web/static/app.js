@@ -279,24 +279,36 @@
       const bj = parseSlugBeijingTime(r.slug, r.start);
       const openPx = r.open_px || 0;
       const closePx = r.close_px || 0;
-      const diff = closePx - openPx;
-      const pct = openPx > 0 ? (diff / openPx) * 100.0 : 0;
-      const diffStr = (diff >= 0 ? '+' : '-') + '$' + Math.abs(diff).toFixed(2);
-      const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
-      const diffCls = diff > 0 ? 'up' : (diff < 0 ? 'down' : '');
+      const isPending = (r.result === 'pending') || (!r.close_px && !r.winner);
+
+      let priceHtml = '';
+      if (isPending) {
+        priceHtml = `
+          <span class="price-open-close">$${openPx > 0 ? openPx.toFixed(2) : '--'} → <span class="winner-pill pending" style="padding: 2px 6px; font-size: 11px;">进行中</span></span>
+          <small class="price-diff-bps" style="color: #64748b;">实时监测中</small>
+        `;
+      } else {
+        const diff = closePx - openPx;
+        const pct = openPx > 0 ? (diff / openPx) * 100.0 : 0;
+        const diffStr = (diff >= 0 ? '+' : '-') + '$' + Math.abs(diff).toFixed(2);
+        const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+        const diffCls = diff > 0 ? 'up' : (diff < 0 ? 'down' : '');
+        priceHtml = `
+          <span class="price-open-close">$${openPx.toFixed(2)} → $${closePx.toFixed(2)}</span>
+          <small class="price-diff-bps ${diffCls}">${diffStr} (${pctStr})</small>
+        `;
+      }
+
       return `
         <tr>
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
-          <td><span class="winner-pill ${winnerCls}">${r.winner || '--'}</span></td>
-          <td>
-            <span class="price-open-close">$${openPx.toFixed(2)} → $${closePx.toFixed(2)}</span>
-            <small class="price-diff-bps ${diffCls}">${diffStr} (${pctStr})</small>
-          </td>
+          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
+          <td>${priceHtml}</td>
           <td>${(r.pos_up || 0).toFixed(1)}</td>
           <td>${(r.pos_down || 0).toFixed(1)}</td>
           <td>$${(r.total_cost || 0).toFixed(2)}</td>
           <td>$${(r.proceeds || 0).toFixed(2)}</td>
-          <td><strong class="${pnlCls}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(3)}</strong></td>
+          <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
           <td>${r.fills_count || 0}</td>
         </tr>
       `;
@@ -1072,13 +1084,15 @@
     const tau = Math.max(0, Math.round(live.tau_s || 0));
     document.getElementById('market-tau').textContent = tau;
 
-    // Spot Price
+    // Spot & TWAP Prices
     const spot = live.spot || 0;
+    const polySpot = live.poly_spot || 0;
     const openPx = live.open_px || 0;
-    const bps = live.return_bps || 0;
+    const displaySpot = polySpot > 0 ? polySpot : spot;
+    const bps = (polySpot > 0 && live.poly_return_bps !== undefined) ? live.poly_return_bps : (live.return_bps || 0);
     const pct = bps / 100.0;
-    document.getElementById('market-spot').textContent = `$${spot.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-    document.getElementById('market-open').textContent = `基准 $${openPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    document.getElementById('market-spot').textContent = `$${displaySpot.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    document.getElementById('market-open').textContent = `Poly基准 $${openPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
 
     const bpsEl = document.getElementById('market-bps');
     bpsEl.textContent = fmtPct(pct);
@@ -1219,24 +1233,36 @@
       const bj = parseSlugBeijingTime(r.slug, r.start);
       const openPx = r.open_px || 0;
       const closePx = r.close_px || 0;
-      const diff = closePx - openPx;
-      const pct = openPx > 0 ? (diff / openPx) * 100.0 : 0;
-      const diffStr = (diff >= 0 ? '+' : '-') + '$' + Math.abs(diff).toFixed(2);
-      const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
-      const diffCls = diff > 0 ? 'up' : (diff < 0 ? 'down' : '');
+      const isPending = (r.result === 'pending') || (!r.close_px && !r.winner);
+
+      let priceHtml = '';
+      if (isPending) {
+        priceHtml = `
+          <span class="price-open-close">$${openPx > 0 ? openPx.toFixed(2) : '--'} → <span class="winner-pill pending" style="padding: 2px 6px; font-size: 11px;">进行中</span></span>
+          <small class="price-diff-bps" style="color: #64748b;">实时监测中</small>
+        `;
+      } else {
+        const diff = closePx - openPx;
+        const pct = openPx > 0 ? (diff / openPx) * 100.0 : 0;
+        const diffStr = (diff >= 0 ? '+' : '-') + '$' + Math.abs(diff).toFixed(2);
+        const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+        const diffCls = diff > 0 ? 'up' : (diff < 0 ? 'down' : '');
+        priceHtml = `
+          <span class="price-open-close">$${openPx.toFixed(2)} → $${closePx.toFixed(2)}</span>
+          <small class="price-diff-bps ${diffCls}">${diffStr} (${pctStr})</small>
+        `;
+      }
+
       return `
         <tr>
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
-          <td><span class="winner-pill ${winnerCls}">${r.winner || '--'}</span></td>
-          <td>
-            <span class="price-open-close">$${openPx.toFixed(2)} → $${closePx.toFixed(2)}</span>
-            <small class="price-diff-bps ${diffCls}">${diffStr} (${pctStr})</small>
-          </td>
+          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
+          <td>${priceHtml}</td>
           <td>${(r.pos_up || 0).toFixed(1)}</td>
           <td>${(r.pos_down || 0).toFixed(1)}</td>
           <td>$${(r.total_cost || 0).toFixed(2)}</td>
           <td>$${(r.proceeds || 0).toFixed(2)}</td>
-          <td><strong class="${pnlCls}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(3)}</strong></td>
+          <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
           <td>${r.fills_count || 0}</td>
           <td>$${(r.insurance_paid || 0).toFixed(2)}</td>
         </tr>
