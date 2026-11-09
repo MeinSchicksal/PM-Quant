@@ -157,6 +157,11 @@
   function updateOverview(hist, live) {
     if (!hist) return;
 
+    const verEl = document.getElementById('page-version');
+    if (verEl && (hist.batch_id || hist.current_batch)) {
+      verEl.textContent = hist.batch_id || hist.current_batch;
+    }
+
     const totalPnl = hist.total_pnl || 0;
     const initialCap = hist.initial_capital || 100.0;
     const turnover = hist.turnover || 0;

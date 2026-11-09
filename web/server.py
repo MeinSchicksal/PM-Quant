@@ -208,6 +208,9 @@ class QuantHandler(BaseHTTPRequestHandler):
 
         if path == "/api/health":
             self.send_json({"status": "ok", "batch_id": config.BATCH_ID, "time": time.time()})
+        elif path == "/api/batches":
+            available = sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")])
+            self.send_json({"batches": available, "current_batch": config.BATCH_ID})
         elif path == "/api/live":
             active = _read_live()
             self.send_json(active or {"status": "idle", "message": "当前没有进行中的轮次"})
@@ -291,6 +294,9 @@ class QuantHandler(BaseHTTPRequestHandler):
             free_capital = round(max(0.0, available_capital - active_cost), 4)
 
             self.send_json({
+                "batch_id": target_batch,
+                "current_batch": config.BATCH_ID,
+                "available_batches": sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")]),
                 "initial_capital": INITIAL_CAPITAL,
                 "available_capital": available_capital,
                 "active_cost": active_cost,
