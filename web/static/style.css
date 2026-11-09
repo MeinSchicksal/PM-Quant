@@ -1,0 +1,273 @@
+/* PM-Quant Institutional Design System (Coinbase Inspired) */
+:root {
+  --page-bg: #f7f7f7;
+  --surface: #ffffff;
+  --surface-strong: #eef0f3;
+  --text-primary: #0a0b0d;
+  --text-secondary: #5b616e;
+  --text-tertiary: #8f96a3;
+  --accent: #0052ff;
+  --accent-soft: rgba(0, 82, 255, 0.08);
+  --up: #05b169;
+  --up-soft: rgba(5, 177, 105, 0.1);
+  --down: #cf202f;
+  --down-soft: rgba(207, 32, 47, 0.1);
+  --border-subtle: #dee1e6;
+  --border-light: #eef0f3;
+
+  --radius-surface: 16px;
+  --radius-inner: 10px;
+  --radius-pill: 100px;
+  --radius-full: 9999px;
+
+  --text-small: 12px;
+  --text-body: 14px;
+  --text-heading: 16px;
+  --text-value: 28px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", Monaco, Inconsolata, "Fira Code", monospace;
+  --transition: 250ms ease-out;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--page-bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* App Header */
+.app-header {
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--border-subtle);
+  padding: 16px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+
+.brand-title {
+  font-size: var(--text-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.batch-badge {
+  font-size: var(--text-small);
+  font-family: var(--font-mono);
+  background: var(--surface-strong);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  background: var(--surface-strong);
+  color: var(--text-secondary);
+}
+
+.pulse-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--up);
+}
+
+/* Container */
+.container {
+  max-width: 1280px;
+  margin: 24px auto;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Grid Layout */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-surface);
+  padding: 20px;
+}
+
+.card-label {
+  font-size: var(--text-small);
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+.card-value {
+  font-size: var(--text-value);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-sub {
+  font-size: var(--text-small);
+  color: var(--text-tertiary);
+  margin-top: 6px;
+}
+
+/* Section Header */
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: var(--text-heading);
+  font-weight: 600;
+}
+
+/* Dual Column Live View */
+.live-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.subcard {
+  background: var(--surface-strong);
+  border-radius: var(--radius-inner);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.item-name {
+  font-size: var(--text-small);
+  color: var(--text-secondary);
+}
+
+.item-val {
+  font-size: var(--text-body);
+  font-weight: 500;
+}
+
+/* Up/Down Colors */
+.text-up {
+  color: var(--up);
+}
+
+.text-down {
+  color: var(--down);
+}
+
+/* Table Style */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+th {
+  font-size: var(--text-small);
+  color: var(--text-tertiary);
+  font-weight: 500;
+  padding: 12px 16px;
+  border-bottom: 0.5px solid var(--border-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+td {
+  font-size: var(--text-body);
+  padding: 14px 16px;
+  border-bottom: 0.5px solid var(--border-light);
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  font-weight: 500;
+}
+
+.badge-up {
+  background: var(--up-soft);
+  color: var(--up);
+}
+
+.badge-down {
+  background: var(--down-soft);
+  color: var(--down);
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .live-columns {
+    grid-template-columns: 1fr;
+  }
+}

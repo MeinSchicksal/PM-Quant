@@ -1,0 +1,147 @@
+"""PM-Quant Live/Paper Trading Runner & Ledger Journal.
+
+Orchestrates the decision cycle, records atomic live state,
+and appends single-line summary events to summary.jsonl.
+"""
+import sys
+import json
+import time
+import gzip
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import config
+from core.types import Position, OrderBook, SpotState, Order, Decision
+from core.policy import plan_decision
+from core.execution import plan_order_actions, quantize_lots
+
+
+class PaperRunner:
+    def __init__(self):
+        self.ledger_dir = config.CURRENT_LEDGER_DIR
+        self.summary_file = self.ledger_dir / "summary.jsonl"
+        self.live_file = self.ledger_dir / "live.json"
+        self.windows_dir = self.ledger_dir / "windows"
+        self.windows_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.current_slug = ""
+        self.window_start = 0.0
+        self.window_end = 0.0
+        self.pos_up = Position(0.0, 0.0)
+        self.pos_down = Position(0.0, 0.0)
+        self.working_orders = []
+        self.fills = []
+        self.decisions = []
+        self.insurance_paid = 0.0
+
+    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float):
+        """Initialize fresh 5-minute session."""
+        self.current_slug = slug
+        self.window_start = start_t
+        self.window_end = end_t
+        self.open_price = open_px
+        self.pos_up = Position(0.0, 0.0)
+        self.pos_down = Position(0.0, 0.0)
+        self.working_orders = []
+        self.fills = []
+        self.decisions = []
+        self.insurance_paid = 0.0
+
+    def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
+        """Execute one evaluation tick."""
+        tau = max(0.0, self.window_end - now)
+        decision = plan_decision(
+            self.pos_up, self.pos_down, book_up, book_down, spot, tau, config.PARAMS
+        )
+        self.decisions.append({
+            "t": round(now, 2), "action": decision.action, "side": decision.side,
+            "price": decision.price, "size": decision.size, "reason": decision.reason
+        })
+        
+        to_cancel, action = plan_order_actions(self.working_orders, decision, now)
+        for o in to_cancel:
+            o.cancel_at = now
+            
+        # Taker execution simulation
+        if action and action.action in ("taker_hedge", "taker_unwind"):
+            sz = action.size or 0.0
+            px = action.price or 0.0
+            fee = sz * 0.005
+            if action.action == "taker_hedge":
+                if action.side == "Down":
+                    self.pos_down.shares += sz
+                    self.pos_down.cash += (sz * px + fee)
+                else:
+                    self.pos_up.shares += sz
+                    self.pos_up.cash += (sz * px + fee)
+                pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
+                if pair_cost > 1.00:
+                    self.insurance_paid += (pair_cost - 1.00) * sz
+            elif action.action == "taker_unwind":
+                if action.side == "Up":
+                    self.pos_up.shares -= sz
+                    self.pos_up.cash -= (sz * px - fee)
+                else:
+                    self.pos_down.shares -= sz
+                    self.pos_down.cash -= (sz * px - fee)
+            self.fills.append({
+                "t": round(now, 2), "side": action.side, "price": px, "size": sz, "kind": "taker"
+            })
+            
+        # Update atomic live.json
+        self._write_live(now, spot, book_up, book_down)
+
+    def close_window(self, close_px: float):
+        """Settle session, append summary record, and compress window archive."""
+        winner = "Up" if close_px > self.open_price else "Down"
+        proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
+        total_cost = self.pos_up.cash + self.pos_down.cash
+        net_pnl = round(proceeds - total_cost, 4)
+        
+        record = {
+            "slug": self.current_slug,
+            "start": self.window_start,
+            "end": self.window_end,
+            "winner": winner,
+            "open_px": self.open_price,
+            "close_px": close_px,
+            "net_pnl": net_pnl,
+            "pos_up": self.pos_up.shares,
+            "pos_down": self.pos_down.shares,
+            "total_cost": round(total_cost, 4),
+            "proceeds": round(proceeds, 4),
+            "insurance_paid": round(self.insurance_paid, 4),
+            "fills_count": len(self.fills),
+            "batch_id": config.BATCH_ID
+        }
+        
+        # 1. Fast append to summary.jsonl
+        with open(self.summary_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            
+        # 2. Archive compressed detailed window log
+        detail = dict(record, fills=self.fills, decisions=self.decisions)
+        out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
+        with gzip.open(out_gz, "wt", encoding="utf-8") as gz:
+            json.dump(detail, gz, ensure_ascii=False)
+
+    def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
+        state = {
+            "batch_id": config.BATCH_ID,
+            "slug": self.current_slug,
+            "now": round(now, 2),
+            "tau_s": max(0.0, round(self.window_end - now, 1)),
+            "spot": spot.price,
+            "open_px": getattr(self, "open_price", 0.0),
+            "pos_up": {"shares": self.pos_up.shares, "cash": round(self.pos_up.cash, 4)},
+            "pos_down": {"shares": self.pos_down.shares, "cash": round(self.pos_down.cash, 4)},
+            "fills_count": len(self.fills),
+            "insurance_paid": round(self.insurance_paid, 4),
+            "last_decision": self.decisions[-1] if self.decisions else None
+        }
+        tmp = self.live_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.live_file)

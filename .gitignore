@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.zip
+
+# Runtime & Temporary Data
+data/4_runtime/
+data/1_market/
+data/2_ledgers/*/windows/
+data/2_ledgers/*/live.json
+data/2_ledgers/*/summary.jsonl
+*.pid
+*.tmp
+*.log
+
+# Environment & IDE
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store

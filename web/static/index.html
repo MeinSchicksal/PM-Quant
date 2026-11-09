@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PM-Quant Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Top App Navigation -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <div class="brand-title">PM-Quant Live Monitor</div>
+      <div class="batch-badge" id="batch-id">v1_r1</div>
+    </div>
+    <div class="header-status">
+      <div class="status-pill">
+        <div class="pulse-indicator" id="live-pulse"></div>
+        <span id="service-status">Engine Active</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="container">
+
+    <!-- KPI Summary Row -->
+    <section class="kpi-grid">
+      <div class="card">
+        <div class="card-label">Cumulative Net PnL</div>
+        <div class="card-value" id="kpi-pnl">$0.00</div>
+        <div class="card-sub" id="kpi-avg-pnl">Avg: $0.00 / window</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Win Rate</div>
+        <div class="card-value" id="kpi-winrate">0.0%</div>
+        <div class="card-sub" id="kpi-winloss">0 Wins 0 Losses</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Settled Windows</div>
+        <div class="card-value" id="kpi-windows">0</div>
+        <div class="card-sub">5-minute evaluation slots</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Insurance Paid</div>
+        <div class="card-value" id="kpi-insurance">$0.00</div>
+        <div class="card-sub">Adverse hedge premium</div>
+      </div>
+    </section>
+
+    <!-- Active Window State -->
+    <section class="card">
+      <div class="section-header">
+        <div class="section-title">Current Window Execution</div>
+        <div class="batch-badge mono" id="active-slug">No active session</div>
+      </div>
+
+      <div class="live-columns">
+        <!-- Market & Target -->
+        <div class="subcard">
+          <div class="row-item">
+            <span class="item-name">BTC Spot Price</span>
+            <span class="item-val mono" id="live-spot">--</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">Window Open Price</span>
+            <span class="item-val mono" id="live-open">--</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">Time to Expiry (&tau;)</span>
+            <span class="item-val mono" id="live-tau">--</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">Last Action</span>
+            <span class="item-val mono" id="live-action">--</span>
+          </div>
+        </div>
+
+        <!-- Inventory State -->
+        <div class="subcard">
+          <div class="row-item">
+            <span class="item-name">UP Position</span>
+            <span class="item-val mono text-up" id="live-up">0.0 shares ($0.00)</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">DOWN Position</span>
+            <span class="item-val mono text-down" id="live-down">0.0 shares ($0.00)</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">Fills In Current Window</span>
+            <span class="item-val mono" id="live-fills">0</span>
+          </div>
+          <div class="row-item">
+            <span class="item-name">Action Reason</span>
+            <span class="item-val" id="live-reason" style="font-size: 12px; color: var(--text-secondary);">--</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settled Windows Journal -->
+    <section class="card">
+      <div class="section-header">
+        <div class="section-title">Settled Windows Journal</div>
+        <span style="font-size: 12px; color: var(--text-secondary);">Auto-refreshed every 2s</span>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Window Slug</th>
+              <th>Outcome</th>
+              <th>Open Px</th>
+              <th>Close Px</th>
+              <th>Inventory (Up / Down)</th>
+              <th>Cost</th>
+              <th>Proceeds</th>
+              <th>Net PnL</th>
+            </tr>
+          </thead>
+          <tbody id="history-tbody">
+            <tr>
+              <td colspan="8" style="text-align: center; color: var(--text-tertiary); padding: 32px 0;">
+                No settled windows recorded yet in this revision.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

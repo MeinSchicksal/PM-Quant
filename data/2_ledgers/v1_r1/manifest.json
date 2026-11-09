@@ -1,0 +1,19 @@
+{
+  "batch_id": "v1_r1",
+  "version": "v1",
+  "revision": 1,
+  "sealed_at": 1794200752.0761347,
+  "params": {
+    "LOT_SIZE": 5.0,
+    "MAX_LOTS": 2,
+    "LATENCY_S": 0.3,
+    "BASE_EDGE": 0.025,
+    "UNCERTAINTY_K": 1.2,
+    "RISK_AVERSION_GAMMA": 0.15,
+    "MAX_QUEUE_WAIT_S": 15.0,
+    "TOXICITY_SHOCK_BPS": 3.5,
+    "TAIL_FREEZE_S": 60.0,
+    "MAX_WINDOW_LOSS_USD": 2.0
+  },
+  "code_snapshot": "data\\2_ledgers\\v1_r1\\code_snapshot.zip"
+}

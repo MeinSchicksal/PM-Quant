@@ -1,0 +1,217 @@
+"""Unified Policy Engine (Avellaneda-Stoikov Inventory Pricing & Utility Arbitration).
+
+Replaces hundreds of discrete rule branches with continuous inventory-adjusted
+reservation prices and risk-adjusted utility comparisons.
+"""
+from typing import Dict, Optional, Tuple
+from .types import Side, OrderBook, Position, Decision, SpotState
+
+
+def calculate_reservation_bids(
+    p_fair: float,
+    epsilon: float,
+    base_edge: float,
+    q: float,
+    gamma: float = 0.15
+) -> Tuple[float, float]:
+    """Calculate Avellaneda-Stoikov reservation prices for Up and Down.
+    
+    Args:
+        p_fair: Up win probability [0.01, 0.99]
+        epsilon: Uncertainty envelope bandwidth
+        base_edge: Required profit margin over fair value
+        q: Net inventory exposure: q = shares_Up - shares_Down
+        gamma: Risk aversion coefficient penalizing inventory variance
+        
+    Returns:
+        (r_bid_Up, r_bid_Down): Willing buy prices for both legs.
+    """
+    var = p_fair * (1.0 - p_fair)
+    inventory_penalty = gamma * q * var
+    
+    # Up reservation bid decreases as q increases (holding excess Up)
+    r_up = (p_fair - epsilon) - base_edge - inventory_penalty
+    
+    # Down reservation bid increases as q increases (hungry to buy Down to hedge Up)
+    p_down_fair = 1.0 - p_fair
+    r_down = (p_down_fair - epsilon) - base_edge + inventory_penalty
+    
+    # Physical tick constraints [0.02, 0.98]
+    r_up = max(0.02, min(0.98, round(r_up, 2)))
+    r_down = max(0.02, min(0.98, round(r_down, 2)))
+    return r_up, r_down
+
+
+def evaluate_unpaired_utility(
+    held_side: Side,
+    held_shares: float,
+    held_basis_price: float,
+    p_fair_held: float,
+    book_held: OrderBook,
+    book_opp: OrderBook,
+    gamma: float = 0.15,
+    p_fill_maker: float = 0.60
+) -> Decision:
+    """Evaluate 3-way utility arbitration when holding an unhedged inventory.
+    
+    Compares:
+    1. U_hedge: Immediate Taker hedge on opposite side (zero variance, lock-in cost).
+    2. U_sell: Immediate Taker sell of held side (zero variance, cut loss if >= 5 shares).
+    3. U_hold: Passive quoting on Maker / waiting to settle (penalized by inventory variance).
+    """
+    opp_side: Side = "Down" if held_side == "Up" else "Up"
+    var = p_fair_held * (1.0 - p_fair_held)
+    fee_rate = 0.005 # approximate taker fee
+    
+    # Path 1: Immediate Taker Hedge on Opposite Side
+    u_hedge = -999.0
+    hedge_ask = book_opp.best_ask
+    if hedge_ask is not None:
+        pair_cost = held_basis_price + hedge_ask + fee_rate
+        # Payoff is 1.00 per paired set
+        u_hedge = held_shares * (1.00 - pair_cost)
+        
+    # Path 2: Immediate Taker Unwind / Sell of Held Side (only valid if >= 5 shares)
+    u_sell = -999.0
+    held_bid = book_held.best_bid
+    if held_shares >= 5.0 - 1e-6 and held_bid is not None:
+        u_sell = held_shares * (held_bid - fee_rate - held_basis_price)
+        
+    # Path 3: Passive Quoting / Holding to Expiration
+    # EV of holding = shares * (p_fair - cost)
+    # Variance penalty = gamma * shares * Var
+    ev_holding = held_shares * (p_fair_held - held_basis_price)
+    variance_penalty = gamma * (held_shares ** 1.2) * var
+    u_hold = ev_holding - variance_penalty
+    
+    # If Maker order has a chance of filling, add expected edge
+    opp_bid = book_opp.best_bid
+    if opp_bid is not None:
+        maker_gain = held_shares * (1.00 - held_basis_price - opp_bid)
+        if maker_gain > 0:
+            u_hold += p_fill_maker * maker_gain
+
+    # === ARBITRATION DECISION ===
+    # Best immediate guaranteed exit (hedge vs sell)
+    best_immediate = max(u_hedge, u_sell)
+    
+    # If immediate execution provides superior utility than holding with variance:
+    if best_immediate > u_hold:
+        if u_hedge >= u_sell and hedge_ask is not None:
+            return Decision(
+                action="taker_hedge",
+                side=opp_side,
+                price=hedge_ask,
+                size=held_shares,
+                utility=round(u_hedge, 4),
+                reason=f"U_hedge({u_hedge:.2f}) > U_hold({u_hold:.2f}), take hedge @ {hedge_ask}"
+            )
+        elif u_sell > -990.0 and held_bid is not None:
+            return Decision(
+                action="taker_unwind",
+                side=held_side,
+                price=held_bid,
+                size=held_shares,
+                utility=round(u_sell, 4),
+                reason=f"U_sell({u_sell:.2f}) > U_hold({u_hold:.2f}), unwind position @ {held_bid}"
+            )
+
+    # Otherwise, maintain optimal Maker quote on the deficit side
+    # Reservation price determines optimal bid
+    r_maker_price = round(min(0.98, max(0.02, 1.00 - held_basis_price)), 2)
+    if opp_bid is not None:
+        r_maker_price = min(r_maker_price, opp_bid)
+        
+    return Decision(
+        action="quote",
+        side=opp_side,
+        price=r_maker_price,
+        size=held_shares,
+        utility=round(u_hold, 4),
+        reason=f"U_hold({u_hold:.2f}) optimal, quote maker @ {r_maker_price}"
+    )
+
+
+def plan_decision(
+    pos_up: Position,
+    pos_down: Position,
+    book_up: OrderBook,
+    book_down: OrderBook,
+    spot: SpotState,
+    tau_s: float,
+    params: Dict[str, float]
+) -> Decision:
+    """Master decision cycle called every tick/event.
+    
+    Evaluates current inventory and outputs the singular best action.
+    """
+    u_shares = pos_up.shares
+    d_shares = pos_down.shares
+    net_gap = round(u_shares - d_shares, 4)
+    
+    from .estimator import estimate_fair_prob, estimate_uncertainty_envelope
+    
+    # 1. Calculate Fair Prob & Uncertainty Envelope
+    p_fair = estimate_fair_prob(spot.price, spot.open_price, tau_s, spot.realized_vol_bps)
+    epsilon = estimate_uncertainty_envelope(
+        spot.realized_vol_bps, 
+        params["LATENCY_S"], 
+        params["UNCERTAINTY_K"]
+    )
+    
+    # 2. Case: Balanced or Flat Inventory (|net_gap| < 1e-4)
+    if abs(net_gap) < 1e-4:
+        # If in tail freeze window (< 60s), do not open new windows
+        if tau_s <= params["TAIL_FREEZE_S"]:
+            return Decision(action="wait", reason="Tail freeze active, no new entries")
+            
+        # If toxic spot shock detected, hold off
+        if spot.is_toxic_shock:
+            return Decision(action="wait", reason="Adverse spot toxic shock detected")
+            
+        # Reservation bids for both sides
+        r_up, r_down = calculate_reservation_bids(
+            p_fair, epsilon, params["BASE_EDGE"], q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
+        )
+        
+        # Check market alignment for Maker entry
+        # Prefer the side where market best bid is attractive or spreads are wide
+        lot_size = params["LOT_SIZE"] * params["MAX_LOTS"] # e.g. 10 shares
+        
+        up_bid = book_up.best_bid or 0.0
+        down_bid = book_down.best_bid or 0.0
+        
+        # Quote the side with clearer probabilistic edge
+        if r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.50:
+            quote_px = min(r_up, up_bid)
+            return Decision(
+                action="quote", side="Up", price=quote_px, size=lot_size,
+                utility=p_fair - quote_px, reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f})"
+            )
+        elif r_down >= down_bid and r_down >= 0.35 and p_fair < 0.50:
+            quote_px = min(r_down, down_bid)
+            return Decision(
+                action="quote", side="Down", price=quote_px, size=lot_size,
+                utility=(1.0 - p_fair) - quote_px, reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f})"
+            )
+            
+        return Decision(action="wait", reason=f"No edge outside uncertainty band (+/-{epsilon:.2f})")
+
+    # 3. Case: Unpaired Inventory (Holding excess Up or Down)
+    held_side: Side = "Up" if net_gap > 0 else "Down"
+    held_shares = abs(net_gap)
+    held_basis = pos_up.avg_price if held_side == "Up" else pos_down.avg_price
+    p_fair_held = p_fair if held_side == "Up" else (1.0 - p_fair)
+    
+    b_held = book_up if held_side == "Up" else book_down
+    b_opp = book_down if held_side == "Up" else book_up
+    
+    return evaluate_unpaired_utility(
+        held_side=held_side,
+        held_shares=held_shares,
+        held_basis_price=held_basis,
+        p_fair_held=p_fair_held,
+        book_held=b_held,
+        book_opp=b_opp,
+        gamma=params["RISK_AVERSION_GAMMA"]
+    )
