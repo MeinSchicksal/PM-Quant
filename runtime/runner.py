@@ -64,14 +64,15 @@ class PaperRunner:
         except Exception:
             pass
 
-    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float, poly_spot: float = None):
+    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float, binance_open_px: float = None, poly_spot: float = None):
         """Initialize fresh 5-minute session."""
         self.current_slug = slug
         self.window_start = start_t
         self.window_end = end_t
         self.open_price = open_px
-        self.last_spot_price = open_px
-        self.last_poly_spot = poly_spot
+        self.binance_open_price = binance_open_px or open_px
+        self.last_spot_price = self.binance_open_price
+        self.last_poly_spot = poly_spot or open_px
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
@@ -81,7 +82,16 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
-            {"t": round(start_t, 1), "price": round(open_px, 2), "poly_price": round(poly_spot, 2) if poly_spot else None, "return_bps": 0.0, "prob_up": 0.5, "poly_up": 0.5, "poly_down": 0.5}
+            {
+                "t": round(start_t, 1),
+                "price": round(self.binance_open_price, 2),
+                "poly_price": round(self.last_poly_spot, 2),
+                "return_bps": 0.0,
+                "poly_return_bps": 0.0,
+                "prob_up": 0.5,
+                "poly_up": 0.5,
+                "poly_down": 0.5
+            }
         ] if open_px > 0 else []
         self.last_prob_up = 0.5
         self.last_poly_up = 0.5
@@ -122,12 +132,23 @@ class PaperRunner:
             self.last_poly_spot = poly_spot
 
         self.last_spot_price = spot.price
+
+        # Calculate return bps for Binance relative to binance_open_price
+        bin_open = getattr(self, "binance_open_price", 0.0) or open_px
+        binance_bps = ((spot.price - bin_open) / bin_open) * 10000.0 if bin_open > 0 else 0.0
+
+        # Calculate return bps for Polymarket relative to open_price (Poly TWAP open)
+        poly_bps = 0.0
+        if open_px > 0 and self.last_poly_spot and self.last_poly_spot > 0:
+            poly_bps = ((self.last_poly_spot - open_px) / open_px) * 10000.0
+
         if spot.price > 0:
             self.price_history.append({
                 "t": round(now, 1),
                 "price": round(spot.price, 2),
                 "poly_price": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
-                "return_bps": round(spot.return_bps, 2),
+                "return_bps": round(binance_bps, 2),
+                "poly_return_bps": round(poly_bps, 2),
                 "prob_up": round(p_fair, 4),
                 "poly_up": round(poly_up, 4),
                 "poly_down": round(poly_down, 4)
@@ -338,7 +359,9 @@ class PaperRunner:
             "spot": spot.price,
             "poly_spot": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
             "open_px": getattr(self, "open_price", 0.0),
-            "return_bps": round(spot.return_bps, 2),
+            "binance_open_px": getattr(self, "binance_open_price", getattr(self, "open_price", 0.0)),
+            "return_bps": round(((spot.price - getattr(self, "binance_open_price", spot.price)) / getattr(self, "binance_open_price", spot.price)) * 10000.0, 2) if getattr(self, "binance_open_price", 0.0) > 0 else 0.0,
+            "poly_return_bps": round(((self.last_poly_spot - getattr(self, "open_price", self.last_poly_spot)) / getattr(self, "open_price", self.last_poly_spot)) * 10000.0, 2) if (getattr(self, "open_price", 0.0) > 0 and getattr(self, "last_poly_spot", None)) else 0.0,
             "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
             "regime": getattr(spot, "regime", "normal"),
             "circuit_breaker": self.circuit_breaker.get_status(now),

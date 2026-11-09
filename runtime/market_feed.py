@@ -173,8 +173,15 @@ class MarketFeed:
             
         return {}
 
-    def fetch_window_open_price(self, start_t: float) -> float:
-        """Fetch BTC reference open price: First try Polymarket official Chainlink TWAP, then Binance Kline fallback."""
+    def fetch_window_open_price(self, start_t: float) -> Tuple[float, float]:
+        """Fetch BTC reference open price: (poly_official_twap_open, binance_spot_open).
+        
+        Guarantees that Polymarket official Chainlink TWAP is prioritized, with continuous
+        previous-round closePrice stitching if current round open is still computing.
+        """
+        poly_open = 0.0
+        binance_open = 0.0
+
         # 1. Primary: Polymarket official Chainlink BTC/USD TWAP
         try:
             iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -193,16 +200,17 @@ class MarketFeed:
                 body = resp.json()
                 open_px = body.get("openPrice")
                 if open_px and float(open_px) > 0:
-                    val = float(open_px)
-                    self.record_raw_event("oracle", {
-                        "t": time.time(), "kind": "window_open", "source": "polymarket_chainlink_twap",
-                        "start_t": start_t, "open_price": val
-                    })
-                    return val
+                    poly_open = float(open_px)
         except Exception:
             pass
 
-        # 2. Fallback: Binance Spot 5m Kline
+        # 1b. If poly_open still 0, stitch from previous round's closePrice (mathematically identical to start_t TWAP)
+        if poly_open <= 0:
+            prev_settlement = self.fetch_window_settlement_price(start_t - 300)
+            if prev_settlement and prev_settlement[1] > 0:
+                poly_open = float(prev_settlement[1])
+
+        # 2. Binance Spot 5m Kline Open
         start_ms = int(start_t * 1000)
         url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
         try:
@@ -210,15 +218,29 @@ class MarketFeed:
             if resp.status_code == 200:
                 klines = resp.json()
                 if klines and len(klines) > 0:
-                    open_px = float(klines[0][1])
-                    self.record_raw_event("oracle", {
-                        "t": time.time(), "kind": "window_open", "source": "binance_spot",
-                        "start_t": start_t, "open_price": open_px
-                    })
-                    return open_px
+                    binance_open = float(klines[0][1])
         except Exception:
             pass
-        return 0.0
+
+        # Fallback cross-assignment if either is missing
+        if poly_open <= 0 and binance_open > 0:
+            poly_open = binance_open
+        if binance_open <= 0 and poly_open > 0:
+            binance_open = poly_open
+
+        # Record raw open events
+        if poly_open > 0:
+            self.record_raw_event("oracle", {
+                "t": time.time(), "kind": "window_open", "source": "polymarket_chainlink_twap",
+                "start_t": start_t, "open_price": poly_open
+            })
+        if binance_open > 0:
+            self.record_raw_event("oracle", {
+                "t": time.time(), "kind": "window_open", "source": "binance_spot",
+                "start_t": start_t, "open_price": binance_open
+            })
+
+        return poly_open, binance_open
 
     def fetch_window_settlement_price(self, start_t: float) -> Optional[Tuple[float, float, str]]:
         """Fetch official settlement open, close, and winner from Polymarket's crypto-price API."""
@@ -246,25 +268,31 @@ class MarketFeed:
             pass
         return None
 
-    def get_polymarket_btc_price(self, start_t: float) -> Optional[float]:
-        """Fetch Polymarket official real-time Chainlink BTC/USD price asynchronously."""
-        now = time.time()
-        if not getattr(self, "_poly_btc_poller_active", False) and (now - getattr(self, "_last_poly_poll_t", 0.0) >= 1.8):
+    def get_polymarket_btc_price(self, now: float = None) -> Optional[float]:
+        """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously."""
+        current_t = now or time.time()
+        if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 1.8):
             self._poly_btc_poller_active = True
             import threading
             def _worker():
                 try:
-                    iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                    now_iso = datetime.datetime.fromtimestamp(current_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                     url = "https://polymarket.com/api/crypto/crypto-price"
-                    params = {"symbol": "BTC", "eventStartTime": iso_start}
+                    params = {
+                        "symbol": "BTC",
+                        "eventStartTime": now_iso,
+                        "variant": "fiveminute",
+                        "twapEnabled": "true",
+                        "twapLookbackSeconds": "60"
+                    }
                     resp = self.session.get(url, params=params, timeout=3.0)
                     if resp.status_code == 200:
                         body = resp.json()
-                        px = body.get("closePrice") or body.get("openPrice")
+                        px = body.get("openPrice")
                         if px and float(px) > 0:
                             self._last_poly_btc = float(px)
                             self.record_raw_event("oracle", {
-                                "t": time.time(), "kind": "poly_spot", "price": self._last_poly_btc, "start_t": start_t
+                                "t": time.time(), "kind": "poly_twap_live", "price": self._last_poly_btc
                             })
                 except Exception:
                     pass

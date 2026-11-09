@@ -149,18 +149,23 @@ class PipelineDriver:
                     else:
                         active_tokens = self.feed.resolve_tokens(slug)
 
-                    open_px = self.feed.fetch_window_open_price(start_t)
-                    if open_px <= 0:
-                        # Fallback to current spot
+                    poly_open, binance_open = self.feed.fetch_window_open_price(start_t)
+                    if poly_open <= 0:
                         spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
-                        open_px = spot_initial.price
+                        poly_open = spot_initial.price
+                    if binance_open <= 0:
+                        binance_open = poly_open
                     
-                    poly_spot_init = self.feed.get_polymarket_btc_price(start_t)
-                    self.runner.start_window(slug, start_t, end_t, open_px, poly_spot=poly_spot_init)
+                    poly_spot_init = self.feed.get_polymarket_btc_price(loop_start) or poly_open
+                    self.runner.start_window(
+                        slug, start_t, end_t, poly_open,
+                        binance_open_px=binance_open,
+                        poly_spot=poly_spot_init
+                    )
                     last_slug = slug
                     last_start_t = start_t
                     tokens_label = f"UP={active_tokens.get('token_up', 'Pending')[:10]}..." if active_tokens.get('token_up') else "Pending"
-                    print(f"[Pipeline] Tokens: {tokens_label} | Open Px: ${open_px:,.2f}")
+                    print(f"[Pipeline] Tokens: {tokens_label} | Poly Strike S0: ${poly_open:,.2f} | Binance S0: ${binance_open:,.2f}")
 
                     # Update WebSocket subscription targets
                     token_list = [active_tokens.get("token_up"), active_tokens.get("token_down")]
@@ -200,7 +205,7 @@ class PipelineDriver:
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
 
-                    poly_spot = self.feed.get_polymarket_btc_price(start_t)
+                    poly_spot = self.feed.get_polymarket_btc_price(loop_start)
 
                     self.runner.step(
                         loop_start, spot, b_up, b_dn,

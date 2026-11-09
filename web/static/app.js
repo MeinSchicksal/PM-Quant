@@ -447,6 +447,7 @@
     ctx.clearRect(0, 0, W, H);
 
     const openPx = live.open_px || 0;
+    const binanceOpenPx = live.binance_open_px || openPx;
     const history = (live.price_history && live.price_history.length > 0) ? live.price_history : [];
     const startT = live.start || (history[0] ? history[0].t : 0);
     const nowT = live.now || (Date.now() / 1000);
@@ -466,9 +467,13 @@
     const FILL_DOWN_TOP = 'rgba(207, 32, 47, 0.16)';
     const FILL_DOWN_BOT = 'rgba(207, 32, 47, 0.01)';
 
-    // Calculate High, Low, Range
+    // Calculate High, Low, Range across both series and baselines
     let highPx = openPx > 0 ? openPx : (live.spot || 0);
     let lowPx = openPx > 0 ? openPx : (live.spot || 0);
+    if (binanceOpenPx > 0) {
+      if (binanceOpenPx > highPx) highPx = binanceOpenPx;
+      if (binanceOpenPx < lowPx) lowPx = binanceOpenPx;
+    }
     for (const pt of history) {
       if (pt.price > highPx) highPx = pt.price;
       if (pt.price < lowPx) lowPx = pt.price;
@@ -491,6 +496,8 @@
 
     const statOpen = document.getElementById('chart-stat-open');
     if (statOpen) statOpen.textContent = openPx > 0 ? `$${openPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
+    const statBinanceOpen = document.getElementById('chart-stat-binance-open');
+    if (statBinanceOpen) statBinanceOpen.textContent = binanceOpenPx > 0 ? `$${binanceOpenPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
     const statHigh = document.getElementById('chart-stat-high');
     if (statHigh) statHigh.textContent = highPx > 0 ? `$${highPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
     const statLow = document.getElementById('chart-stat-low');
@@ -650,24 +657,44 @@
 
       const priceToY = (px) => t1Top + t1H - ((px - paddedMinY) / paddedSpan) * t1H;
 
-      // Baseline strike price line S_0 (Dashed)
+      // 1. Polymarket Official Strike Baseline (S_0, poly) - Blue Dashed
       if (openPx > 0) {
-        const baselineY = priceToY(openPx);
+        const baselinePolyY = priceToY(openPx);
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(padLeft, baselinePolyY);
+        ctx.lineTo(padLeft + plotW, baselinePolyY);
+        ctx.stroke();
+        ctx.restore();
+
+        // Baseline text on right
+        ctx.fillStyle = '#2563eb';
+        ctx.textAlign = 'left';
+        ctx.font = '600 10.5px monospace';
+        ctx.fillText(`Poly基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselinePolyY + 3);
+      }
+
+      // 2. Binance Spot Open Baseline (S_0, binance) - Gray Dashed
+      if (binanceOpenPx > 0 && Math.abs(binanceOpenPx - openPx) > 0.5) {
+        const baselineBinY = priceToY(binanceOpenPx);
         ctx.save();
         ctx.setLineDash([4, 4]);
         ctx.strokeStyle = '#94a3b8';
         ctx.lineWidth = 1.2;
         ctx.beginPath();
-        ctx.moveTo(padLeft, baselineY);
-        ctx.lineTo(padLeft + plotW, baselineY);
+        ctx.moveTo(padLeft, baselineBinY);
+        ctx.lineTo(padLeft + plotW, baselineBinY);
         ctx.stroke();
         ctx.restore();
 
         // Baseline text on right
         ctx.fillStyle = '#64748b';
         ctx.textAlign = 'left';
-        ctx.font = '600 11px monospace';
-        ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselineY + 4);
+        ctx.font = '600 10.5px monospace';
+        ctx.fillText(`币安基准 $${binanceOpenPx.toFixed(2)}`, padLeft + plotW + 8, baselineBinY + 3);
       }
 
       // Build points for Binance Spot Price
@@ -686,16 +713,22 @@
           x: timeToX(pt.t),
           y: priceToY(pt.poly_price),
           price: pt.poly_price,
+          bps: pt.poly_return_bps !== undefined ? pt.poly_return_bps : (openPx > 0 ? ((pt.poly_price - openPx)/openPx*10000) : 0),
           t: pt.t
         }));
 
       const lastP = pts[pts.length - 1];
       const lastPolyP = polyPts.length > 0 ? polyPts[polyPts.length - 1] : null;
 
+      const isBinanceAbove = lastP.price >= binanceOpenPx;
+      const binancePriceColor = isBinanceAbove ? COLOR_UP : COLOR_DOWN;
+      const binanceFillTop = isBinanceAbove ? FILL_UP_TOP : FILL_DOWN_TOP;
+      const binanceFillBot = isBinanceAbove ? FILL_UP_BOT : FILL_DOWN_BOT;
+
       // Fill underneath Binance price curve
       const pGrad = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
-      pGrad.addColorStop(0, priceFillTop);
-      pGrad.addColorStop(1, priceFillBot);
+      pGrad.addColorStop(0, binanceFillTop);
+      pGrad.addColorStop(1, binanceFillBot);
 
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
@@ -735,13 +768,13 @@
         }
       }
 
-      // Stroke Curve 2: Binance Spot Price Curve: 开盘价上方用绿，跌到下方用红
+      // Stroke Curve 2: Binance Spot Price Curve: 币安开盘价上方用绿，跌到下方用红
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) {
         ctx.lineTo(pts[i].x, pts[i].y);
       }
-      ctx.strokeStyle = priceColor;
+      ctx.strokeStyle = binancePriceColor;
       ctx.lineWidth = 2.0;
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
@@ -754,13 +787,13 @@
         if (p.price > maxPt.price) maxPt = p;
         if (p.price < minPt.price) minPt = p;
       }
-      if (maxPt.x !== lastP.x && maxPt.price > openPx) {
+      if (maxPt.x !== lastP.x && maxPt.price > binanceOpenPx) {
         ctx.fillStyle = COLOR_UP; // 绿色
         ctx.beginPath();
         ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2);
         ctx.fill();
       }
-      if (minPt.x !== lastP.x && minPt.price < openPx) {
+      if (minPt.x !== lastP.x && minPt.price < binanceOpenPx) {
         ctx.fillStyle = COLOR_DOWN; // 红色
         ctx.beginPath();
         ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2);
@@ -770,12 +803,12 @@
       // Live Pulse Dot on latest Binance spot price
       ctx.beginPath();
       ctx.arc(lastP.x, lastP.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = isAboveOpen ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
+      ctx.fillStyle = isBinanceAbove ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
       ctx.fill();
 
       ctx.beginPath();
       ctx.arc(lastP.x, lastP.y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = priceColor;
+      ctx.fillStyle = binancePriceColor;
       ctx.fill();
 
       // Right tag pills with Anti-Collision Logic
@@ -801,8 +834,10 @@
         }
       }
 
-      // Draw Binance Tag Pill
-      ctx.fillStyle = priceColor;
+      // Draw Binance Tag Pill (bps calculated from binanceOpenPx)
+      const binBpsVal = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
+      const binBpsSign = binBpsVal >= 0 ? '+' : '';
+      ctx.fillStyle = binancePriceColor;
       if (ctx.roundRect) {
         ctx.beginPath();
         ctx.roundRect(tagX, tagY_binance, tagW, tagH, 4);
@@ -813,11 +848,12 @@
       ctx.fillStyle = '#ffffff';
       ctx.font = '600 10.5px monospace';
       ctx.textAlign = 'center';
-      const bpsSign = lastP.bps >= 0 ? '+' : '';
-      ctx.fillText(`币安 $${lastP.price.toFixed(2)} (${bpsSign}${lastP.bps.toFixed(1)})`, tagX + tagW / 2, tagY_binance + 14);
+      ctx.fillText(`币安 $${lastP.price.toFixed(2)} (${binBpsSign}${binBpsVal.toFixed(1)})`, tagX + tagW / 2, tagY_binance + 14);
 
-      // Draw Polymarket Official Tag Pill (if available)
+      // Draw Polymarket Official Tag Pill (bps calculated from openPx)
       if (lastPolyP && tagY_poly !== null) {
+        const polyBpsVal = openPx > 0 ? ((lastPolyP.price - openPx) / openPx * 10000) : 0;
+        const polyBpsSign = polyBpsVal >= 0 ? '+' : '';
         ctx.fillStyle = '#2563eb';
         if (ctx.roundRect) {
           ctx.beginPath();
@@ -829,7 +865,7 @@
         ctx.fillStyle = '#ffffff';
         ctx.font = '600 10.5px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(`Poly $${lastPolyP.price.toFixed(2)}`, tagX + tagW / 2, tagY_poly + 14);
+        ctx.fillText(`Poly $${lastPolyP.price.toFixed(2)} (${polyBpsSign}${polyBpsVal.toFixed(1)})`, tagX + tagW / 2, tagY_poly + 14);
       }
     }
 
