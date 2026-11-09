@@ -233,6 +233,36 @@ class TestFractionalKellyDynamicSizing(unittest.TestCase):
         self.assertEqual(decision.size, 15.0)
         self.assertEqual(decision.side, "Down")
 
+    def test_insufficient_capital_boundary(self):
+        """When available capital cannot purchase 1 minimum lot, Kelly size returns 0.0 and policy waits."""
+        capital_tiny = 1.50 # Less than 5 shares * $0.50 = $2.50
+        sz = calculate_kelly_order_size(capital_tiny, p_win=0.70, quote_price=0.50, lot_size=5.0)
+        self.assertEqual(sz, 0.0)
+
+        pos_flat = Position(0.0, 0.0)
+        book_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        book_dn = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        spot = SpotState(timestamp=1000.0, price=75050.0, open_price=75000.0) # Up edge exists
+        params_tiny = dict(config.PARAMS, AVAILABLE_CAPITAL=capital_tiny)
+
+        dec = plan_decision(pos_flat, pos_flat, book_up, book_dn, spot, tau_s=180.0, params=params_tiny)
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("Insufficient capital", dec.reason)
+
+    def test_loss_streak_persists_across_day_rollover(self):
+        """Loss streak from before midnight must not be erased when hydrating from summary."""
+        cb = CircuitBreaker(max_daily_drawdown_usd=10.00, loss_streak_cooling=3)
+        # 2 losses yesterday, 1 loss today
+        records = [
+            {"end": 1000.0, "net_pnl": -1.0, "traded": True},
+            {"end": 1300.0, "net_pnl": -1.0, "traded": True},
+            {"end": 100000.0, "net_pnl": -1.0, "traded": True}, # across midnight
+        ]
+        cb.load_from_summary(records)
+        active, reason = cb.is_active(ts=100000.0)
+        self.assertTrue(active)
+        self.assertIn("Loss streak", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

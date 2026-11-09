@@ -100,7 +100,7 @@ class CircuitBreaker:
         }
 
     def load_from_summary(self, summary_records: List[Dict[str, Any]]):
-        """Restore circuit breaker state from today's historical summary lines."""
+        """Restore circuit breaker state chronologically from historical summary lines."""
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
         self.cooling_rounds_left = 0
@@ -108,9 +108,10 @@ class CircuitBreaker:
         self.trip_reason = ""
         self.current_day = self._get_day_str()
 
-        for rec in summary_records:
-            t = rec.get("end") or rec.get("start") or time.time()
-            day = self._get_day_str(t)
-            if day == self.current_day and rec.get("traded"):
-                pnl = float(rec.get("net_pnl", 0.0))
-                self.record_round_result(pnl, traded=True, ts=t)
+        # Sort chronologically
+        sorted_recs = sorted(summary_records, key=lambda r: float(r.get("end") or r.get("start") or 0.0))
+        for rec in sorted_recs:
+            t = float(rec.get("end") or rec.get("start") or time.time())
+            pnl = float(rec.get("net_pnl", 0.0))
+            traded = bool(rec.get("traded"))
+            self.record_round_result(pnl, traded=traded, ts=t)

@@ -127,6 +127,11 @@ def evaluate_unpaired_utility(
         r_maker_price = min(r_maker_price, round(book_opp.best_ask - 0.01, 2))
         
     r_maker_price = max(0.02, min(0.98, round(r_maker_price, 2)))
+    if book_opp.best_ask is not None and r_maker_price >= book_opp.best_ask:
+        return Decision(
+            action="wait",
+            reason=f"Opposite ask ({book_opp.best_ask}) too tight for passive maker quote"
+        )
         
     return Decision(
         action="quote",
@@ -221,6 +226,8 @@ def plan_decision(
             size = calculate_kelly_order_size(
                 available_cap, p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
             )
+            if size < lot_size:
+                return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
             return Decision(
                 action="quote", side="Up", price=quote_px, size=size,
                 utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {regime}, {size:.0f}s)"
@@ -230,6 +237,8 @@ def plan_decision(
             size = calculate_kelly_order_size(
                 available_cap, 1.0 - p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
             )
+            if size < lot_size:
+                return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
             return Decision(
                 action="quote", side="Down", price=quote_px, size=size,
                 utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {regime}, {size:.0f}s)"

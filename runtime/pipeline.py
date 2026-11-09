@@ -21,13 +21,46 @@ from runtime.trade_stream import TradeStreamClient
 PID_FILE = config.RUNTIME_DIR / "pipeline.pid"
 
 
+def is_pid_running(pid: int) -> bool:
+    """Check if process with given PID is actively running."""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except Exception:
+        return False
+
+
 class PipelineDriver:
     def __init__(self):
+        self._check_existing_pipeline()
         self.feed = MarketFeed()
         self.runner = PaperRunner()
         self.trade_stream = TradeStreamClient(record_raw=True)
         self.running = True
         self._write_pid()
+
+    def _check_existing_pipeline(self):
+        if PID_FILE.exists():
+            try:
+                old_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+                if is_pid_running(old_pid):
+                    print(f"\n[Pipeline] FATAL: Another pipeline process (PID {old_pid}) is already running!")
+                    print("To prevent duplicate orders and ledger corruption, please stop it first.\n")
+                    sys.exit(1)
+            except (ValueError, OSError):
+                pass
 
     def _write_pid(self):
         PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
@@ -109,12 +142,11 @@ class PipelineDriver:
                     print(f"[Pipeline] Starting new window: {slug}")
                     if prewarmed_next.get("slug") == slug and prewarmed_next.get("tokens"):
                         active_tokens = prewarmed_next["tokens"]
-                        open_px = prewarmed_next.get("open_px") or self.feed.fetch_window_open_price(start_t)
                         prewarmed_next = {}
                     else:
                         active_tokens = self.feed.resolve_tokens(slug)
-                        open_px = self.feed.fetch_window_open_price(start_t)
 
+                    open_px = self.feed.fetch_window_open_price(start_t)
                     if open_px <= 0:
                         # Fallback to current spot
                         spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
@@ -143,11 +175,9 @@ class PipelineDriver:
                     if prewarmed_next.get("slug") != next_slug:
                         next_tokens = self.feed.resolve_tokens(next_slug)
                         if next_tokens.get("token_up") and next_tokens.get("token_down"):
-                            next_open = self.feed.fetch_window_open_price(next_start_t)
                             prewarmed_next = {
                                 "slug": next_slug,
-                                "tokens": next_tokens,
-                                "open_px": next_open
+                                "tokens": next_tokens
                             }
                             # Register next slug & tokens to trade stream early
                             combined_slugs = [slug, next_slug]

@@ -35,8 +35,6 @@ class PaperRunner:
             loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
             cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3))
         )
-        self._load_circuit_breaker()
-        
         self.current_slug = ""
         self.window_start = 0.0
         self.window_end = 0.0
@@ -47,9 +45,11 @@ class PaperRunner:
         self.decisions = []
         self.actions = []
         self.insurance_paid = 0.0
+        self.total_pnl = 0.0
+        self._load_ledger_history()
 
-    def _load_circuit_breaker(self):
-        """Restore circuit breaker metrics from existing summary.jsonl."""
+    def _load_ledger_history(self):
+        """Restore circuit breaker metrics and total cumulative PnL from summary.jsonl."""
         if not self.summary_file.exists():
             return
         records = []
@@ -58,6 +58,7 @@ class PaperRunner:
                 if line.strip():
                     records.append(json.loads(line))
             self.circuit_breaker.load_from_summary(records)
+            self.total_pnl = sum(float(r.get("net_pnl", 0.0)) for r in records if r.get("traded"))
         except Exception:
             pass
 
@@ -103,7 +104,7 @@ class PaperRunner:
 
         # 1. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
-        available_cap = max(10.0, 100.0 + self.circuit_breaker.daily_pnl)
+        available_cap = max(10.0, 100.0 + self.total_pnl)
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
@@ -249,8 +250,10 @@ class PaperRunner:
         with open(self.summary_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             
-        # Update circuit breaker metrics
+        # Update circuit breaker metrics & total cumulative PnL
         self.circuit_breaker.record_round_result(net_pnl, is_traded, self.window_end)
+        if is_traded:
+            self.total_pnl += net_pnl
 
         # 2. Archive compressed detailed window log
         detail = dict(record, fills=self.fills, actions=self.actions, decisions=self.decisions)
@@ -302,7 +305,8 @@ class PaperRunner:
             "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
             "regime": getattr(spot, "regime", "normal"),
             "circuit_breaker": self.circuit_breaker.get_status(now),
-            "available_capital": round(max(10.0, 100.0 + self.circuit_breaker.daily_pnl), 2),
+            "available_capital": round(max(10.0, 100.0 + self.total_pnl), 2),
+            "total_pnl": round(self.total_pnl, 4),
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
             "working_orders": [

@@ -22,6 +22,13 @@ import config
 WS_URL = "wss://ws-live-data.polymarket.com"
 
 
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        return float(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 class TradeStreamClient:
     def __init__(self, record_raw: bool = True):
         self.record_raw = record_raw
@@ -129,7 +136,7 @@ class TradeStreamClient:
                             continue
 
                         tr_slug = payload.get("slug") or payload.get("eventSlug") or ""
-                        tr_asset = payload.get("asset") or ""
+                        tr_asset = payload.get("asset") or payload.get("asset_id") or ""
 
                         # Check filter relevance
                         with self._lock:
@@ -146,10 +153,10 @@ class TradeStreamClient:
                                 "token_id": tr_asset,
                                 "slug": tr_slug,
                                 "outcome": payload.get("outcome", ""),
-                                "price": float(payload.get("price", 0.0)),
-                                "size": float(payload.get("size", 0.0)),
+                                "price": _safe_float(payload.get("price", 0.0)),
+                                "size": _safe_float(payload.get("size", 0.0)),
                                 "side": payload.get("side", ""),
-                                "timestamp": float(payload.get("timestamp", time.time())),
+                                "timestamp": _safe_float(payload.get("timestamp"), time.time()),
                                 "received_at": time.time()
                             }
                             with self._lock:

@@ -206,8 +206,9 @@ def calculate_kelly_order_size(
     Returns:
         Order size in shares: discrete multiple in {5.0, 10.0, 15.0}.
     """
-    if quote_price <= 0.01 or quote_price >= 0.99 or available_capital <= 0:
-        return float(min_lots * lot_size)
+    min_cost = quote_price * lot_size
+    if available_capital < min_cost or quote_price <= 0.01 or quote_price >= 0.99:
+        return 0.0 if available_capital < min_cost else float(min_lots * lot_size)
         
     edge = p_win - quote_price
     if edge <= 1e-4:
