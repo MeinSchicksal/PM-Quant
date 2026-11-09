@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
+from core.estimator import estimate_fair_prob
 from core.execution import plan_order_actions, quantize_lots
 from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher
@@ -79,8 +80,9 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
-            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0}
+            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0, "prob_up": 0.5}
         ] if open_px > 0 else []
+        self.last_prob_up = 0.5
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
@@ -101,19 +103,25 @@ class PaperRunner:
         trade_prints: list = None
     ):
         """Execute one evaluation tick with circuit breaker, Kelly sizing, and live trade prints."""
+        tau = max(0.0, self.window_end - now)
+        open_px = getattr(self, "open_price", 0.0)
+        vol_bps = getattr(spot, "realized_vol_bps", 15.0)
+        p_fair = estimate_fair_prob(spot.price, open_px, tau, vol_bps) if (open_px > 0 and spot.price > 0) else 0.5
+        self.last_prob_up = p_fair
+
         self.last_spot_price = spot.price
         if spot.price > 0:
             self.price_history.append({
                 "t": round(now, 1),
                 "price": round(spot.price, 2),
-                "return_bps": round(spot.return_bps, 2)
+                "return_bps": round(spot.return_bps, 2),
+                "prob_up": round(p_fair, 4)
             })
             if len(self.price_history) > 360:
                 self.price_history = self.price_history[-360:]
 
         if net_stats:
             self.net_stats = net_stats
-        tau = max(0.0, self.window_end - now)
 
         # 1. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
@@ -320,6 +328,8 @@ class PaperRunner:
             "circuit_breaker": self.circuit_breaker.get_status(now),
             "available_capital": round(max(10.0, 100.0 + self.total_pnl), 2),
             "total_pnl": round(self.total_pnl, 4),
+            "prob_up": round(getattr(self, "last_prob_up", 0.5), 4),
+            "prob_down": round(1.0 - getattr(self, "last_prob_up", 0.5), 4),
             "price_history": self.price_history,
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},

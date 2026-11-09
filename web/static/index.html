@@ -377,8 +377,13 @@
         <div class="chart-panel-head">
           <div class="chart-title-group">
             <div class="chart-title-row">
-              <span class="chart-main-title">本轮价格走势与实时微观仲裁</span>
+              <span class="chart-main-title">本轮行情波动与胜率走势 (BTC/USD)</span>
               <span class="chart-sub-tag" id="chart-elapsed-badge">第 0 秒 / 300 秒</span>
+              <div class="chart-mode-toggle" id="chart-mode-toggle">
+                <button type="button" class="mode-btn active" data-mode="dual">双轨联动</button>
+                <button type="button" class="mode-btn" data-mode="price">价格走势</button>
+                <button type="button" class="mode-btn" data-mode="prob">胜率走势</button>
+              </div>
             </div>
             <div class="chart-stats-row">
               <span class="chart-stat-item">基准开盘: <strong id="chart-stat-open">$0.00</strong></span>
@@ -388,6 +393,8 @@
               <span class="chart-stat-item">最低: <strong class="down" id="chart-stat-low">$0.00</strong></span>
               <span class="chart-stat-sep">·</span>
               <span class="chart-stat-item">区间振幅: <strong id="chart-stat-range">0.0 bps</strong></span>
+              <span class="chart-stat-sep">·</span>
+              <span class="chart-stat-item">胜出概率: <strong class="prob-tag-up" id="chart-stat-prob-up">UP 50.0%</strong> / <strong class="prob-tag-dn" id="chart-stat-prob-dn">DN 50.0%</strong></span>
             </div>
           </div>
           <div class="chart-status-group">
@@ -400,7 +407,7 @@
         </div>
 
         <div class="canvas-container">
-          <canvas id="live-price-canvas" height="220"></canvas>
+          <canvas id="live-price-canvas" height="290"></canvas>
         </div>
       </section>
 

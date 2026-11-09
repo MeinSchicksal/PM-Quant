@@ -9,6 +9,7 @@
   let currentTab = 'overview';
   let historyData = null;
   let liveData = null;
+  let chartMode = 'dual'; // 'dual' | 'price' | 'prob'
 
   // DOM Elements
   const timeEl = document.getElementById('current-time');
@@ -148,6 +149,17 @@
   if (viewPanels[hash]) {
     switchTab(hash);
   }
+
+  // Chart Mode Toggle Handlers (Dual / Price / Prob)
+  document.querySelectorAll('#chart-mode-toggle .mode-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      document.querySelectorAll('#chart-mode-toggle .mode-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      chartMode = btn.dataset.mode || 'dual';
+      if (liveData) drawLivePriceChart(liveData);
+    });
+  });
 
   // Formatting Helpers
   function fmtPct(val) {
@@ -406,7 +418,7 @@
     };
   }
 
-  // High-DPI Real-time Canvas Price Fluctuation Chart
+  // High-DPI Real-time Canvas: Price Fluctuation & Model Fair Probability Trajectory
   function drawLivePriceChart(live) {
     const canvas = document.getElementById('live-price-canvas');
     if (!canvas) return;
@@ -418,7 +430,7 @@
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     const displayWidth = Math.round(rect.width || canvas.clientWidth || 800);
-    const displayHeight = Math.round(rect.height || canvas.clientHeight || 220);
+    const displayHeight = Math.round(rect.height || canvas.clientHeight || 290);
 
     if (canvas.width !== Math.round(displayWidth * dpr) || canvas.height !== Math.round(displayHeight * dpr)) {
       canvas.width = Math.round(displayWidth * dpr);
@@ -446,6 +458,15 @@
       elapsedBadge.textContent = `第 ${elapsed} 秒 / 300 秒`;
     }
 
+    // Chinese convention colors:
+    // 在开盘价上方 (涨 / UP) 用红色；跌到下方 (跌 / DOWN) 用绿色
+    const COLOR_ABOVE = '#cf202f'; // 红色 (开盘价上方 / 涨)
+    const COLOR_BELOW = '#05b169'; // 绿色 (跌到下方 / 跌)
+    const FILL_ABOVE_TOP = 'rgba(207, 32, 47, 0.16)';
+    const FILL_ABOVE_BOT = 'rgba(207, 32, 47, 0.01)';
+    const FILL_BELOW_TOP = 'rgba(5, 177, 105, 0.16)';
+    const FILL_BELOW_BOT = 'rgba(5, 177, 105, 0.01)';
+
     // Calculate High, Low, Range
     let highPx = openPx > 0 ? openPx : (live.spot || 0);
     let lowPx = openPx > 0 ? openPx : (live.spot || 0);
@@ -470,33 +491,87 @@
     const statRange = document.getElementById('chart-stat-range');
     if (statRange) statRange.textContent = `${rangeBps} bps`;
 
+    // Calculate Latest Probability and update header
+    const lastHistoryPt = history[history.length - 1];
+    let curProbUp = 0.5;
+    if (live.prob_up !== undefined) {
+      curProbUp = live.prob_up;
+    } else if (lastHistoryPt && lastHistoryPt.prob_up !== undefined) {
+      curProbUp = lastHistoryPt.prob_up;
+    } else if (live.spot && openPx > 0) {
+      curProbUp = live.spot >= openPx ? 0.6 : 0.4;
+    }
+    const curProbDn = 1.0 - curProbUp;
+    const pctUp = (curProbUp * 100).toFixed(1);
+    const pctDn = (curProbDn * 100).toFixed(1);
+
+    const statProbUp = document.getElementById('chart-stat-prob-up');
+    const statProbDn = document.getElementById('chart-stat-prob-dn');
+    if (statProbUp && statProbDn) {
+      statProbUp.textContent = `UP ${pctUp}%`;
+      statProbDn.textContent = `DN ${pctDn}%`;
+      if (curProbUp >= 0.5) {
+        statProbUp.style.color = COLOR_ABOVE; // 红色
+        statProbDn.style.color = '#6b7280';
+      } else {
+        statProbUp.style.color = '#6b7280';
+        statProbDn.style.color = COLOR_BELOW; // 绿色
+      }
+    }
+
     // Coordinates setup
     const padLeft = 24;
     const padRight = 135;
-    const padTop = 22;
     const padBottom = 26;
     const plotW = Math.max(10, W - padLeft - padRight);
-    const plotH = Math.max(10, H - padTop - padBottom);
 
     const timeToX = (t) => {
       const dt = Math.max(0, Math.min(300, t - startT));
       return padLeft + (dt / 300.0) * plotW;
     };
 
-    // Calculate price bounds with comfortable padding
-    const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
-    let minY = Math.min(lowPx, openPx - minBuffer);
-    let maxY = Math.max(highPx, openPx + minBuffer);
-    const ySpan = Math.max(0.1, maxY - minY);
-    const paddedMinY = minY - ySpan * 0.08;
-    const paddedMaxY = maxY + ySpan * 0.08;
-    const paddedSpan = paddedMaxY - paddedMinY;
+    // If history points < 2, draw friendly placeholder
+    if (history.length < 2) {
+      ctx.fillStyle = '#9ca3af';
+      ctx.textAlign = 'center';
+      ctx.font = '13px sans-serif';
+      ctx.fillText('新一轮刚刚启动，正在收集秒级高频价格点位与胜率演算...', padLeft + plotW / 2, H / 2);
+      ctx.restore();
+      return;
+    }
 
-    const priceToY = (px) => {
-      return padTop + plotH - ((px - paddedMinY) / paddedSpan) * plotH;
-    };
+    const currentPrice = (lastHistoryPt ? lastHistoryPt.price : live.spot) || openPx;
+    const isAboveOpen = currentPrice >= openPx;
+    const priceColor = isAboveOpen ? COLOR_ABOVE : COLOR_BELOW;
+    const priceFillTop = isAboveOpen ? FILL_ABOVE_TOP : FILL_BELOW_TOP;
+    const priceFillBot = isAboveOpen ? FILL_ABOVE_BOT : FILL_BELOW_BOT;
 
-    // 1. Draw Time Axis and Grid Lines (00:00, 01:00, 02:00, 03:00, 04:00, 05:00)
+    const probColor = curProbUp >= 0.5 ? COLOR_ABOVE : COLOR_BELOW;
+    const probFillTop = curProbUp >= 0.5 ? 'rgba(207, 32, 47, 0.14)' : 'rgba(5, 177, 105, 0.14)';
+    const probFillBot = 'rgba(255, 255, 255, 0.01)';
+
+    // Decide track heights based on chartMode
+    const mode = chartMode || 'dual';
+    let t1Top = 20;
+    let t1H = 120;
+    let t2Top = 168;
+    let t2H = 80;
+
+    if (mode === 'price') {
+      t1Top = 20;
+      t1H = H - t1Top - padBottom;
+    } else if (mode === 'prob') {
+      t2Top = 20;
+      t2H = H - t2Top - padBottom;
+    } else {
+      // dual mode
+      t1Top = 20;
+      t1H = Math.round((H - padBottom - 35) * 0.58);
+      t2Top = t1Top + t1H + 24;
+      t2H = H - padBottom - t2Top - 4;
+    }
+
+    // 1. Draw Time Axis and Grid Lines (00:00 to 05:00)
     ctx.lineWidth = 1;
     ctx.strokeStyle = '#f1f3f5';
     ctx.fillStyle = '#9ca3af';
@@ -506,146 +581,256 @@
     const timeTicks = [0, 60, 120, 180, 240, 300];
     const timeLabels = ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00'];
 
+    const gridTop = mode === 'prob' ? t2Top : t1Top;
+    const gridBottom = mode === 'price' ? (t1Top + t1H) : (t2Top + t2H);
+
     timeTicks.forEach((sec, idx) => {
       const x = padLeft + (sec / 300.0) * plotW;
       ctx.beginPath();
-      ctx.moveTo(x, padTop);
-      ctx.lineTo(x, padTop + plotH);
+      ctx.moveTo(x, gridTop);
+      ctx.lineTo(x, gridBottom);
       ctx.stroke();
 
       ctx.fillText(timeLabels[idx], x, H - 8);
     });
 
-    // 2. Draw Baseline Strike Price S_0 (Dashed Reference Line)
-    if (openPx > 0) {
-      const baselineY = priceToY(openPx);
-      ctx.save();
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 1.2;
+    // 2. Render Price Track (if dual or price)
+    if (mode === 'dual' || mode === 'price') {
+      // Track Title Label
+      ctx.fillStyle = '#64748b';
+      ctx.font = '600 11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('BTC 现货价格走势 (BTC/USD)', padLeft + 6, t1Top + 12);
+
+      // Price bounds
+      const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
+      let minY = Math.min(lowPx, openPx - minBuffer);
+      let maxY = Math.max(highPx, openPx + minBuffer);
+      const ySpan = Math.max(0.1, maxY - minY);
+      const paddedMinY = minY - ySpan * 0.08;
+      const paddedMaxY = maxY + ySpan * 0.08;
+      const paddedSpan = paddedMaxY - paddedMinY;
+
+      const priceToY = (px) => t1Top + t1H - ((px - paddedMinY) / paddedSpan) * t1H;
+
+      // Baseline strike price line S_0 (Dashed)
+      if (openPx > 0) {
+        const baselineY = priceToY(openPx);
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(padLeft, baselineY);
+        ctx.lineTo(padLeft + plotW, baselineY);
+        ctx.stroke();
+        ctx.restore();
+
+        // Baseline text on right
+        ctx.fillStyle = '#64748b';
+        ctx.textAlign = 'left';
+        ctx.font = '600 11px monospace';
+        ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselineY + 4);
+      }
+
+      // Build points for Price
+      const pts = history.map(pt => ({
+        x: timeToX(pt.t),
+        y: priceToY(pt.price),
+        price: pt.price,
+        bps: pt.return_bps,
+        t: pt.t
+      }));
+
+      const lastP = pts[pts.length - 1];
+
+      // Fill underneath price curve
+      const pGrad = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
+      pGrad.addColorStop(0, priceFillTop);
+      pGrad.addColorStop(1, priceFillBot);
+
       ctx.beginPath();
-      ctx.moveTo(padLeft, baselineY);
-      ctx.lineTo(padLeft + plotW, baselineY);
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+      ctx.lineTo(lastP.x, t1Top + t1H);
+      ctx.lineTo(pts[0].x, t1Top + t1H);
+      ctx.closePath();
+      ctx.fillStyle = pGrad;
+      ctx.fill();
+
+      // Stroke price curve: 开盘价上方用红，跌到下方用绿
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+      ctx.strokeStyle = priceColor;
+      ctx.lineWidth = 2.0;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // High point dot (红色, 开盘价上方) / Low point dot (绿色, 跌到下方)
+      let maxPt = pts[0];
+      let minPt = pts[0];
+      for (const p of pts) {
+        if (p.price > maxPt.price) maxPt = p;
+        if (p.price < minPt.price) minPt = p;
+      }
+      if (maxPt.x !== lastP.x && maxPt.price > openPx) {
+        ctx.fillStyle = COLOR_ABOVE; // 红色
+        ctx.beginPath();
+        ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (minPt.x !== lastP.x && minPt.price < openPx) {
+        ctx.fillStyle = COLOR_BELOW; // 绿色
+        ctx.beginPath();
+        ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Live Pulse Dot on latest price
+      ctx.beginPath();
+      ctx.arc(lastP.x, lastP.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = isAboveOpen ? 'rgba(207, 32, 47, 0.25)' : 'rgba(5, 177, 105, 0.25)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(lastP.x, lastP.y, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = priceColor;
+      ctx.fill();
+
+      // Right tag pill: 开盘价上方用红，跌到下方用绿
+      const tagW = 122;
+      const tagH = 22;
+      const tagX = padLeft + plotW + 8;
+      const tagY = Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastP.y - tagH / 2));
+
+      ctx.fillStyle = priceColor;
+      if (ctx.roundRect) {
+        ctx.beginPath();
+        ctx.roundRect(tagX, tagY, tagW, tagH, 4);
+        ctx.fill();
+      } else {
+        ctx.fillRect(tagX, tagY, tagW, tagH);
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '600 11px monospace';
+      ctx.textAlign = 'center';
+      const bpsSign = lastP.bps >= 0 ? '+' : '';
+      ctx.fillText(`$${lastP.price.toFixed(2)} (${bpsSign}${lastP.bps.toFixed(1)})`, tagX + tagW / 2, tagY + 15);
+    }
+
+    // 3. Render Probability Track (if dual or prob)
+    if (mode === 'dual' || mode === 'prob') {
+      // Track Title Label
+      ctx.fillStyle = '#64748b';
+      ctx.font = '600 11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('模型预测胜出概率走势 P(UP) / P(DOWN)', padLeft + 6, t2Top + 12);
+
+      // Prob Mapping: 0.0 to 1.0 -> y
+      const probToY = (p) => t2Top + t2H - Math.max(0.0, Math.min(1.0, p)) * t2H;
+
+      // 50% Baseline (Dashed)
+      const baseProbY = probToY(0.5);
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(padLeft, baseProbY);
+      ctx.lineTo(padLeft + plotW, baseProbY);
       ctx.stroke();
       ctx.restore();
 
-      // Baseline text label on the right
-      ctx.fillStyle = '#64748b';
+      // 50% text on right
+      ctx.fillStyle = '#94a3b8';
       ctx.textAlign = 'left';
-      ctx.font = '600 11px monospace';
-      ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselineY + 4);
-    }
+      ctx.font = '10px monospace';
+      ctx.fillText('50% 平衡线', padLeft + plotW + 8, baseProbY + 3);
 
-    // If history points < 2, draw friendly placeholder
-    if (history.length < 2) {
-      ctx.fillStyle = '#9ca3af';
+      // 100% and 0% edge markings
+      ctx.fillText('100%', padLeft + plotW + 8, t2Top + 8);
+      ctx.fillText('0%', padLeft + plotW + 8, t2Top + t2H);
+
+      // Build points for Probability
+      const probPts = history.map(pt => {
+        let p = pt.prob_up !== undefined ? pt.prob_up : (pt.price >= openPx ? 0.6 : 0.4);
+        return {
+          x: timeToX(pt.t),
+          y: probToY(p),
+          prob: p,
+          t: pt.t
+        };
+      });
+
+      const lastProbP = probPts[probPts.length - 1];
+
+      // Fill area under prob curve
+      const probGrad = ctx.createLinearGradient(0, t2Top, 0, t2Top + t2H);
+      probGrad.addColorStop(0, probFillTop);
+      probGrad.addColorStop(1, probFillBot);
+
+      ctx.beginPath();
+      ctx.moveTo(probPts[0].x, probPts[0].y);
+      for (let i = 1; i < probPts.length; i++) {
+        ctx.lineTo(probPts[i].x, probPts[i].y);
+      }
+      ctx.lineTo(lastProbP.x, t2Top + t2H);
+      ctx.lineTo(probPts[0].x, t2Top + t2H);
+      ctx.closePath();
+      ctx.fillStyle = probGrad;
+      ctx.fill();
+
+      // Stroke probability curve
+      ctx.beginPath();
+      ctx.moveTo(probPts[0].x, probPts[0].y);
+      for (let i = 1; i < probPts.length; i++) {
+        ctx.lineTo(probPts[i].x, probPts[i].y);
+      }
+      ctx.strokeStyle = probColor;
+      ctx.lineWidth = 2.0;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Live Pulse Dot on latest probability
+      ctx.beginPath();
+      ctx.arc(lastProbP.x, lastProbP.y, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = curProbUp >= 0.5 ? 'rgba(207, 32, 47, 0.25)' : 'rgba(5, 177, 105, 0.25)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(lastProbP.x, lastProbP.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = probColor;
+      ctx.fill();
+
+      // Right tag pill for probability
+      const probTagW = 100;
+      const probTagH = 20;
+      const probTagX = padLeft + plotW + 8;
+      const probTagY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastProbP.y - probTagH / 2));
+
+      ctx.fillStyle = probColor;
+      if (ctx.roundRect) {
+        ctx.beginPath();
+        ctx.roundRect(probTagX, probTagY, probTagW, probTagH, 4);
+        ctx.fill();
+      } else {
+        ctx.fillRect(probTagX, probTagY, probTagW, probTagH);
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 10px monospace';
       ctx.textAlign = 'center';
-      ctx.font = '13px sans-serif';
-      ctx.fillText('新一轮刚刚启动，正在收集秒级高频价格点位...', padLeft + plotW / 2, padTop + plotH / 2);
-      ctx.restore();
-      return;
+      const leadText = curProbUp >= 0.5 ? `UP ${pctUp}%` : `DN ${pctDn}%`;
+      ctx.fillText(leadText, probTagX + probTagW / 2, probTagY + 14);
     }
-
-    // 3. Build Points & Path for Price Curve
-    const points = history.map(pt => ({
-      x: timeToX(pt.t),
-      y: priceToY(pt.price),
-      price: pt.price,
-      bps: pt.return_bps,
-      t: pt.t
-    }));
-
-    const lastPt = points[points.length - 1];
-    const isUp = lastPt.price >= openPx;
-    const strokeColor = isUp ? '#05b169' : '#cf202f';
-    const fillColorTop = isUp ? 'rgba(5, 177, 105, 0.16)' : 'rgba(207, 32, 47, 0.16)';
-    const fillColorBottom = isUp ? 'rgba(5, 177, 105, 0.01)' : 'rgba(207, 32, 47, 0.01)';
-
-    // Fill area below curve
-    const gradient = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
-    gradient.addColorStop(0, fillColorTop);
-    gradient.addColorStop(1, fillColorBottom);
-
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) {
-      ctx.lineTo(points[i].x, points[i].y);
-    }
-    ctx.lineTo(lastPt.x, padTop + plotH);
-    ctx.lineTo(points[0].x, padTop + plotH);
-    ctx.closePath();
-    ctx.fillStyle = gradient;
-    ctx.fill();
-
-    // Stroke price curve
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) {
-      ctx.lineTo(points[i].x, points[i].y);
-    }
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 2.0;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.stroke();
-
-    // 4. Mark Window High and Low points with subtle dots
-    let maxPt = points[0];
-    let minPt = points[0];
-    for (const p of points) {
-      if (p.price > maxPt.price) maxPt = p;
-      if (p.price < minPt.price) minPt = p;
-    }
-
-    if (maxPt.x !== lastPt.x && maxPt.price > openPx) {
-      ctx.fillStyle = '#05b169';
-      ctx.beginPath();
-      ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    if (minPt.x !== lastPt.x && minPt.price < openPx) {
-      ctx.fillStyle = '#cf202f';
-      ctx.beginPath();
-      ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // 5. Draw Current Price Live Pulse Dot & Right Tag Pill
-    const currX = lastPt.x;
-    const currY = lastPt.y;
-
-    // Halo pulse ring
-    ctx.beginPath();
-    ctx.arc(currX, currY, 6, 0, Math.PI * 2);
-    ctx.fillStyle = isUp ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
-    ctx.fill();
-
-    // Center solid dot
-    ctx.beginPath();
-    ctx.arc(currX, currY, 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = strokeColor;
-    ctx.fill();
-
-    // Right-side current price tag pill
-    const tagW = 120;
-    const tagH = 22;
-    const tagX = padLeft + plotW + 8;
-    const tagY = Math.max(padTop, Math.min(padTop + plotH - tagH, currY - tagH / 2));
-
-    ctx.fillStyle = strokeColor;
-    if (ctx.roundRect) {
-      ctx.beginPath();
-      ctx.roundRect(tagX, tagY, tagW, tagH, 4);
-      ctx.fill();
-    } else {
-      ctx.fillRect(tagX, tagY, tagW, tagH);
-    }
-
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '600 11px monospace';
-    ctx.textAlign = 'center';
-    const bpsSign = lastPt.bps >= 0 ? '+' : '';
-    ctx.fillText(`$${lastPt.price.toFixed(2)} (${bpsSign}${lastPt.bps.toFixed(1)})`, tagX + tagW / 2, tagY + 15);
 
     ctx.restore();
   }
