@@ -65,9 +65,11 @@ class PaperRunner:
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
 
-    def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
+    def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook, net_stats: dict = None):
         """Execute one evaluation tick."""
         self.last_spot_price = spot.price
+        if net_stats:
+            self.net_stats = net_stats
         tau = max(0.0, self.window_end - now)
         decision = plan_decision(
             self.pos_up, self.pos_down, book_up, book_down, spot, tau, config.PARAMS
@@ -197,6 +199,33 @@ class PaperRunner:
         # Clear working orders
         self.working_orders = []
 
+    def reconcile_record(self, slug: str, open_px: float, close_px: float, winner: str):
+        """Update summary.jsonl and window detail archive with final official Chainlink TWAP truth."""
+        if not self.summary_file.exists():
+            return
+        lines = self.summary_file.read_text(encoding="utf-8").splitlines()
+        updated = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                if r.get("slug") == slug:
+                    r["open_px"] = round(open_px, 2)
+                    r["close_px"] = round(close_px, 2)
+                    r["winner"] = winner
+                    pos_up = float(r.get("pos_up", 0.0))
+                    pos_down = float(r.get("pos_down", 0.0))
+                    total_cost = float(r.get("total_cost", 0.0))
+                    proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
+                    r["proceeds"] = round(proceeds, 4)
+                    r["net_pnl"] = round(proceeds - total_cost, 4)
+                    r["result"] = "win" if r["net_pnl"] > 1e-4 else ("loss" if r["net_pnl"] < -1e-4 else "flat")
+                updated.append(json.dumps(r, ensure_ascii=False))
+            except Exception:
+                updated.append(line)
+        self.summary_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
     def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
         state = {
             "batch_id": config.BATCH_ID,
@@ -219,6 +248,7 @@ class PaperRunner:
             "fills_count": len(self.fills),
             "actions": self.actions,
             "insurance_paid": round(self.insurance_paid, 4),
+            "network": getattr(self, "net_stats", {}),
             "last_decision": self.decisions[-1] if self.decisions else None
         }
         tmp = self.live_file.with_suffix(".tmp")

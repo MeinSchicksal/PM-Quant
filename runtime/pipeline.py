@@ -47,6 +47,9 @@ class PipelineDriver:
 
         active_tokens = {}
         last_slug = None
+        last_start_t = None
+        pending_settlements = []
+        last_reconcile_t = 0.0
 
         while self.running:
             try:
@@ -57,16 +60,36 @@ class PipelineDriver:
                 end_t = info["end_t"]
                 tau_s = info["tau_s"]
 
+                # 0. Background Reconciler: Ensure delayed Chainlink TWAP replaces spot fallback
+                if loop_start - last_reconcile_t >= 5.0 and pending_settlements:
+                    last_reconcile_t = loop_start
+                    for item in list(pending_settlements):
+                        p_slug, p_start = item
+                        official_poly = self.feed.fetch_window_settlement_price(p_start)
+                        if official_poly:
+                            off_open, off_close, off_winner = official_poly
+                            self.runner.reconcile_record(p_slug, off_open, off_close, off_winner)
+                            pending_settlements.remove(item)
+                            print(f"[Pipeline] Official Chainlink TWAP confirmed for {p_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})\n")
+
                 # 1. Check Window Rollover / Expiration
                 if last_slug and last_slug != slug:
                     print(f"\n[Pipeline] Window {last_slug} ended. Settling...")
-                    # Fetch close price with safe fallback
-                    close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                    close_px = close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price)
-                    
-                    # Verify official Gamma settlement if available
-                    official = self.feed.verify_official_settlement(last_slug)
-                    official_winner = official.get("winner") if official else None
+                    # Try official Polymarket TWAP settlement prices first
+                    official_poly = self.feed.fetch_window_settlement_price(last_start_t) if last_start_t else None
+                    if official_poly:
+                        official_open, official_close, poly_winner = official_poly
+                        self.runner.open_price = official_open
+                        close_px = official_close
+                        official_winner = poly_winner
+                    else:
+                        close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
+                        close_px = close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price)
+                        official = self.feed.verify_official_settlement(last_slug)
+                        official_winner = official.get("winner") if official else None
+                        if last_start_t:
+                            pending_settlements.append((last_slug, last_start_t))
+
                     self.runner.close_window(close_px, official_winner)
                     res_tag = f"Official truth: {official_winner}" if official_winner else f"Close px: ${close_px:,.2f}"
                     print(f"[Pipeline] Window {last_slug} settled ({res_tag})! Recorded to summary.jsonl\n")
@@ -84,6 +107,7 @@ class PipelineDriver:
                     
                     self.runner.start_window(slug, start_t, end_t, open_px)
                     last_slug = slug
+                    last_start_t = start_t
                     tokens_label = f"UP={active_tokens.get('token_up', 'Pending')[:10]}..." if active_tokens.get('token_up') else "Pending"
                     print(f"[Pipeline] Tokens: {tokens_label} | Open Px: ${open_px:,.2f}")
 
@@ -97,7 +121,7 @@ class PipelineDriver:
                     b_up = self.feed.fetch_order_book(active_tokens["token_up"], "Up")
                     b_dn = self.feed.fetch_order_book(active_tokens["token_down"], "Down")
 
-                    self.runner.step(loop_start, spot, b_up, b_dn)
+                    self.runner.step(loop_start, spot, b_up, b_dn, net_stats=self.feed.get_net_summary())
 
                     # Formatted terminal status line
                     last_dec = self.runner.decisions[-1] if self.runner.decisions else {}

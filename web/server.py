@@ -9,7 +9,7 @@ import time
 import gzip
 import mimetypes
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,7 +179,11 @@ def _read_live():
         if not raw.get("slug"):
             return None
         raw["traded"] = bool(raw.get("fills_count"))
-        return _public_round(raw, raw, active=True)
+        raw["result"] = "pending"
+        raw["net_pnl"] = None
+        actions = raw.get("actions", [])
+        raw["average_prices"] = _average_prices(actions)
+        return raw
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 
@@ -207,6 +211,19 @@ class QuantHandler(BaseHTTPRequestHandler):
         elif path == "/api/live":
             active = _read_live()
             self.send_json(active or {"status": "idle", "message": "当前没有进行中的轮次"})
+        elif path == "/api/window":
+            qs = parse_qs(parsed.query)
+            slug = qs.get("slug", [""])[0]
+            target_batch = qs.get("batch", [config.BATCH_ID])[0]
+            if not slug or Path(slug).name != slug or Path(target_batch).name != target_batch:
+                self.send_json({"error": "Invalid slug or batch"}, status=400)
+                return
+            ledger_dir = config.LEDGERS_DIR / target_batch
+            detail = _read_detail(ledger_dir, slug)
+            if not detail:
+                self.send_json({"error": "Window not found"}, status=404)
+                return
+            self.send_json(detail)
         elif path == "/api/history":
             qs = parse_qs(parsed.query)
             target_batch = qs.get("batch", [config.BATCH_ID])[0]
@@ -232,24 +249,70 @@ class QuantHandler(BaseHTTPRequestHandler):
             records = [w for w in records if not str(w.get("slug", "")).startswith("test_")]
             traded = [w for w in records if w.get("traded") or _num(w.get("fills_count")) > 0 or abs(_num(w.get("net_pnl"))) > 1e-9]
             total_pnl = sum(_num(w.get("net_pnl")) for w in traded)
+            total_won = sum(_num(w.get("net_pnl")) for w in traded if _num(w.get("net_pnl")) > 1e-9)
+            total_lost = sum(abs(_num(w.get("net_pnl"))) for w in traded if _num(w.get("net_pnl")) < -1e-9)
+            turnover = sum(_num(w.get("total_cost")) for w in traded)
             wins = sum(1 for w in traded if _num(w.get("net_pnl")) > 1e-9)
             losses = sum(1 for w in traded if _num(w.get("net_pnl")) < -1e-9)
             count = len(traded)
+            flats = count - wins - losses
+
+            # Calculate cumulative equity curve
+            equity_curve = []
+            running_pnl = 0.0
+            for w in traded:
+                running_pnl += _num(w.get("net_pnl"))
+                equity_curve.append({
+                    "slug": w.get("slug"),
+                    "pnl": round(running_pnl, 4),
+                    "start": _num(w.get("start"))
+                })
 
             latest = list(reversed(records))[:50]
             rounds = [_public_round(w, _read_detail(ledger_dir, w.get("slug", ""))) for w in latest]
             active = _read_live() if target_batch == config.BATCH_ID else None
-            if active and not any(r["slug"] == active["slug"] for r in rounds):
+            if active and not any(r.get("slug") == active.get("slug") for r in rounds):
                 rounds.insert(0, active)
 
+            decisive = wins + losses
+            win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
+
+            INITIAL_CAPITAL = 100.0
+            available_capital = round(INITIAL_CAPITAL + total_pnl, 4)
+            roi_pct = round((total_pnl / INITIAL_CAPITAL) * 100.0, 2)
+            turnover_roi_pct = round((total_pnl / turnover) * 100.0, 2) if turnover > 1e-4 else 0.0
+
+            active_cost = 0.0
+            if active:
+                pos_up = active.get("pos_up") or {}
+                pos_dn = active.get("pos_down") or {}
+                active_cost = round(_num(pos_up.get("cash")) + _num(pos_dn.get("cash")), 4)
+
+            free_capital = round(max(0.0, available_capital - active_cost), 4)
+
             self.send_json({
+                "initial_capital": INITIAL_CAPITAL,
+                "available_capital": available_capital,
+                "active_cost": active_cost,
+                "free_capital": free_capital,
+                "roi_pct": roi_pct,
+                "turnover_roi_pct": turnover_roi_pct,
                 "total_pnl": round(total_pnl, 4),
-                "win_rate": round((wins / count) * 100, 1) if count else 0.0,
+                "total_won": round(total_won, 4),
+                "total_lost": round(total_lost, 4),
+                "turnover": round(turnover, 4),
+                "win_rate": win_rate,
+                "win_rate_all": round((wins / count) * 100, 1) if count else 0.0,
                 "avg_pnl": round(total_pnl / count, 4) if count else 0.0,
+                "avg_win": round(total_won / wins, 4) if wins else 0.0,
+                "avg_loss": round(total_lost / losses, 4) if losses else 0.0,
                 "wins": wins,
                 "losses": losses,
+                "flats": flats,
                 "traded_rounds": count,
                 "total_rounds": len(records),
+                "equity_curve": equity_curve,
+                "records": list(reversed(records)),
                 "rounds": rounds,
             })
         else:
@@ -283,9 +346,10 @@ class QuantHandler(BaseHTTPRequestHandler):
 
 
 def run(port=8900):
-    server_address = ("0.0.0.0", port)
-    httpd = HTTPServer(server_address, QuantHandler)
-    print(f"PM-Quant investor dashboard: http://localhost:{port}/")
+    # Loopback-only: the investor dashboard must not be exposed on the LAN.
+    server_address = ("127.0.0.1", port)
+    httpd = ThreadingHTTPServer(server_address, QuantHandler)
+    print(f"PM-Quant investor dashboard: http://127.0.0.1:{port}/")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

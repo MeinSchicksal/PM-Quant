@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import json
+import datetime
 import requests
 from collections import deque
 from pathlib import Path
@@ -34,6 +35,50 @@ class MarketFeed:
         
         self.slug_cache = {}
         self.spot_history = deque(maxlen=60)  # (timestamp, price) history for velocity & volatility
+
+        # Real-time network speed, latency, and traffic accounting
+        self.net_stats = {
+            "poly_latency_ms": 0.0,
+            "binance_latency_ms": 0.0,
+            "downstream_kbps": 0.0,
+            "total_bytes": 0,
+            "bytes_window": 0,
+            "last_calc_t": time.time(),
+            "msg_rate": 0.0,
+            "msgs_window": 0,
+        }
+
+    def _record_net(self, source: str, lat_ms: float, byte_count: int):
+        now = time.time()
+        if source == "poly":
+            self.net_stats["poly_latency_ms"] = round(lat_ms, 1)
+        elif source == "binance":
+            self.net_stats["binance_latency_ms"] = round(lat_ms, 1)
+
+        self.net_stats["total_bytes"] += byte_count
+        self.net_stats["bytes_window"] += byte_count
+        self.net_stats["msgs_window"] += 1
+
+        dt = now - self.net_stats["last_calc_t"]
+        if dt >= 1.0:
+            self.net_stats["downstream_kbps"] = round((self.net_stats["bytes_window"] / 1024.0) / dt, 1)
+            self.net_stats["msg_rate"] = round(self.net_stats["msgs_window"] / dt, 1)
+            self.net_stats["bytes_window"] = 0
+            self.net_stats["msgs_window"] = 0
+            self.net_stats["last_calc_t"] = now
+
+    def get_net_summary(self) -> dict:
+        poly_lat = self.net_stats.get("poly_latency_ms", 0.0)
+        binance_lat = self.net_stats.get("binance_latency_ms", 0.0)
+        avg_lat = round((poly_lat + binance_lat) / 2.0, 1) if (poly_lat and binance_lat) else (poly_lat or binance_lat)
+        return {
+            "poly_latency_ms": poly_lat,
+            "binance_latency_ms": binance_lat,
+            "avg_latency_ms": avg_lat,
+            "downstream_kbps": self.net_stats.get("downstream_kbps", 0.0),
+            "total_mb": round(self.net_stats.get("total_bytes", 0) / (1024 * 1024), 2),
+            "msg_rate": self.net_stats.get("msg_rate", 0.0)
+        }
 
     def _test_connectivity(self):
         """Verify whether proxy or direct connection works best."""
@@ -123,7 +168,35 @@ class MarketFeed:
         return {}
 
     def fetch_window_open_price(self, start_t: float) -> float:
-        """Fetch BTC spot price at the start of the 5-minute window via Kline."""
+        """Fetch BTC reference open price: First try Polymarket official Chainlink TWAP, then Binance Kline fallback."""
+        # 1. Primary: Polymarket official Chainlink BTC/USD TWAP
+        try:
+            iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            iso_end = datetime.datetime.fromtimestamp(start_t + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            poly_url = "https://polymarket.com/api/crypto/crypto-price"
+            params = {
+                "symbol": "BTC",
+                "eventStartTime": iso_start,
+                "variant": "fiveminute",
+                "endDate": iso_end,
+                "twapEnabled": "true",
+                "twapLookbackSeconds": "60"
+            }
+            resp = self.session.get(poly_url, params=params, timeout=3.5)
+            if resp.status_code == 200:
+                body = resp.json()
+                open_px = body.get("openPrice")
+                if open_px and float(open_px) > 0:
+                    val = float(open_px)
+                    self.record_raw_event("oracle", {
+                        "t": time.time(), "kind": "window_open", "source": "polymarket_chainlink_twap",
+                        "start_t": start_t, "open_price": val
+                    })
+                    return val
+        except Exception:
+            pass
+
+        # 2. Fallback: Binance Spot 5m Kline
         start_ms = int(start_t * 1000)
         url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
         try:
@@ -131,24 +204,56 @@ class MarketFeed:
             if resp.status_code == 200:
                 klines = resp.json()
                 if klines and len(klines) > 0:
-                    open_px = float(klines[0][1])  # Open price
+                    open_px = float(klines[0][1])
                     self.record_raw_event("oracle", {
-                        "t": time.time(), "kind": "window_open", "start_t": start_t, "open_price": open_px
+                        "t": time.time(), "kind": "window_open", "source": "binance_spot",
+                        "start_t": start_t, "open_price": open_px
                     })
                     return open_px
         except Exception:
             pass
         return 0.0
 
+    def fetch_window_settlement_price(self, start_t: float) -> Optional[Tuple[float, float, str]]:
+        """Fetch official settlement open, close, and winner from Polymarket's crypto-price API."""
+        try:
+            iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            iso_end = datetime.datetime.fromtimestamp(start_t + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            poly_url = "https://polymarket.com/api/crypto/crypto-price"
+            params = {
+                "symbol": "BTC",
+                "eventStartTime": iso_start,
+                "variant": "fiveminute",
+                "endDate": iso_end,
+                "twapEnabled": "true",
+                "twapLookbackSeconds": "60"
+            }
+            resp = self.session.get(poly_url, params=params, timeout=3.5)
+            if resp.status_code == 200:
+                body = resp.json()
+                if body.get("completed") and body.get("closePrice") is not None:
+                    open_px = float(body.get("openPrice", 0))
+                    close_px = float(body.get("closePrice", 0))
+                    winner = "Up" if close_px >= open_px else "Down"
+                    return open_px, close_px, winner
+        except Exception:
+            pass
+        return None
+
     def fetch_spot_state(self, open_price: float, now: float = None) -> SpotState:
         """Fetch current Binance BTC spot, compute 3s velocity, return bps, and rolling volatility."""
         t = now or time.time()
         url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
         current_px = open_price
+        t0 = time.perf_counter()
+        byte_count = 0
         try:
             resp = self.session.get(url, timeout=2.0)
+            lat_ms = (time.perf_counter() - t0) * 1000.0
+            byte_count = len(resp.content)
             if resp.status_code == 200:
                 current_px = float(resp.json().get("price", open_price))
+            self._record_net("binance", lat_ms, byte_count)
         except Exception:
             pass
 
@@ -186,8 +291,12 @@ class MarketFeed:
     def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:
         """Fetch Polymarket CLOB order book and last_trade_price."""
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
+        t0 = time.perf_counter()
         try:
             resp = self.session.get(url, timeout=2.0)
+            lat_ms = (time.perf_counter() - t0) * 1000.0
+            byte_count = len(resp.content)
+            self._record_net("poly", lat_ms, byte_count)
             if resp.status_code == 200:
                 data = resp.json()
                 raw_bids = data.get("bids", [])
@@ -210,6 +319,8 @@ class MarketFeed:
                     "outcome": outcome_name,
                     "best_bid": bids_sorted[0][0] if bids_sorted else None,
                     "best_ask": asks_sorted[0][0] if asks_sorted else None,
+                    "bid_depth": bids_sorted[:5],
+                    "ask_depth": asks_sorted[:5],
                     "last_trade_price": last_trade_px
                 })
 

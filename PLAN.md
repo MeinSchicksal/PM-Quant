@@ -88,13 +88,16 @@ flowchart TD
 2. **解决“撮合器脱离真实成交”（FIFO 排队与成交流驱动）**：
    - 废除“只看每秒 REST 快照卖一价是否穿价”的粗糙判定。
    - 接入 `last_trade_price` 成交流与 `sim/matcher.py`：挂单在 `placed_at + LATENCY_S` 后生效，按当时同价位挂单深度初始化 `queue_ahead`，仅当真实市场成交发生在挂单价或更优价时扣减 `queue_ahead`，队列耗尽才触发部分或全部成交。
-3. **解决“开盘价与结算判准失真”（真值对齐）**：
-   - 市场准入检查明确核验 `Chainlink` 结算源描述；
-   - 窗口最终胜负以 Gamma API 已完成结算（`umaResolutionStatus == "resolved"` 且 `outcomePrices` 为 `[0, 1]`）为权威真值，避免币安现货与 Chainlink 预言机在微小波动窗口出现判准背离。
+3. **解决“开盘价与结算判准失真”（真值与官方预言机对齐）**：
+   - 市场准入与开盘基准优先直连 Polymarket 官方 `crypto-price` 接口（`https://polymarket.com/api/crypto/crypto-price`），获取官方 Chainlink BTC/USD 60s TWAP 开盘价，仅在异常时回退币安现货，杜绝跨所基差（Oracle Basis）带来的价格脱节；
+   - 窗口结算最终胜负由 Polymarket 官方结算接口及 Gamma API 已完成结算（`umaResolutionStatus == "resolved"` 且 `outcomePrices` 为 `[0, 1]`）双重校验为权威真值。
 4. **解决“波动率与手续费写死”（动态校准）**：
    - 由实时现货序列滚动计算真实已实现波动率 `realized_vol_bps`，替代静态写死的 `15.0 bps`；
    - 从市场元数据读取实际 `makerBaseFee` / `takerBaseFee` 计算净收益。
-5. **解决“测试污染正式账本”（严格环境隔离）**：
+5. **解决“资金与收益口径模糊”（财务口径隔离）**：
+   - 严格区分并独立展示**可用资金（Available Capital = 初始本金 $100.00 + 累计已结算净收益）**与**周转资金（Turnover Capital = 历史各轮累计成交流水总额）**；
+   - 看板统一采用北京时间（UTC+8）展示轮次区间，剔除无意义的 Unix timestamp slug。
+6. **解决“测试污染正式账本”（严格环境隔离）**：
    - 所有单元测试强制使用 `tempfile.TemporaryDirectory()`，严禁向 `data/2_ledgers/v1.0/` 写入任何测试记录。
 
 ---
