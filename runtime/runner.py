@@ -46,6 +46,7 @@ class PaperRunner:
         self.actions = []
         self.insurance_paid = 0.0
         self.total_pnl = 0.0
+        self.price_history = []
         self._load_ledger_history()
 
     def _load_ledger_history(self):
@@ -77,6 +78,9 @@ class PaperRunner:
         self.actions = []
         self.insurance_paid = 0.0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
+        self.price_history = [
+            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0}
+        ] if open_px > 0 else []
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
@@ -98,6 +102,15 @@ class PaperRunner:
     ):
         """Execute one evaluation tick with circuit breaker, Kelly sizing, and live trade prints."""
         self.last_spot_price = spot.price
+        if spot.price > 0:
+            self.price_history.append({
+                "t": round(now, 1),
+                "price": round(spot.price, 2),
+                "return_bps": round(spot.return_bps, 2)
+            })
+            if len(self.price_history) > 360:
+                self.price_history = self.price_history[-360:]
+
         if net_stats:
             self.net_stats = net_stats
         tau = max(0.0, self.window_end - now)
@@ -307,6 +320,7 @@ class PaperRunner:
             "circuit_breaker": self.circuit_breaker.get_status(now),
             "available_capital": round(max(10.0, 100.0 + self.total_pnl), 2),
             "total_pnl": round(self.total_pnl, 4),
+            "price_history": self.price_history,
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
             "working_orders": [

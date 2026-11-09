@@ -31,10 +31,13 @@ def is_pid_running(pid: int) -> bool:
             kernel32 = ctypes.windll.kernel32
             # 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
             handle = kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
+            if not handle:
+                return False
+            exit_code = ctypes.c_ulong()
+            success = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            # 259 = STILL_ACTIVE
+            return bool(success and exit_code.value == 259)
         else:
             os.kill(pid, 0)
             return True

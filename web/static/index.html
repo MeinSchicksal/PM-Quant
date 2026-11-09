@@ -372,15 +372,36 @@
         </section>
       </div>
 
-      <!-- Strategy Decision & Working Order -->
-      <section class="panel decision-panel">
-        <div class="decision-head">
-          <div class="decision-title">
-            <span>当前策略仲裁与在途挂单</span>
+      <!-- Live Price Fluctuation & Strategy Arbitration Chart Panel -->
+      <section class="panel live-chart-panel" aria-label="本轮价格走势与策略仲裁">
+        <div class="chart-panel-head">
+          <div class="chart-title-group">
+            <div class="chart-title-row">
+              <span class="chart-main-title">本轮价格走势与实时微观仲裁</span>
+              <span class="chart-sub-tag" id="chart-elapsed-badge">第 0 秒 / 300 秒</span>
+            </div>
+            <div class="chart-stats-row">
+              <span class="chart-stat-item">基准开盘: <strong id="chart-stat-open">$0.00</strong></span>
+              <span class="chart-stat-sep">·</span>
+              <span class="chart-stat-item">最高: <strong class="up" id="chart-stat-high">$0.00</strong></span>
+              <span class="chart-stat-sep">·</span>
+              <span class="chart-stat-item">最低: <strong class="down" id="chart-stat-low">$0.00</strong></span>
+              <span class="chart-stat-sep">·</span>
+              <span class="chart-stat-item">区间振幅: <strong id="chart-stat-range">0.0 bps</strong></span>
+            </div>
           </div>
-          <span class="order-pill" id="working-order-pill">无在途挂单</span>
+          <div class="chart-status-group">
+            <span class="order-pill" id="working-order-pill">无在途挂单</span>
+            <div class="decision-badge" id="decision-badge">
+              <span class="decision-dot"></span>
+              <span id="decision-reason">策略评估中...</span>
+            </div>
+          </div>
         </div>
-        <p class="decision-reason" id="decision-reason">策略评估中...</p>
+
+        <div class="canvas-container">
+          <canvas id="live-price-canvas" height="220"></canvas>
+        </div>
       </section>
 
       <!-- Live Order Feed -->

@@ -123,6 +123,10 @@
       history: '场次记录'
     };
     pageTitle.textContent = titles[target] || '交易总览';
+
+    if (target === 'market' && liveData) {
+      setTimeout(() => drawLivePriceChart(liveData), 30);
+    }
   }
 
   sidebarLinks.forEach(link => {
@@ -288,6 +292,364 @@
     tbody.innerHTML = rows;
   }
 
+  // Translate internal strategy arbitration into professional investor Chinese
+  function translateDecisionReason(decision) {
+    if (!decision || (!decision.reason && !decision.action)) {
+      return { text: "实时微观行情评估中...", level: "normal" };
+    }
+    const reason = (decision.reason || '').toLowerCase();
+    const action = (decision.action || '').toLowerCase();
+    const side = (decision.side || '').toUpperCase();
+    const pxStr = decision.price !== undefined && decision.price !== null ? `$${Number(decision.price).toFixed(2)}` : '';
+
+    // 1. Toxic shock
+    if (reason.includes('toxic') || reason.includes('shock')) {
+      return {
+        text: "⚠️ 现货剧烈跳空 (毒流冲击)：挂单主动收缩，防范逆选择吃单",
+        level: "warn"
+      };
+    }
+
+    // 2. Circuit breaker / drawdown / streak
+    if (reason.includes('circuit') || reason.includes('drawdown')) {
+      return {
+        text: "🛑 日度熔断看门狗生效：已禁止新开 Leg-1 单边仓位，仅保留对冲防守",
+        level: "warn"
+      };
+    }
+    if (reason.includes('cooling') || reason.includes('streak')) {
+      return {
+        text: "❄️ 连续亏损休眠机制启动：进入观察冷却期，杜绝情绪化连续开仓",
+        level: "warn"
+      };
+    }
+
+    // 3. Max position reached
+    if (reason.includes('max position') || reason.includes('position reached')) {
+      return {
+        text: "⏸️ 单轮持仓已达风控上限 (15 股)：停止增仓，锁定底仓等待期末清算",
+        level: "freeze"
+      };
+    }
+
+    // 4. Tail freeze
+    if (reason.includes('tail freeze') || reason.includes('freeze') || reason.includes('tau <') || reason.includes('tau<')) {
+      return {
+        text: "⏱️ 临近结算交割窗口 (Tau ≤ 60s)：冻结新开仓以规避尾盘剧震风险",
+        level: "freeze"
+      };
+    }
+
+    // 5. Entries (Maker)
+    if (reason.includes('enter up') || (action === 'maker' && side === 'UP')) {
+      return {
+        text: `🟢 概率优势触发：在买一排队挂 Maker 订单买入 UP ${pxStr}`,
+        level: "ok"
+      };
+    }
+    if (reason.includes('enter down') || (action === 'maker' && side === 'DOWN')) {
+      return {
+        text: `🔴 概率优势触发：在买一排队挂 Maker 订单买入 DOWN ${pxStr}`,
+        level: "down"
+      };
+    }
+
+    // 6. Hedge / Unwind
+    if (reason.includes('u_hedge') || reason.includes('take hedge') || reason.includes('hedge')) {
+      const sideText = side === 'DOWN' ? 'DOWN' : 'UP';
+      return {
+        text: `🛡️ 组合腿失衡对冲：市价抢单买入 ${sideText} 完成配平锁赢`,
+        level: "ok"
+      };
+    }
+    if (reason.includes('unwind') || reason.includes('u_sell')) {
+      return {
+        text: `🔄 逆风平仓止损：主动减仓化解单边敞口暴露`,
+        level: "warn"
+      };
+    }
+
+    // 7. Capital restriction
+    if (reason.includes('insufficient capital') || reason.includes('capital')) {
+      return {
+        text: "⚠️ 账户可用资金受限：不足以满足凯利单笔最小下单要求，维持守势",
+        level: "warn"
+      };
+    }
+
+    // 8. Queue timeout / tight spread
+    if (reason.includes('too tight')) {
+      return {
+        text: "⏳ 盘口对家价差过窄：被动 Maker 期望收益不足，暂缓挂单",
+        level: "normal"
+      };
+    }
+    if (reason.includes('timeout') || reason.includes('cancel')) {
+      return {
+        text: "🔄 排队等待超时：撤销未撮合委托，重新寻找最优买一挂单点位",
+        level: "normal"
+      };
+    }
+
+    // 9. No edge
+    if (reason.includes('no edge') || reason.includes('uncertainty')) {
+      return {
+        text: "⚖️ 胜率未超安全垫阈值 (±ε)：当前价差不具备统计套利优势，保持观望",
+        level: "normal"
+      };
+    }
+
+    // 10. Default clean fallback
+    return {
+      text: decision.reason || "系统微观跟踪中，实时评估盘口深度与价差",
+      level: "normal"
+    };
+  }
+
+  // High-DPI Real-time Canvas Price Fluctuation Chart
+  function drawLivePriceChart(live) {
+    const canvas = document.getElementById('live-price-canvas');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Adapt to Retina / High-DPI
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const displayWidth = Math.round(rect.width || canvas.clientWidth || 800);
+    const displayHeight = Math.round(rect.height || canvas.clientHeight || 220);
+
+    if (canvas.width !== Math.round(displayWidth * dpr) || canvas.height !== Math.round(displayHeight * dpr)) {
+      canvas.width = Math.round(displayWidth * dpr);
+      canvas.height = Math.round(displayHeight * dpr);
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    const W = displayWidth;
+    const H = displayHeight;
+
+    // Clear background
+    ctx.clearRect(0, 0, W, H);
+
+    const openPx = live.open_px || 0;
+    const history = (live.price_history && live.price_history.length > 0) ? live.price_history : [];
+    const startT = live.start || (history[0] ? history[0].t : 0);
+    const nowT = live.now || (Date.now() / 1000);
+    const elapsed = Math.max(0, Math.min(300, Math.round(nowT - startT)));
+
+    // Update elapsed badge
+    const elapsedBadge = document.getElementById('chart-elapsed-badge');
+    if (elapsedBadge) {
+      elapsedBadge.textContent = `第 ${elapsed} 秒 / 300 秒`;
+    }
+
+    // Calculate High, Low, Range
+    let highPx = openPx > 0 ? openPx : (live.spot || 0);
+    let lowPx = openPx > 0 ? openPx : (live.spot || 0);
+    for (const pt of history) {
+      if (pt.price > highPx) highPx = pt.price;
+      if (pt.price < lowPx) lowPx = pt.price;
+    }
+    if (live.spot) {
+      if (live.spot > highPx) highPx = live.spot;
+      if (live.spot < lowPx) lowPx = live.spot;
+    }
+
+    const rangeDiff = highPx - lowPx;
+    const rangeBps = openPx > 0 ? ((rangeDiff / openPx) * 10000).toFixed(1) : '0.0';
+
+    const statOpen = document.getElementById('chart-stat-open');
+    if (statOpen) statOpen.textContent = openPx > 0 ? `$${openPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
+    const statHigh = document.getElementById('chart-stat-high');
+    if (statHigh) statHigh.textContent = highPx > 0 ? `$${highPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
+    const statLow = document.getElementById('chart-stat-low');
+    if (statLow) statLow.textContent = lowPx > 0 ? `$${lowPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
+    const statRange = document.getElementById('chart-stat-range');
+    if (statRange) statRange.textContent = `${rangeBps} bps`;
+
+    // Coordinates setup
+    const padLeft = 24;
+    const padRight = 135;
+    const padTop = 22;
+    const padBottom = 26;
+    const plotW = Math.max(10, W - padLeft - padRight);
+    const plotH = Math.max(10, H - padTop - padBottom);
+
+    const timeToX = (t) => {
+      const dt = Math.max(0, Math.min(300, t - startT));
+      return padLeft + (dt / 300.0) * plotW;
+    };
+
+    // Calculate price bounds with comfortable padding
+    const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
+    let minY = Math.min(lowPx, openPx - minBuffer);
+    let maxY = Math.max(highPx, openPx + minBuffer);
+    const ySpan = Math.max(0.1, maxY - minY);
+    const paddedMinY = minY - ySpan * 0.08;
+    const paddedMaxY = maxY + ySpan * 0.08;
+    const paddedSpan = paddedMaxY - paddedMinY;
+
+    const priceToY = (px) => {
+      return padTop + plotH - ((px - paddedMinY) / paddedSpan) * plotH;
+    };
+
+    // 1. Draw Time Axis and Grid Lines (00:00, 01:00, 02:00, 03:00, 04:00, 05:00)
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#f1f3f5';
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+
+    const timeTicks = [0, 60, 120, 180, 240, 300];
+    const timeLabels = ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00'];
+
+    timeTicks.forEach((sec, idx) => {
+      const x = padLeft + (sec / 300.0) * plotW;
+      ctx.beginPath();
+      ctx.moveTo(x, padTop);
+      ctx.lineTo(x, padTop + plotH);
+      ctx.stroke();
+
+      ctx.fillText(timeLabels[idx], x, H - 8);
+    });
+
+    // 2. Draw Baseline Strike Price S_0 (Dashed Reference Line)
+    if (openPx > 0) {
+      const baselineY = priceToY(openPx);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(padLeft, baselineY);
+      ctx.lineTo(padLeft + plotW, baselineY);
+      ctx.stroke();
+      ctx.restore();
+
+      // Baseline text label on the right
+      ctx.fillStyle = '#64748b';
+      ctx.textAlign = 'left';
+      ctx.font = '600 11px monospace';
+      ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselineY + 4);
+    }
+
+    // If history points < 2, draw friendly placeholder
+    if (history.length < 2) {
+      ctx.fillStyle = '#9ca3af';
+      ctx.textAlign = 'center';
+      ctx.font = '13px sans-serif';
+      ctx.fillText('新一轮刚刚启动，正在收集秒级高频价格点位...', padLeft + plotW / 2, padTop + plotH / 2);
+      ctx.restore();
+      return;
+    }
+
+    // 3. Build Points & Path for Price Curve
+    const points = history.map(pt => ({
+      x: timeToX(pt.t),
+      y: priceToY(pt.price),
+      price: pt.price,
+      bps: pt.return_bps,
+      t: pt.t
+    }));
+
+    const lastPt = points[points.length - 1];
+    const isUp = lastPt.price >= openPx;
+    const strokeColor = isUp ? '#05b169' : '#cf202f';
+    const fillColorTop = isUp ? 'rgba(5, 177, 105, 0.16)' : 'rgba(207, 32, 47, 0.16)';
+    const fillColorBottom = isUp ? 'rgba(5, 177, 105, 0.01)' : 'rgba(207, 32, 47, 0.01)';
+
+    // Fill area below curve
+    const gradient = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
+    gradient.addColorStop(0, fillColorTop);
+    gradient.addColorStop(1, fillColorBottom);
+
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.lineTo(lastPt.x, padTop + plotH);
+    ctx.lineTo(points[0].x, padTop + plotH);
+    ctx.closePath();
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    // Stroke price curve
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2.0;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // 4. Mark Window High and Low points with subtle dots
+    let maxPt = points[0];
+    let minPt = points[0];
+    for (const p of points) {
+      if (p.price > maxPt.price) maxPt = p;
+      if (p.price < minPt.price) minPt = p;
+    }
+
+    if (maxPt.x !== lastPt.x && maxPt.price > openPx) {
+      ctx.fillStyle = '#05b169';
+      ctx.beginPath();
+      ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (minPt.x !== lastPt.x && minPt.price < openPx) {
+      ctx.fillStyle = '#cf202f';
+      ctx.beginPath();
+      ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 5. Draw Current Price Live Pulse Dot & Right Tag Pill
+    const currX = lastPt.x;
+    const currY = lastPt.y;
+
+    // Halo pulse ring
+    ctx.beginPath();
+    ctx.arc(currX, currY, 6, 0, Math.PI * 2);
+    ctx.fillStyle = isUp ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
+    ctx.fill();
+
+    // Center solid dot
+    ctx.beginPath();
+    ctx.arc(currX, currY, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = strokeColor;
+    ctx.fill();
+
+    // Right-side current price tag pill
+    const tagW = 120;
+    const tagH = 22;
+    const tagX = padLeft + plotW + 8;
+    const tagY = Math.max(padTop, Math.min(padTop + plotH - tagH, currY - tagH / 2));
+
+    ctx.fillStyle = strokeColor;
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, tagW, tagH, 4);
+      ctx.fill();
+    } else {
+      ctx.fillRect(tagX, tagY, tagW, tagH);
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '600 11px monospace';
+    ctx.textAlign = 'center';
+    const bpsSign = lastPt.bps >= 0 ? '+' : '';
+    ctx.fillText(`$${lastPt.price.toFixed(2)} (${bpsSign}${lastPt.bps.toFixed(1)})`, tagX + tagW / 2, tagY + 15);
+
+    ctx.restore();
+  }
+
   // Update Live Market Workspace
   function updateMarket(live) {
     if (!live || !live.slug) {
@@ -377,7 +739,7 @@
     dnPayoutEl.textContent = `胜出预期: ${pnlIfDn >= 0 ? '+' : ''}$${pnlIfDn.toFixed(2)}`;
     dnPayoutEl.className = 'side-settle-pnl ' + (pnlIfDn > 0 ? 'up' : pnlIfDn < 0 ? 'down' : '');
 
-    // Working Orders & Policy Reason
+    // Working Orders & Strategy Decision
     const orders = live.working_orders || [];
     const pill = document.getElementById('working-order-pill');
     if (orders.length > 0) {
@@ -390,7 +752,18 @@
     }
 
     const decision = live.last_decision || {};
-    document.getElementById('decision-reason').textContent = decision.reason || '策略评估最优微观价差中...';
+    const trans = translateDecisionReason(decision);
+    const badgeEl = document.getElementById('decision-badge');
+    if (badgeEl) {
+      badgeEl.className = 'decision-badge ' + (trans.level || 'normal');
+    }
+    const decEl = document.getElementById('decision-reason');
+    if (decEl) {
+      decEl.textContent = trans.text;
+    }
+
+    // High-DPI Real-time Canvas Price Fluctuation Curve
+    drawLivePriceChart(live);
 
     // Live Actions Feed
     const feed = document.getElementById('live-action-feed');
@@ -533,6 +906,12 @@
     refreshBtn.style.transform = 'rotate(180deg)';
     setTimeout(() => { refreshBtn.style.transform = 'none'; }, 250);
     poll();
+  });
+
+  window.addEventListener('resize', () => {
+    if (currentTab === 'market' && liveData) {
+      drawLivePriceChart(liveData);
+    }
   });
 
   setInterval(poll, 1000);
