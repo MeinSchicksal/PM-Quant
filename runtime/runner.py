@@ -17,6 +17,7 @@ import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
 from core.execution import plan_order_actions, quantize_lots
+from sim.matcher import QueueMatcher
 
 
 class PaperRunner:
@@ -26,6 +27,7 @@ class PaperRunner:
         self.live_file = self.ledger_dir / "live.json"
         self.windows_dir = self.ledger_dir / "windows"
         self.windows_dir.mkdir(parents=True, exist_ok=True)
+        self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         
         self.current_slug = ""
         self.window_start = 0.0
@@ -52,6 +54,7 @@ class PaperRunner:
         self.decisions = []
         self.actions = []
         self.insurance_paid = 0.0
+        self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
@@ -120,44 +123,44 @@ class PaperRunner:
                 placed_at=now,
                 live_at=now + config.PARAMS["LATENCY_S"]
             )
+            target_book = book_up if action.side == "Up" else book_down
+            self.matcher.register_order(new_order, target_book)
             self.working_orders.append(new_order)
             self.actions.append({
                 "t": round(now, 2), "action": "quote", "side": action.side,
                 "price": action.price, "size": action.size, "purpose": purpose
             })
 
-        # 3. Maker queue fill evaluation against order books
+        # 3. FIFO Queue Matcher evaluation against book cross and trade prints
         remaining_working = []
         for o in self.working_orders:
-            if o.live_at is not None and now >= o.live_at:
-                is_filled = False
-                if o.side == "Up" and book_up.best_ask is not None and book_up.best_ask <= o.price:
-                    self.pos_up.shares += o.remaining
-                    self.pos_up.cash += (o.remaining * o.price)
-                    self._record_fill(now, "Up", o.price, o.remaining, "maker", o.purpose)
-                    is_filled = True
-                elif o.side == "Down" and book_down.best_ask is not None and book_down.best_ask <= o.price:
-                    self.pos_down.shares += o.remaining
-                    self.pos_down.cash += (o.remaining * o.price)
-                    self._record_fill(now, "Down", o.price, o.remaining, "maker", o.purpose)
-                    is_filled = True
+            target_book = book_up if o.side == "Up" else book_down
+            fill_sz = self.matcher.match_order(o, target_book, now)
+            if fill_sz > 0:
+                if o.side == "Up":
+                    self.pos_up.shares += fill_sz
+                    self.pos_up.cash += (fill_sz * o.price)
+                else:
+                    self.pos_down.shares += fill_sz
+                    self.pos_down.cash += (fill_sz * o.price)
+                self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose)
 
-                if not is_filled:
-                    remaining_working.append(o)
-            else:
+            if o.remaining > 1e-6:
                 remaining_working.append(o)
         self.working_orders = remaining_working
 
         # Update atomic live.json
         self._write_live(now, spot, book_up, book_down)
 
-    def close_window(self, close_px: float):
+    def close_window(self, close_px: float, official_winner: str = None):
         """Settle session, append summary record, and compress window archive."""
-        # Resilient fallback if settlement spot price is unavailable or non-positive
-        if close_px <= 0.0:
-            close_px = getattr(self, "last_spot_price", self.open_price)
-
-        winner = "Up" if close_px > self.open_price else "Down"
+        # 1. Resolve winner (prefer official UMA/Gamma settlement truth if available)
+        if official_winner in ("Up", "Down"):
+            winner = official_winner
+        else:
+            if close_px <= 0.0:
+                close_px = getattr(self, "last_spot_price", self.open_price)
+            winner = "Up" if close_px > self.open_price else "Down"
         proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)

@@ -1,12 +1,13 @@
-"""FIFO Queue Order Matcher & Simulation Harness.
+"""FIFO Queue Order Matcher & Microstructure Simulation.
 
 Faithfully models:
-1. 300ms order transit delay (live_at = placed_at + LATENCY_S).
-2. Queue position tracking (initial_ahead queue deduction on trades).
-3. Partial fills and discrete lot allocation.
+1. 300ms order wire transit latency (live_at = placed_at + LATENCY_S).
+2. Queue ahead tracking based on order book depth at order placement.
+3. Queue exhaustion from market trade prints at or below the order price.
+4. Immediate cross fills when best ask crosses down to or below our bid.
 """
-from typing import Dict, List, Optional, Tuple
-from core.types import Order, OrderBook, Side
+from typing import Dict, Optional
+from core.types import Order, OrderBook
 
 
 class QueueMatcher:
@@ -15,33 +16,56 @@ class QueueMatcher:
         self.queue_ahead: Dict[int, float] = {}
 
     def register_order(self, order: Order, book: OrderBook):
-        """Register newly placed maker order and determine queue ahead."""
-        order.live_at = order.placed_at + self.latency_s
-        # Queue ahead is depth at the order price level
+        """Register newly placed maker order and record initial queue ahead."""
+        order.live_at = (order.placed_at or 0.0) + self.latency_s
+        # Initial queue ahead is the resting bid volume at the same price
         ahead = 0.0
-        levels = book.bids if order.side == "Up" else book.asks # simplified bid depth
-        for px, sz in levels:
+        for px, sz in book.bids:
             if abs(px - order.price) < 1e-4:
                 ahead = sz
                 break
         self.queue_ahead[order.id] = ahead
 
-    def process_trade(self, order: Order, trade_side: Side, trade_price: float, trade_size: float) -> float:
-        """Deduct market print volume from queue ahead. Returns filled shares."""
+    def match_order(
+        self,
+        order: Order,
+        book: OrderBook,
+        now: float,
+        trade_volume: float = 5.0
+    ) -> float:
+        """Evaluate order against book cross and market trade prints.
+        
+        Returns:
+            Filled shares on this tick (0.0 if still waiting in queue).
+        """
         if order.cancel_at is not None or order.remaining <= 1e-6:
             return 0.0
             
-        # A buy maker order is filled by sell trades at or below the order price
-        if trade_price <= order.price + 1e-6:
+        # Physical latency constraint: cannot fill before arrival at matching engine
+        if order.live_at is None or now < order.live_at:
+            return 0.0
+
+        # Case 1: Crossed Book (Market ask is at or below our bid)
+        if book.best_ask is not None and book.best_ask <= order.price + 1e-6:
+            fill = order.remaining
+            order.remaining = 0.0
+            order.filled_size += fill
+            self.queue_ahead[order.id] = 0.0
+            return fill
+
+        # Case 2: Market Trade Print at or below our bid level
+        last_trade = book.last_trade_price
+        if last_trade is not None and last_trade <= order.price + 1e-6:
             ahead = self.queue_ahead.get(order.id, 0.0)
-            if trade_size <= ahead:
-                self.queue_ahead[order.id] = ahead - trade_size
+            if trade_volume <= ahead:
+                self.queue_ahead[order.id] = ahead - trade_volume
                 return 0.0
             else:
-                executable = trade_size - ahead
+                executable = trade_volume - ahead
                 self.queue_ahead[order.id] = 0.0
                 fill = min(order.remaining, executable)
                 order.remaining -= fill
                 order.filled_size += fill
                 return fill
+
         return 0.0

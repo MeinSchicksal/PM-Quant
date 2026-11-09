@@ -63,8 +63,13 @@ class PipelineDriver:
                     # Fetch close price with safe fallback
                     close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
                     close_px = close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price)
-                    self.runner.close_window(close_px)
-                    print(f"[Pipeline] Window {last_slug} settled! Recorded to summary.jsonl\n")
+                    
+                    # Verify official Gamma settlement if available
+                    official = self.feed.verify_official_settlement(last_slug)
+                    official_winner = official.get("winner") if official else None
+                    self.runner.close_window(close_px, official_winner)
+                    res_tag = f"Official truth: {official_winner}" if official_winner else f"Close px: ${close_px:,.2f}"
+                    print(f"[Pipeline] Window {last_slug} settled ({res_tag})! Recorded to summary.jsonl\n")
                     active_tokens = {}
 
                 # 2. Initialize New Window
@@ -89,8 +94,8 @@ class PipelineDriver:
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
                     spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                    b_up = self.feed.fetch_order_book(active_tokens["token_up"])
-                    b_dn = self.feed.fetch_order_book(active_tokens["token_down"])
+                    b_up = self.feed.fetch_order_book(active_tokens["token_up"], "Up")
+                    b_dn = self.feed.fetch_order_book(active_tokens["token_down"], "Down")
 
                     self.runner.step(loop_start, spot, b_up, b_dn)
 

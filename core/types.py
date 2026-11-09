@@ -21,6 +21,7 @@ class BookLevel:
 class OrderBook:
     bids: List[Tuple[float, float]] = field(default_factory=list)
     asks: List[Tuple[float, float]] = field(default_factory=list)
+    last_trade_price: Optional[float] = None
     source_t: float = 0.0
     received_at: float = 0.0
 

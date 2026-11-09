@@ -184,6 +184,76 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertAlmostEqual(last_rec["net_pnl"], 0.20, places=4)
         self.assertTrue(last_rec["traded"])
 
+    def test_quoting_hysteresis_and_anti_churn(self):
+        """Invariant 8: 1-tick flicker does not cancel working order; urgent wait cancels immediately."""
+        from core.execution import is_order_diff_significant, plan_order_actions
+        from core.types import Order, Decision
+
+        existing = Order(id=1, client_order_id="pm_1", side="Up", price=0.46, size=5.0, remaining=5.0, placed_at=100.0)
+        
+        # 1-tick shift ($0.01) is within hysteresis band (< $0.019) -> NOT significant
+        self.assertFalse(is_order_diff_significant(existing, desired_side="Up", desired_price=0.47, desired_size=5.0))
+        # 2-tick shift ($0.02) is outside hysteresis band -> significant
+        self.assertTrue(is_order_diff_significant(existing, desired_side="Up", desired_price=0.48, desired_size=5.0))
+        # Side change -> significant
+        self.assertTrue(is_order_diff_significant(existing, desired_side="Down", desired_price=0.46, desired_size=5.0))
+
+        # Transient 'no edge' wait does NOT cancel recent resting order (protects queue)
+        dec_transient = Decision(action="wait", reason="No edge outside uncertainty band (+/-0.01)")
+        to_cancel, _ = plan_order_actions([existing], dec_transient, now=105.0, max_queue_wait_s=15.0)
+        self.assertEqual(len(to_cancel), 0)
+
+        # Urgent 'toxic shock' wait DOES cancel immediately
+        dec_toxic = Decision(action="wait", reason="Adverse spot toxic shock detected")
+        to_cancel_toxic, _ = plan_order_actions([existing], dec_toxic, now=105.0, max_queue_wait_s=15.0)
+        self.assertEqual(len(to_cancel_toxic), 1)
+
+    def test_fifo_queue_matcher_with_trade_prints(self):
+        """Invariant 9: FIFO Queue Matcher respects latency and trade print queue exhaustion."""
+        from sim.matcher import QueueMatcher
+        from core.types import Order, OrderBook
+
+        matcher = QueueMatcher(latency_s=0.30)
+        order = Order(id=1, client_order_id="pm_1", side="Up", price=0.46, size=5.0, remaining=5.0, placed_at=100.0)
+        # Order book has 10.0 shares resting ahead at 0.46
+        book = OrderBook(bids=[(0.46, 10.0), (0.45, 20.0)], asks=[(0.48, 15.0)], last_trade_price=None)
+        matcher.register_order(order, book)
+        self.assertEqual(matcher.queue_ahead[1], 10.0)
+
+        # Before latency elapsed (now=100.20 < live_at=100.30), no fill possible
+        fill_early = matcher.match_order(order, book, now=100.20)
+        self.assertEqual(fill_early, 0.0)
+
+        # After latency, trade print arrives at 0.46 with volume 5.0 -> queue ahead reduces to 5.0, order not yet filled
+        book.last_trade_price = 0.46
+        fill_partial = matcher.match_order(order, book, now=100.35, trade_volume=5.0)
+        self.assertEqual(fill_partial, 0.0)
+        self.assertEqual(matcher.queue_ahead[1], 5.0)
+
+        # Next trade print arrives with volume 10.0 -> queue ahead cleared, order filled 5.0 shares!
+        fill_final = matcher.match_order(order, book, now=100.40, trade_volume=10.0)
+        self.assertEqual(fill_final, 5.0)
+        self.assertEqual(order.remaining, 0.0)
+
+    def test_official_settlement_override(self):
+        """Invariant 10: Official Gamma settlement truth overrides reference spot fallback."""
+        from runtime.runner import PaperRunner
+        runner = PaperRunner()
+        runner.start_window("test_slug_override", 1000.0, 1300.0, open_px=75000.0)
+        runner.pos_up = Position(shares=5.0, cash=2.50)
+        runner.pos_down = Position(shares=0.0, cash=0.0)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner.summary_file = Path(tmp_dir) / "summary.jsonl"
+            runner.windows_dir = Path(tmp_dir) / "windows"
+            runner.windows_dir.mkdir()
+            # Reference spot close_px=74900 suggests Down won, but official settlement says Up won
+            runner.close_window(close_px=74900.0, official_winner="Up")
+            lines = runner.summary_file.read_text(encoding="utf-8").splitlines()
+        last_rec = json.loads(lines[-1])
+        self.assertEqual(last_rec["winner"], "Up")
+        self.assertEqual(last_rec["proceeds"], 5.00)
+
 
 if __name__ == "__main__":
     import json

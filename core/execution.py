@@ -26,15 +26,16 @@ def is_order_diff_significant(
     existing: Order, 
     desired_side: Side, 
     desired_price: float, 
-    desired_size: float
+    desired_size: float,
+    hysteresis_ticks: float = 0.019
 ) -> bool:
-    """Check if working order needs replacement.
+    """Check if working order needs replacement using a 2-tick hysteresis band.
     
-    Avoids cancel/replace churn if price and size are practically identical.
+    Protects queue priority against 1-tick micro-fluctuations (< $0.02).
     """
     if existing.side != desired_side:
         return True
-    if abs(existing.price - desired_price) >= 0.009: # 1 tick difference
+    if abs(existing.price - desired_price) >= hysteresis_ticks: # 2 ticks ($0.02)
         return True
     if abs(existing.remaining - desired_size) >= 0.5:
         return True
@@ -44,9 +45,13 @@ def is_order_diff_significant(
 def plan_order_actions(
     working_orders: List[Order],
     decision: Decision,
-    now: float
+    now: float,
+    max_queue_wait_s: float = 15.0
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
+    
+    Applies quoting hysteresis and avoids canceling resting safe quotes on
+    transient 1-second 'no edge' blips unless toxic shock or tail freeze occurs.
     
     Returns:
         (orders_to_cancel, action_to_execute)
@@ -54,10 +59,21 @@ def plan_order_actions(
     to_cancel: List[Order] = []
     
     if decision.action == "wait":
-        # Cancel any active unfulfilled entries when policy commands wait
+        reason_lower = (decision.reason or "").lower()
+        # Urgent cancel conditions: toxic spot shock, tail freeze, or max lots reached
+        is_urgent_cancel = (
+            "toxic" in reason_lower
+            or "freeze" in reason_lower
+            or "max position" in reason_lower
+            or "drawdown" in reason_lower
+        )
+        
         for o in working_orders:
             if o.cancel_at is None and o.remaining > 1e-6:
-                to_cancel.append(o)
+                # Cancel immediately if urgent, or if order has rested past max queue wait time
+                order_age = now - (o.placed_at or now)
+                if is_urgent_cancel or order_age >= max_queue_wait_s:
+                    to_cancel.append(o)
         return to_cancel, None
 
     if decision.action in ("taker_hedge", "taker_unwind"):
@@ -68,7 +84,7 @@ def plan_order_actions(
         return to_cancel, decision
 
     if decision.action == "quote":
-        # Maker quoting: check if an identical order is already active
+        # Maker quoting: check if an identical or near-identical order is already active
         target_side = decision.side
         target_px = decision.price or 0.0
         target_sz = decision.size or 0.0
@@ -82,7 +98,7 @@ def plan_order_actions(
                     to_cancel.append(o)
                     
         if reusable_order is not None:
-            # Order is already optimal in book; no new order needed
+            # Order is already optimal in book; protect queue position
             return to_cancel, None
             
         return to_cancel, decision
