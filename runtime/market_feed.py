@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from core.types import BookLevel, OrderBook, SpotState
+from core.estimator import calculate_dynamic_realized_vol, calculate_adaptive_spread_params
 
 
 class MarketFeed:
@@ -274,9 +275,14 @@ class MarketFeed:
 
         is_shock = abs(velocity_3s) >= config.PARAMS["TOXICITY_SHOCK_BPS"]
 
+        # Calculate high-frequency dynamic realized volatility (EWMA over rolling 60s)
+        realized_vol_bps = calculate_dynamic_realized_vol(list(self.spot_history), baseline_vol_bps=15.0)
+        _, _, regime = calculate_adaptive_spread_params(realized_vol_bps)
+
         # Record raw spot price to data/1_market/oracle/
         self.record_raw_event("oracle", {
-            "t": round(t, 2), "kind": "spot", "price": current_px, "return_bps": round(return_bps, 2)
+            "t": round(t, 2), "kind": "spot", "price": current_px, "return_bps": round(return_bps, 2),
+            "realized_vol_bps": realized_vol_bps, "regime": regime
         })
 
         return SpotState(
@@ -284,8 +290,9 @@ class MarketFeed:
             price=current_px,
             open_price=open_price,
             return_bps=return_bps,
-            realized_vol_bps=15.0,
-            is_toxic_shock=is_shock
+            realized_vol_bps=realized_vol_bps,
+            is_toxic_shock=is_shock,
+            regime=regime
         )
 
     def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:

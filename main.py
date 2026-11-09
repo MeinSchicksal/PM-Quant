@@ -52,7 +52,7 @@ def cmd_status():
     print("=== PM-Quant Status ===")
     print(f"Version:      {config.VERSION}")
     print(f"Ledger Path:  {config.CURRENT_LEDGER_DIR}")
-    print("\nCore Mathematical & Economic Parameters (Strictly 10):")
+    print(f"\nCore Mathematical & Economic Parameters ({config.VERSION}):")
     for k, v in config.PARAMS.items():
         print(f"  {k:22s}: {v}")
 

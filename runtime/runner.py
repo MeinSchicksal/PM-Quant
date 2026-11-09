@@ -17,6 +17,7 @@ import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
 from core.execution import plan_order_actions, quantize_lots
+from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher
 
 
@@ -29,6 +30,13 @@ class PaperRunner:
         self.windows_dir.mkdir(parents=True, exist_ok=True)
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         
+        self.circuit_breaker = CircuitBreaker(
+            max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
+            loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3))
+        )
+        self._load_circuit_breaker()
+        
         self.current_slug = ""
         self.window_start = 0.0
         self.window_end = 0.0
@@ -39,6 +47,19 @@ class PaperRunner:
         self.decisions = []
         self.actions = []
         self.insurance_paid = 0.0
+
+    def _load_circuit_breaker(self):
+        """Restore circuit breaker metrics from existing summary.jsonl."""
+        if not self.summary_file.exists():
+            return
+        records = []
+        try:
+            for line in self.summary_file.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    records.append(json.loads(line))
+            self.circuit_breaker.load_from_summary(records)
+        except Exception:
+            pass
 
     def start_window(self, slug: str, start_t: float, end_t: float, open_px: float):
         """Initialize fresh 5-minute session."""
@@ -65,14 +86,34 @@ class PaperRunner:
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
 
-    def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook, net_stats: dict = None):
-        """Execute one evaluation tick."""
+    def step(
+        self,
+        now: float,
+        spot: SpotState,
+        book_up: OrderBook,
+        book_down: OrderBook,
+        net_stats: dict = None,
+        trade_prints: list = None
+    ):
+        """Execute one evaluation tick with circuit breaker, Kelly sizing, and live trade prints."""
         self.last_spot_price = spot.price
         if net_stats:
             self.net_stats = net_stats
         tau = max(0.0, self.window_end - now)
+
+        # 1. Evaluate Circuit Breaker & Bankroll
+        cb_active, cb_reason = self.circuit_breaker.is_active(now)
+        available_cap = max(10.0, 100.0 + self.circuit_breaker.daily_pnl)
+        eval_params = dict(
+            config.PARAMS,
+            AVAILABLE_CAPITAL=available_cap,
+            CIRCUIT_BREAKER_ACTIVE=cb_active,
+            CIRCUIT_BREAKER_REASON=cb_reason
+        )
+
         decision = plan_decision(
-            self.pos_up, self.pos_down, book_up, book_down, spot, tau, config.PARAMS
+            self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
+            circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason
         )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,
@@ -133,11 +174,29 @@ class PaperRunner:
                 "price": action.price, "size": action.size, "purpose": purpose
             })
 
-        # 3. FIFO Queue Matcher evaluation against book cross and trade prints
+        # 3. Queue Matcher: live trade prints deduction + crossed book evaluation
+        if trade_prints:
+            for tp in trade_prints:
+                tp_side = tp.get("outcome") # "Up" or "Down"
+                for o in self.working_orders:
+                    if tp_side and o.side != tp_side:
+                        continue
+                    fill_sz = self.matcher.on_trade_print(o, tp["price"], tp["size"], now)
+                    if fill_sz > 0:
+                        if o.side == "Up":
+                            self.pos_up.shares += fill_sz
+                            self.pos_up.cash += (fill_sz * o.price)
+                        else:
+                            self.pos_down.shares += fill_sz
+                            self.pos_down.cash += (fill_sz * o.price)
+                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose)
+
         remaining_working = []
         for o in self.working_orders:
             target_book = book_up if o.side == "Up" else book_down
-            fill_sz = self.matcher.match_order(o, target_book, now)
+            # If trade prints were applied, match_order only checks crossed books (trade_volume=0)
+            vol = 0.0 if trade_prints else 5.0
+            fill_sz = self.matcher.match_order(o, target_book, now, trade_volume=vol)
             if fill_sz > 0:
                 if o.side == "Up":
                     self.pos_up.shares += fill_sz
@@ -190,6 +249,9 @@ class PaperRunner:
         with open(self.summary_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             
+        # Update circuit breaker metrics
+        self.circuit_breaker.record_round_result(net_pnl, is_traded, self.window_end)
+
         # 2. Archive compressed detailed window log
         detail = dict(record, fills=self.fills, actions=self.actions, decisions=self.decisions)
         out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
@@ -237,6 +299,10 @@ class PaperRunner:
             "spot": spot.price,
             "open_px": getattr(self, "open_price", 0.0),
             "return_bps": round(spot.return_bps, 2),
+            "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
+            "regime": getattr(spot, "regime", "normal"),
+            "circuit_breaker": self.circuit_breaker.get_status(now),
+            "available_capital": round(max(10.0, 100.0 + self.circuit_breaker.daily_pnl), 2),
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
             "working_orders": [

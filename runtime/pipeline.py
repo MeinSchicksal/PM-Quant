@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 import config
 from runtime.market_feed import MarketFeed
 from runtime.runner import PaperRunner
+from runtime.trade_stream import TradeStreamClient
 
 PID_FILE = config.RUNTIME_DIR / "pipeline.pid"
 
@@ -24,6 +25,7 @@ class PipelineDriver:
     def __init__(self):
         self.feed = MarketFeed()
         self.runner = PaperRunner()
+        self.trade_stream = TradeStreamClient(record_raw=True)
         self.running = True
         self._write_pid()
 
@@ -39,17 +41,24 @@ class PipelineDriver:
 
     def stop(self):
         self.running = False
+        try:
+            self.trade_stream.stop()
+        except Exception:
+            pass
 
     def run(self):
         print(f"=== PM-Quant Live Pipeline Started ({config.BATCH_ID}) ===")
         print(f"Log directory: {config.CURRENT_LEDGER_DIR}")
         print("Press Ctrl+C to terminate gracefully.\n")
 
+        self.trade_stream.start()
+
         active_tokens = {}
         last_slug = None
         last_start_t = None
         pending_settlements = []
         last_reconcile_t = 0.0
+        prewarmed_next = {}
 
         while self.running:
             try:
@@ -95,11 +104,17 @@ class PipelineDriver:
                     print(f"[Pipeline] Window {last_slug} settled ({res_tag})! Recorded to summary.jsonl\n")
                     active_tokens = {}
 
-                # 2. Initialize New Window
+                # 2. Initialize New Window (with Pre-warmed Token Fast Path)
                 if last_slug != slug:
                     print(f"[Pipeline] Starting new window: {slug}")
-                    active_tokens = self.feed.resolve_tokens(slug)
-                    open_px = self.feed.fetch_window_open_price(start_t)
+                    if prewarmed_next.get("slug") == slug and prewarmed_next.get("tokens"):
+                        active_tokens = prewarmed_next["tokens"]
+                        open_px = prewarmed_next.get("open_px") or self.feed.fetch_window_open_price(start_t)
+                        prewarmed_next = {}
+                    else:
+                        active_tokens = self.feed.resolve_tokens(slug)
+                        open_px = self.feed.fetch_window_open_price(start_t)
+
                     if open_px <= 0:
                         # Fallback to current spot
                         spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
@@ -111,9 +126,36 @@ class PipelineDriver:
                     tokens_label = f"UP={active_tokens.get('token_up', 'Pending')[:10]}..." if active_tokens.get('token_up') else "Pending"
                     print(f"[Pipeline] Tokens: {tokens_label} | Open Px: ${open_px:,.2f}")
 
+                    # Update WebSocket subscription targets
+                    token_list = [active_tokens.get("token_up"), active_tokens.get("token_down")]
+                    self.trade_stream.set_active_targets([slug], [t for t in token_list if t])
+
                 # 2b. Retry token resolution if initially pending
                 if not (active_tokens.get("token_up") and active_tokens.get("token_down")):
                     active_tokens = self.feed.resolve_tokens(slug)
+                    if active_tokens.get("token_up"):
+                        self.trade_stream.set_active_targets([slug], [active_tokens.get("token_up"), active_tokens.get("token_down")])
+
+                # 2c. Cross-round Smooth Overlap: Pre-listen and pre-warm next 5m window at tau <= 30s
+                if tau_s <= 30.0:
+                    next_start_t = end_t
+                    next_slug = f"btc-updown-5m-{int(next_start_t)}"
+                    if prewarmed_next.get("slug") != next_slug:
+                        next_tokens = self.feed.resolve_tokens(next_slug)
+                        if next_tokens.get("token_up") and next_tokens.get("token_down"):
+                            next_open = self.feed.fetch_window_open_price(next_start_t)
+                            prewarmed_next = {
+                                "slug": next_slug,
+                                "tokens": next_tokens,
+                                "open_px": next_open
+                            }
+                            # Register next slug & tokens to trade stream early
+                            combined_slugs = [slug, next_slug]
+                            combined_tokens = [
+                                active_tokens.get("token_up"), active_tokens.get("token_down"),
+                                next_tokens.get("token_up"), next_tokens.get("token_down")
+                            ]
+                            self.trade_stream.set_active_targets(combined_slugs, [t for t in combined_tokens if t])
 
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
@@ -121,17 +163,30 @@ class PipelineDriver:
                     b_up = self.feed.fetch_order_book(active_tokens["token_up"], "Up")
                     b_dn = self.feed.fetch_order_book(active_tokens["token_down"], "Down")
 
-                    self.runner.step(loop_start, spot, b_up, b_dn, net_stats=self.feed.get_net_summary())
+                    # Drain real-time WebSocket trade prints for physical queue deduction
+                    trades = self.trade_stream.drain_trades(slug=slug)
+
+                    self.runner.step(
+                        loop_start, spot, b_up, b_dn,
+                        net_stats=self.feed.get_net_summary(),
+                        trade_prints=trades
+                    )
 
                     # Formatted terminal status line
                     last_dec = self.runner.decisions[-1] if self.runner.decisions else {}
                     act = last_dec.get("action", "hold")
                     side = last_dec.get("side") or ""
                     px_str = f"@{last_dec.get('price'):.2f}" if last_dec.get("price") else ""
+                    cb_info = self.runner.circuit_breaker.get_status(loop_start)
+                    cb_tag = cb_info["status"]
+                    if cb_info.get("cooling_rounds_left"):
+                        cb_tag += f"({cb_info['cooling_rounds_left']})"
+
                     print(
-                        f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:4.0f}s | "
-                        f"BTC: ${spot.price:,.2f} ({spot.return_bps:+5.1f} bps) | "
+                        f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:3.0f}s | "
+                        f"BTC: ${spot.price:,.2f} ({spot.return_bps:+5.1f}bps, vol:{spot.realized_vol_bps:.1f}) | "
                         f"Pos: UP {self.runner.pos_up.shares:.0f} / DN {self.runner.pos_down.shares:.0f} | "
+                        f"CB: {cb_tag} | "
                         f"Act: {act.upper()} {side} {px_str} "
                         f"{'(' + last_dec.get('reason', '')[:25] + ')' if last_dec.get('reason') else ''}",
                         end="", flush=True
@@ -156,6 +211,10 @@ class PipelineDriver:
                 print(f"\n[Pipeline] Tick warning: {e}")
                 time.sleep(1.0)
 
+        try:
+            self.trade_stream.stop()
+        except Exception:
+            pass
         self._cleanup_pid()
         print("[Pipeline] Shutdown complete.")
 

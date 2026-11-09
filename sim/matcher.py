@@ -26,6 +26,47 @@ class QueueMatcher:
                 break
         self.queue_ahead[order.id] = ahead
 
+    def on_trade_print(
+        self,
+        order: Order,
+        trade_price: float,
+        trade_size: float,
+        now: float
+    ) -> float:
+        """Physical queue deduction driven by a real trade print event.
+        
+        Args:
+            order: Active working maker order.
+            trade_price: Real executed price in the trade print.
+            trade_size: Exact executed volume in shares.
+            now: Current timestamp.
+            
+        Returns:
+            Filled shares on this print (0.0 if queue not yet exhausted).
+        """
+        if order.cancel_at is not None or order.remaining <= 1e-6:
+            return 0.0
+            
+        # Physical latency constraint: cannot fill before arrival at matching engine
+        if order.live_at is None or now < order.live_at:
+            return 0.0
+
+        # Maker bid fills when real trades execute at or below our bid price
+        if trade_price <= order.price + 1e-6:
+            ahead = self.queue_ahead.get(order.id, 0.0)
+            if trade_size <= ahead:
+                self.queue_ahead[order.id] = ahead - trade_size
+                return 0.0
+            else:
+                executable = trade_size - ahead
+                self.queue_ahead[order.id] = 0.0
+                fill = min(order.remaining, executable)
+                order.remaining -= fill
+                order.filled_size += fill
+                return fill
+
+        return 0.0
+
     def match_order(
         self,
         order: Order,

@@ -52,8 +52,9 @@ class SpotState:
     price: float
     open_price: float
     return_bps: float = 0.0
-    realized_vol_bps: float = 15.0      # Default baseline 15 bps / 5m
+    realized_vol_bps: float = 15.0      # Dynamic rolling EWMA volatility in bps / 5m
     is_toxic_shock: bool = False
+    regime: str = "normal"              # "calm" (<5 bps), "normal" (5-30 bps), "volatile" (>30 bps)
 
 
 @dataclass

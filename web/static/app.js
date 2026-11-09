@@ -312,15 +312,27 @@
     bpsEl.textContent = fmtPct(pct);
     bpsEl.className = 'strip-value ' + (pct > 0 ? 'up' : pct < 0 ? 'down' : '');
 
-    // Risk Status
+    // Risk & Circuit Breaker Status
     const riskPill = document.getElementById('market-risk-pill');
     const riskText = document.getElementById('market-risk');
-    if (live.is_toxic_shock) {
+    const cb = live.circuit_breaker || {};
+    const volStr = live.realized_vol_bps ? ` (${live.realized_vol_bps} bps)` : '';
+
+    if (cb.active) {
       riskPill.className = 'status-pill status-warn';
-      riskText.textContent = '剧烈波动冲击 (Toxic Shock)';
+      riskText.textContent = `熔断看门狗: ${cb.reason || '仅限对冲平仓'}`;
+    } else if (live.is_toxic_shock) {
+      riskPill.className = 'status-pill status-warn';
+      riskText.textContent = `剧烈波动冲击 (Toxic Shock)${volStr}`;
+    } else if (live.regime === 'volatile') {
+      riskPill.className = 'status-pill status-warn';
+      riskText.textContent = `高波动防守区${volStr}`;
+    } else if (live.regime === 'calm') {
+      riskPill.className = 'status-pill status-ready';
+      riskText.textContent = `平稳行情·窄价差抢占${volStr}`;
     } else {
       riskPill.className = 'status-pill status-ready';
-      riskText.textContent = '流动性正常';
+      riskText.textContent = `流动性正常${volStr}`;
     }
 
     // UP Side

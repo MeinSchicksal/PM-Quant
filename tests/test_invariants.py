@@ -97,12 +97,13 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertGreater(decision.utility, -0.25)
 
     def test_max_lots_boundary(self):
-        """Invariant 4: Once position reaches MAX_LOTS (10 shares), policy must output WAIT."""
+        """Invariant 4: Once position reaches MAX_LOTS, policy must output WAIT."""
         from core.policy import plan_decision
         import config
         
-        pos_up = Position(shares=10.0, cash=5.0)
-        pos_down = Position(shares=10.0, cash=4.8)
+        max_shares = config.PARAMS["LOT_SIZE"] * config.PARAMS["MAX_LOTS"]
+        pos_up = Position(shares=max_shares, cash=max_shares * 0.5)
+        pos_down = Position(shares=max_shares, cash=max_shares * 0.48)
         book_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         book_down = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)

@@ -145,28 +145,49 @@ def plan_decision(
     book_down: OrderBook,
     spot: SpotState,
     tau_s: float,
-    params: Dict[str, float]
+    params: Dict[str, float],
+    circuit_breaker_active: bool = False,
+    circuit_breaker_reason: str = ""
 ) -> Decision:
     """Master decision cycle called every tick/event.
     
-    Evaluates current inventory and outputs the singular best action.
+    Evaluates current inventory, circuit breaker state, volatility regime,
+    and outputs the singular best action.
     """
     u_shares = pos_up.shares
     d_shares = pos_down.shares
     net_gap = round(u_shares - d_shares, 4)
     
-    from .estimator import estimate_fair_prob, estimate_uncertainty_envelope
+    from .estimator import (
+        estimate_fair_prob, 
+        estimate_uncertainty_envelope,
+        calculate_adaptive_spread_params,
+        calculate_kelly_order_size
+    )
     
-    # 1. Calculate Fair Prob & Uncertainty Envelope
+    # 1. Calculate Fair Prob & Dynamic Volatility Adaptive Bounds
     p_fair = estimate_fair_prob(spot.price, spot.open_price, tau_s, spot.realized_vol_bps)
+    
+    adaptive_edge, adaptive_k, regime = calculate_adaptive_spread_params(
+        spot.realized_vol_bps, 
+        params.get("BASE_EDGE", 0.025), 
+        params.get("UNCERTAINTY_K", 1.2)
+    )
+    
     epsilon = estimate_uncertainty_envelope(
         spot.realized_vol_bps, 
         params["LATENCY_S"], 
-        params["UNCERTAINTY_K"]
+        adaptive_k
     )
     
     # 2. Case: Balanced or Flat Inventory (|net_gap| < 1e-4)
     if abs(net_gap) < 1e-4:
+        # Check Circuit Breaker Watchdog: forbid opening new Leg-1 when tripped or cooling
+        cb_active = circuit_breaker_active or bool(params.get("CIRCUIT_BREAKER_ACTIVE", False))
+        if cb_active:
+            cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
+            return Decision(action="wait", reason=f"Circuit breaker active ({cb_msg}): new Leg-1 disabled")
+
         # If in tail freeze window (< 60s), do not open new windows
         if tau_s <= params["TAIL_FREEZE_S"]:
             return Decision(action="wait", reason="Tail freeze active, no new entries")
@@ -176,16 +197,20 @@ def plan_decision(
             return Decision(action="wait", reason="Adverse spot toxic shock detected")
 
         # Check max position limit: if already holding max paired lots, wait for settlement
-        max_shares = params["LOT_SIZE"] * params["MAX_LOTS"]
+        max_lots = int(params.get("MAX_LOTS", 3))
+        max_shares = params["LOT_SIZE"] * max_lots
         if u_shares >= max_shares - 1e-4:
             return Decision(action="wait", reason=f"Max position reached ({u_shares:.0f} shares), holding to settlement")
             
-        # Reservation bids for both sides
+        # Reservation bids for both sides using adaptive edge
         r_up, r_down = calculate_reservation_bids(
-            p_fair, epsilon, params["BASE_EDGE"], q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
+            p_fair, epsilon, adaptive_edge, q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
         )
         
-        lot_size = params["LOT_SIZE"]  # 1 lot per initial entry (e.g. 5 shares)
+        available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
+        min_lots = int(params.get("MIN_LOTS", 1))
+        k_frac = float(params.get("KELLY_FRACTION", 0.25))
+        lot_size = float(params.get("LOT_SIZE", 5.0))
         
         up_bid = book_up.best_bid or 0.0
         down_bid = book_down.best_bid or 0.0
@@ -193,15 +218,21 @@ def plan_decision(
         # Quote the side with clearer probabilistic edge
         if up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.48:
             quote_px = max(0.02, min(0.98, round(min(r_up, up_bid), 2)))
+            size = calculate_kelly_order_size(
+                available_cap, p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
+            )
             return Decision(
-                action="quote", side="Up", price=quote_px, size=lot_size,
-                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f})"
+                action="quote", side="Up", price=quote_px, size=size,
+                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {regime}, {size:.0f}s)"
             )
         elif down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35 and (1.0 - p_fair) >= 0.48:
             quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
+            size = calculate_kelly_order_size(
+                available_cap, 1.0 - p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
+            )
             return Decision(
-                action="quote", side="Down", price=quote_px, size=lot_size,
-                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f})"
+                action="quote", side="Down", price=quote_px, size=size,
+                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {regime}, {size:.0f}s)"
             )
             
         return Decision(action="wait", reason=f"No edge outside uncertainty band (+/-{epsilon:.2f})")
