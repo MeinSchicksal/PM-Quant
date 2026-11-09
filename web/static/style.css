@@ -21,10 +21,10 @@
   --caption: #6b7280;
   --faint: #9ca3af;
 
-  --up: #cf202f;
-  --down: #05b169;
-  --up-soft: #fef2f2;
-  --down-soft: #ecfdf5;
+  --up: #05b169;
+  --down: #cf202f;
+  --up-soft: #ecfdf5;
+  --down-soft: #fef2f2;
   --warn: #b45309;
   --warn-soft: #fffbeb;
 
@@ -997,7 +997,7 @@ body {
 .decision-badge.down {
   background: var(--down-soft);
   color: var(--down);
-  border-color: rgba(5, 177, 105, 0.25);
+  border-color: rgba(207, 32, 47, 0.25);
 }
 
 .decision-badge.down .decision-dot {

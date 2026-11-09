@@ -80,9 +80,11 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
-            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0, "prob_up": 0.5}
+            {"t": round(start_t, 1), "price": round(open_px, 2), "return_bps": 0.0, "prob_up": 0.5, "poly_up": 0.5, "poly_down": 0.5}
         ] if open_px > 0 else []
         self.last_prob_up = 0.5
+        self.last_poly_up = 0.5
+        self.last_poly_down = 0.5
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
@@ -109,13 +111,20 @@ class PaperRunner:
         p_fair = estimate_fair_prob(spot.price, open_px, tau, vol_bps) if (open_px > 0 and spot.price > 0) else 0.5
         self.last_prob_up = p_fair
 
+        poly_up = getattr(book_up, "mid", None) or getattr(book_up, "best_bid", None) or getattr(book_up, "best_ask", None) or 0.5
+        poly_down = getattr(book_down, "mid", None) or getattr(book_down, "best_bid", None) or getattr(book_down, "best_ask", None) or round(1.0 - poly_up, 4)
+        self.last_poly_up = poly_up
+        self.last_poly_down = poly_down
+
         self.last_spot_price = spot.price
         if spot.price > 0:
             self.price_history.append({
                 "t": round(now, 1),
                 "price": round(spot.price, 2),
                 "return_bps": round(spot.return_bps, 2),
-                "prob_up": round(p_fair, 4)
+                "prob_up": round(p_fair, 4),
+                "poly_up": round(poly_up, 4),
+                "poly_down": round(poly_down, 4)
             })
             if len(self.price_history) > 360:
                 self.price_history = self.price_history[-360:]
@@ -330,6 +339,8 @@ class PaperRunner:
             "total_pnl": round(self.total_pnl, 4),
             "prob_up": round(getattr(self, "last_prob_up", 0.5), 4),
             "prob_down": round(1.0 - getattr(self, "last_prob_up", 0.5), 4),
+            "poly_up": round(getattr(self, "last_poly_up", 0.5), 4),
+            "poly_down": round(getattr(self, "last_poly_down", 0.5), 4),
             "price_history": self.price_history,
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
