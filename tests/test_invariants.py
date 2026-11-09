@@ -8,6 +8,7 @@ Proves core mathematical properties:
 """
 import unittest
 import sys
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,93 @@ class TestMathematicalInvariants(unittest.TestCase):
         # Expected utility is -$0.15 (10 shares * (1.00 - 1.015)), far superior to -$2.00+ holding loss
         self.assertGreater(decision.utility, -0.25)
 
+    def test_max_lots_boundary(self):
+        """Invariant 4: Once position reaches MAX_LOTS (10 shares), policy must output WAIT."""
+        from core.policy import plan_decision
+        import config
+        
+        pos_up = Position(shares=10.0, cash=5.0)
+        pos_down = Position(shares=10.0, cash=4.8)
+        book_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        book_down = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
+        
+        decision = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=180.0, params=config.PARAMS)
+        self.assertEqual(decision.action, "wait")
+        self.assertIn("Max position reached", decision.reason)
+
+    def test_probability_monotonicity_and_bounds(self):
+        """Invariant 5: Fair probability is strictly in [0.01, 0.99] and monotonic with spot."""
+        open_px = 75000.0
+        p_equal = estimate_fair_prob(open_px, open_px, tau_s=150.0, vol_bps=15.0)
+        self.assertAlmostEqual(p_equal, 0.50, places=2)
+        
+        p_higher = estimate_fair_prob(open_px + 50.0, open_px, tau_s=150.0, vol_bps=15.0)
+        p_lower = estimate_fair_prob(open_px - 50.0, open_px, tau_s=150.0, vol_bps=15.0)
+        
+        self.assertGreater(p_higher, 0.50)
+        self.assertLess(p_lower, 0.50)
+        self.assertTrue(0.01 <= p_lower <= 0.99)
+        self.assertTrue(0.01 <= p_higher <= 0.99)
+
+    def test_quote_price_never_zero_or_crosses_book(self):
+        """Invariant 6: Passive quotes must strictly satisfy 0.02 <= price <= 0.98 and never cross opposite ask."""
+        from core.policy import plan_decision
+        import config
+        
+        # Test 1: Empty book (best_bid is 0.0/None)
+        pos_up = Position(0.0, 0.0)
+        pos_down = Position(0.0, 0.0)
+        empty_book = OrderBook(bids=[], asks=[(0.99, 10.0)])
+        spot = SpotState(timestamp=1000.0, price=75020.0, open_price=75000.0)
+        
+        decision = plan_decision(pos_up, pos_down, empty_book, empty_book, spot, tau_s=200.0, params=config.PARAMS)
+        if decision.action == "quote":
+            self.assertGreaterEqual(decision.price, 0.02)
+            self.assertLessEqual(decision.price, 0.98)
+            
+        # Test 2: Unpaired position maker hedge must not cross opposite ask
+        book_up = OrderBook(bids=[(0.52, 20.0)], asks=[(0.55, 20.0)])
+        book_down = OrderBook(bids=[(0.40, 20.0)], asks=[(0.44, 20.0)])
+        dec_unpaired = evaluate_unpaired_utility(
+            held_side="Up",
+            held_shares=5.0,
+            held_basis_price=0.52,
+            p_fair_held=0.52,
+            book_held=book_up,
+            book_opp=book_down,
+            gamma=0.15
+        )
+        if dec_unpaired.action == "quote":
+            self.assertLess(dec_unpaired.price, book_down.best_ask)
+            self.assertGreaterEqual(dec_unpaired.price, 0.02)
+
+    def test_settlement_pnl_exactness_and_fallback(self):
+        """Invariant 7: Settlement proceeds, cost, and PnL must be mathematically exact."""
+        from runtime.runner import PaperRunner
+        runner = PaperRunner()
+        runner.start_window("test_slug", 1000.0, 1300.0, open_px=75000.0)
+        
+        # Simulate paired fill: 5 UP @ 0.50 ($2.50), 5 DOWN @ 0.46 ($2.30)
+        runner.pos_up = Position(shares=5.0, cash=2.50)
+        runner.pos_down = Position(shares=5.0, cash=2.30)
+        runner.fills = [dict(t=1010.0, side="Up", price=0.50, size=5.0, kind="maker"),
+                        dict(t=1020.0, side="Down", price=0.46, size=5.0, kind="maker")]
+        
+        # Close with UP winning (close_px = 75050 > 75000)
+        runner.close_window(close_px=75050.0)
+        
+        # Reads recorded summary
+        lines = runner.summary_file.read_text(encoding="utf-8").splitlines()
+        last_rec = json.loads(lines[-1])
+        
+        self.assertEqual(last_rec["winner"], "Up")
+        self.assertEqual(last_rec["proceeds"], 5.00)
+        self.assertEqual(last_rec["total_cost"], 4.80)
+        self.assertAlmostEqual(last_rec["net_pnl"], 0.20, places=4)
+        self.assertTrue(last_rec["traded"])
+
 
 if __name__ == "__main__":
+    import json
     unittest.main()

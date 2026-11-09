@@ -72,15 +72,17 @@ class QuantHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            traded_windows = [w for w in windows if w.get("traded") or w.get("fills_count", 0) > 0 or abs(w.get("net_pnl", 0.0)) > 1e-4]
             total_pnl = sum(w.get("net_pnl", 0.0) for w in windows)
-            wins = sum(1 for w in windows if w.get("net_pnl", 0.0) > 0)
-            losses = sum(1 for w in windows if w.get("net_pnl", 0.0) < 0)
-            win_rate = (wins / len(windows)) * 100 if windows else 0.0
-            avg_pnl = (total_pnl / len(windows)) if windows else 0.0
+            wins = sum(1 for w in traded_windows if w.get("net_pnl", 0.0) > 0)
+            losses = sum(1 for w in traded_windows if w.get("net_pnl", 0.0) < 0)
+            win_rate = (wins / len(traded_windows)) * 100 if traded_windows else 0.0
+            avg_pnl = (total_pnl / len(traded_windows)) if traded_windows else 0.0
 
             self.send_json({
                 "batch_id": target_batch,
                 "total_windows": len(windows),
+                "traded_windows": len(traded_windows),
                 "wins": wins,
                 "losses": losses,
                 "win_rate": round(win_rate, 1),

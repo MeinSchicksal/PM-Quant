@@ -43,6 +43,7 @@ class PaperRunner:
         self.window_start = start_t
         self.window_end = end_t
         self.open_price = open_px
+        self.last_spot_price = open_px
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
@@ -52,6 +53,7 @@ class PaperRunner:
 
     def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
         """Execute one evaluation tick."""
+        self.last_spot_price = spot.price
         tau = max(0.0, self.window_end - now)
         decision = plan_decision(
             self.pos_up, self.pos_down, book_up, book_down, spot, tau, config.PARAMS
@@ -139,10 +141,15 @@ class PaperRunner:
 
     def close_window(self, close_px: float):
         """Settle session, append summary record, and compress window archive."""
+        # Resilient fallback if settlement spot price is unavailable or non-positive
+        if close_px <= 0.0:
+            close_px = getattr(self, "last_spot_price", self.open_price)
+
         winner = "Up" if close_px > self.open_price else "Down"
         proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
+        is_traded = len(self.fills) > 0 or total_cost > 1e-4
         
         record = {
             "slug": self.current_slug,
@@ -158,6 +165,7 @@ class PaperRunner:
             "proceeds": round(proceeds, 4),
             "insurance_paid": round(self.insurance_paid, 4),
             "fills_count": len(self.fills),
+            "traded": is_traded,
             "batch_id": config.BATCH_ID
         }
         
@@ -170,6 +178,9 @@ class PaperRunner:
         out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
         with gzip.open(out_gz, "wt", encoding="utf-8") as gz:
             json.dump(detail, gz, ensure_ascii=False)
+
+        # Clear working orders
+        self.working_orders = []
 
     def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
         state = {

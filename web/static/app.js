@@ -63,7 +63,7 @@ async function updateHistory() {
     document.getElementById("kpi-avg-pnl").textContent = `Avg: ${data.avg_pnl >= 0 ? "+" : ""}$${data.avg_pnl.toFixed(3)} / window`;
     document.getElementById("kpi-winrate").textContent = `${data.win_rate.toFixed(1)}%`;
     document.getElementById("kpi-winloss").textContent = `${data.wins} Wins ${data.losses} Losses`;
-    document.getElementById("kpi-windows").textContent = data.total_windows;
+    document.getElementById("kpi-windows").textContent = data.traded_windows !== undefined ? `${data.traded_windows} (${data.total_windows})` : data.total_windows;
 
     let totalInsurance = 0;
     if (data.windows && data.windows.length > 0) {

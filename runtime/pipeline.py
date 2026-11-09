@@ -60,9 +60,10 @@ class PipelineDriver:
                 # 1. Check Window Rollover / Expiration
                 if last_slug and last_slug != slug:
                     print(f"\n[Pipeline] Window {last_slug} ended. Settling...")
-                    # Fetch close price
+                    # Fetch close price with safe fallback
                     close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                    self.runner.close_window(close_spot.price)
+                    close_px = close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price)
+                    self.runner.close_window(close_px)
                     print(f"[Pipeline] Window {last_slug} settled! Recorded to summary.jsonl\n")
                     active_tokens = {}
 
@@ -78,7 +79,12 @@ class PipelineDriver:
                     
                     self.runner.start_window(slug, start_t, end_t, open_px)
                     last_slug = slug
-                    print(f"[Pipeline] Tokens: UP={active_tokens.get('token_up', 'N/A')[:10]}... | Open Px: ${open_px:,.2f}")
+                    tokens_label = f"UP={active_tokens.get('token_up', 'Pending')[:10]}..." if active_tokens.get('token_up') else "Pending"
+                    print(f"[Pipeline] Tokens: {tokens_label} | Open Px: ${open_px:,.2f}")
+
+                # 2b. Retry token resolution if initially pending
+                if not (active_tokens.get("token_up") and active_tokens.get("token_down")):
+                    active_tokens = self.feed.resolve_tokens(slug)
 
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
@@ -99,6 +105,12 @@ class PipelineDriver:
                         f"Pos: UP {self.runner.pos_up.shares:.0f} / DN {self.runner.pos_down.shares:.0f} | "
                         f"Act: {act.upper()} {side} {px_str} "
                         f"{'(' + last_dec.get('reason', '')[:25] + ')' if last_dec.get('reason') else ''}",
+                        end="", flush=True
+                    )
+                else:
+                    print(
+                        f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:4.0f}s | "
+                        f"Waiting for Polymarket contract deployment for {slug}...",
                         end="", flush=True
                     )
 

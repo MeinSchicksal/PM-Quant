@@ -13,10 +13,11 @@ def quantize_lots(raw_size: float, lot_size: float = 5.0, max_lots: int = 2) -> 
     Guarantees:
     - Never generates odd share counts (e.g., 6.0, 7.0, 2.5).
     - Hard bounds output to {0.0, 5.0, 10.0} shares when lot_size=5.0 and max_lots=2.
+    - Immune to floating point imprecision (e.g. 4.999999).
     """
     if raw_size < lot_size - 1e-4:
         return 0.0
-    lots = int(raw_size // lot_size)
+    lots = int((raw_size + 1e-4) // lot_size)
     lots = min(lots, max_lots)
     return float(lots * lot_size)
 

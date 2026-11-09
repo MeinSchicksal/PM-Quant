@@ -119,8 +119,14 @@ def evaluate_unpaired_utility(
     # Otherwise, maintain optimal Maker quote on the deficit side
     # Reservation price determines optimal bid
     r_maker_price = round(min(0.98, max(0.02, 1.00 - held_basis_price)), 2)
-    if opp_bid is not None:
+    if opp_bid is not None and opp_bid >= 0.02:
         r_maker_price = min(r_maker_price, opp_bid)
+    
+    # Guard: Maker quote must never cross the opposite ask into taker territory
+    if book_opp.best_ask is not None:
+        r_maker_price = min(r_maker_price, round(book_opp.best_ask - 0.01, 2))
+        
+    r_maker_price = max(0.02, min(0.98, round(r_maker_price, 2)))
         
     return Decision(
         action="quote",
@@ -168,31 +174,34 @@ def plan_decision(
         # If toxic spot shock detected, hold off
         if spot.is_toxic_shock:
             return Decision(action="wait", reason="Adverse spot toxic shock detected")
+
+        # Check max position limit: if already holding max paired lots, wait for settlement
+        max_shares = params["LOT_SIZE"] * params["MAX_LOTS"]
+        if u_shares >= max_shares - 1e-4:
+            return Decision(action="wait", reason=f"Max position reached ({u_shares:.0f} shares), holding to settlement")
             
         # Reservation bids for both sides
         r_up, r_down = calculate_reservation_bids(
             p_fair, epsilon, params["BASE_EDGE"], q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
         )
         
-        # Check market alignment for Maker entry
-        # Prefer the side where market best bid is attractive or spreads are wide
-        lot_size = params["LOT_SIZE"] * params["MAX_LOTS"] # e.g. 10 shares
+        lot_size = params["LOT_SIZE"]  # 1 lot per initial entry (e.g. 5 shares)
         
         up_bid = book_up.best_bid or 0.0
         down_bid = book_down.best_bid or 0.0
         
         # Quote the side with clearer probabilistic edge
-        if r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.50:
-            quote_px = min(r_up, up_bid)
+        if up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.48:
+            quote_px = max(0.02, min(0.98, round(min(r_up, up_bid), 2)))
             return Decision(
                 action="quote", side="Up", price=quote_px, size=lot_size,
-                utility=p_fair - quote_px, reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f})"
+                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f})"
             )
-        elif r_down >= down_bid and r_down >= 0.35 and p_fair < 0.50:
-            quote_px = min(r_down, down_bid)
+        elif down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35 and (1.0 - p_fair) >= 0.48:
+            quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
             return Decision(
                 action="quote", side="Down", price=quote_px, size=lot_size,
-                utility=(1.0 - p_fair) - quote_px, reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f})"
+                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f})"
             )
             
         return Decision(action="wait", reason=f"No edge outside uncertainty band (+/-{epsilon:.2f})")
