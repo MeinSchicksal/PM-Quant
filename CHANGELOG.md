@@ -25,6 +25,13 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 - **Fractional Kelly Dynamic Position Sizing (`core/estimator.py`, `core/policy.py`)**:
   - Implemented Quarter-Kelly ($0.25 f^*$) allocation model scaling discrete order sizes across {5.0, 10.0, 15.0} shares (1 to 3 lots) based on available account capital and model win probability edge.
   - Preserved strict paired inventory conservation by dynamically sizing Leg-2 hedges to match held lots.
+- **Dual-Track Real-Time Interactive Canvas & Multi-Source Oracle Display (`web/`, `runtime/runner.py`)**:
+  - Replaced text decision box with a high-DPI HTML5 Canvas rendering dual synchronous tracks:
+    - *Track 1 (Price & Benchmark)*: Overlays Binance real-time BTC spot price with Polymarket official Chainlink BTC/USD TWAP curve against the $S_0$ baseline, featuring dynamic vertical anti-collision tag pills and a real-time Basis spread indicator.
+    - *Track 2 (Probability & Share Price)*: Overlays Polymarket orderbook implied probability ($P_{\text{market}}$) with PM-Quant theoretical fair value ($p_{\text{fair}}$), highlighting the active quantitative arbitrage edge ($\Delta = p_{\text{fair}} - P_{\text{market}}$) via soft translucent gradient fills.
+  - Reverted to cryptographic color conventions: UP is Green (`#05b169`), DOWN is Red (`#cf202f`).
+- **Experiment Reset & Batch Management CLI (`main.py`, `runtime/reset.py`)**:
+  - Added `python main.py reset [VERSION] [--keep-backup]` command to cleanly reset experimental ledger state while safely archiving historical runs with timestamps.
 - **Cross-Round Smooth Overlap Transition (`runtime/pipeline.py`)**:
   - Pre-listens to and resolves token IDs and baseline price for the subsequent 5-minute round 30 seconds prior to expiration ($\tau_s \le 30\text{s}$).
   - Eliminates the 5-10 second blank polling gap during round transitions.
