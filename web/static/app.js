@@ -281,6 +281,26 @@
       const closePx = r.close_px || 0;
       const isPending = (r.result === 'pending') || (!r.close_px && !r.winner);
 
+      const getShares = (val) => {
+        if (typeof val === 'number') return val;
+        if (val && typeof val === 'object' && typeof val.shares === 'number') return val.shares;
+        const n = Number(val);
+        return isNaN(n) ? 0 : n;
+      };
+      const getCost = (rec) => {
+        if (typeof rec.total_cost === 'number') return rec.total_cost;
+        if (rec.pos_up && typeof rec.pos_up === 'object' && rec.pos_down && typeof rec.pos_down === 'object') {
+          return (Number(rec.pos_up.cash) || 0) + (Number(rec.pos_down.cash) || 0);
+        }
+        const n = Number(rec.total_cost);
+        return isNaN(n) ? 0 : n;
+      };
+
+      const posUpShares = getShares(r.pos_up);
+      const posDownShares = getShares(r.pos_down);
+      const totalCostVal = getCost(r);
+      const proceedsVal = Number(r.proceeds) || 0;
+
       let priceHtml = '';
       if (isPending) {
         priceHtml = `
@@ -304,10 +324,10 @@
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
           <td>${priceHtml}</td>
-          <td>${(r.pos_up || 0).toFixed(1)}</td>
-          <td>${(r.pos_down || 0).toFixed(1)}</td>
-          <td>$${(r.total_cost || 0).toFixed(2)}</td>
-          <td>$${(r.proceeds || 0).toFixed(2)}</td>
+          <td>${posUpShares.toFixed(1)}</td>
+          <td>${posDownShares.toFixed(1)}</td>
+          <td>$${totalCostVal.toFixed(2)}</td>
+          <td>${isPending ? '--' : '$' + proceedsVal.toFixed(2)}</td>
           <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
           <td>${r.fills_count || 0}</td>
         </tr>
@@ -1235,6 +1255,26 @@
       const closePx = r.close_px || 0;
       const isPending = (r.result === 'pending') || (!r.close_px && !r.winner);
 
+      const getShares = (val) => {
+        if (typeof val === 'number') return val;
+        if (val && typeof val === 'object' && typeof val.shares === 'number') return val.shares;
+        const n = Number(val);
+        return isNaN(n) ? 0 : n;
+      };
+      const getCost = (rec) => {
+        if (typeof rec.total_cost === 'number') return rec.total_cost;
+        if (rec.pos_up && typeof rec.pos_up === 'object' && rec.pos_down && typeof rec.pos_down === 'object') {
+          return (Number(rec.pos_up.cash) || 0) + (Number(rec.pos_down.cash) || 0);
+        }
+        const n = Number(rec.total_cost);
+        return isNaN(n) ? 0 : n;
+      };
+
+      const posUpShares = getShares(r.pos_up);
+      const posDownShares = getShares(r.pos_down);
+      const totalCostVal = getCost(r);
+      const proceedsVal = Number(r.proceeds) || 0;
+
       let priceHtml = '';
       if (isPending) {
         priceHtml = `
@@ -1258,10 +1298,10 @@
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
           <td>${priceHtml}</td>
-          <td>${(r.pos_up || 0).toFixed(1)}</td>
-          <td>${(r.pos_down || 0).toFixed(1)}</td>
-          <td>$${(r.total_cost || 0).toFixed(2)}</td>
-          <td>$${(r.proceeds || 0).toFixed(2)}</td>
+          <td>${posUpShares.toFixed(1)}</td>
+          <td>${posDownShares.toFixed(1)}</td>
+          <td>$${totalCostVal.toFixed(2)}</td>
+          <td>${isPending ? '--' : '$' + proceedsVal.toFixed(2)}</td>
           <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
           <td>${r.fills_count || 0}</td>
           <td>$${(r.insurance_paid || 0).toFixed(2)}</td>

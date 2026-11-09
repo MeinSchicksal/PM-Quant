@@ -144,6 +144,21 @@ def _public_round(record, detail=None, active=False):
     else:
         result = "flat"
 
+    # Extract numeric shares and cost whether record is summary row or live state dict
+    pos_up_raw = record.get("pos_up", 0.0)
+    pos_down_raw = record.get("pos_down", 0.0)
+    pos_up = float(pos_up_raw.get("shares", 0.0)) if isinstance(pos_up_raw, dict) else _num(pos_up_raw)
+    pos_down = float(pos_down_raw.get("shares", 0.0)) if isinstance(pos_down_raw, dict) else _num(pos_down_raw)
+    
+    if isinstance(pos_up_raw, dict) and isinstance(pos_down_raw, dict):
+        total_cost = float(pos_up_raw.get("cash", 0.0)) + float(pos_down_raw.get("cash", 0.0))
+    else:
+        total_cost = _num(record.get("total_cost", 0.0))
+
+    proceeds = _num(record.get("proceeds", 0.0))
+    if active:
+        proceeds = 0.0
+
     return {
         "slug": slug,
         "start": start,
@@ -154,10 +169,10 @@ def _public_round(record, detail=None, active=False):
         "result": result,
         "open_px": record.get("open_px"),
         "close_px": record.get("close_px"),
-        "pos_up": record.get("pos_up", 0.0),
-        "pos_down": record.get("pos_down", 0.0),
-        "total_cost": record.get("total_cost", 0.0),
-        "proceeds": record.get("proceeds", 0.0),
+        "pos_up": round(pos_up, 2),
+        "pos_down": round(pos_down, 2),
+        "total_cost": round(total_cost, 4),
+        "proceeds": round(proceeds, 4),
         "fills_count": record.get("fills_count", 0),
         "insurance_paid": record.get("insurance_paid", 0.0),
         "average_prices": _average_prices(actions),
@@ -298,7 +313,7 @@ class QuantHandler(BaseHTTPRequestHandler):
             rounds = [_public_round(w, _read_detail(ledger_dir, w.get("slug", ""))) for w in latest]
             active = _read_live() if target_batch == config.BATCH_ID else None
             if active and not any(r.get("slug") == active.get("slug") for r in rounds):
-                rounds.insert(0, active)
+                rounds.insert(0, _public_round(active, active, active=True))
 
             decisive = wins + losses
             win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
