@@ -164,8 +164,11 @@ class PipelineDriver:
 
                     poly_open, binance_open = self.feed.fetch_window_open_price(start_t)
                     if poly_open <= 0:
-                        spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
-                        poly_open = spot_initial.price
+                        if last_slug and 'close_px' in locals() and close_px > 0:
+                            poly_open = close_px
+                        else:
+                            spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
+                            poly_open = spot_initial.price
                     if binance_open <= 0:
                         binance_open = poly_open
                     

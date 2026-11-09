@@ -233,6 +233,10 @@ def plan_decision(
         # Quote the side with clearer probabilistic edge
         if up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.48:
             quote_px = max(0.02, min(0.98, round(min(r_up, up_bid), 2)))
+            if book_up.best_ask is not None:
+                quote_px = min(quote_px, round(book_up.best_ask - 0.01, 2))
+            if quote_px < 0.02 or (book_up.best_ask is not None and quote_px >= book_up.best_ask):
+                return Decision(action="wait", reason=f"Up ask ({book_up.best_ask}) too tight for passive maker entry")
             size = calculate_kelly_order_size(
                 available_cap, p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
             )
@@ -244,6 +248,10 @@ def plan_decision(
             )
         elif down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35 and (1.0 - p_fair) >= 0.48:
             quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
+            if book_down.best_ask is not None:
+                quote_px = min(quote_px, round(book_down.best_ask - 0.01, 2))
+            if quote_px < 0.02 or (book_down.best_ask is not None and quote_px >= book_down.best_ask):
+                return Decision(action="wait", reason=f"Down ask ({book_down.best_ask}) too tight for passive maker entry")
             size = calculate_kelly_order_size(
                 available_cap, 1.0 - p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
             )

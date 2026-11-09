@@ -66,6 +66,8 @@ def plan_order_actions(
             or "freeze" in reason_lower
             or "max position" in reason_lower
             or "drawdown" in reason_lower
+            or "cooling" in reason_lower
+            or "circuit breaker" in reason_lower
         )
         
         for o in working_orders:

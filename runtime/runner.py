@@ -309,7 +309,7 @@ class PaperRunner:
         else:
             if close_px <= 0.0:
                 close_px = getattr(self, "last_spot_price", self.open_price)
-            winner = "Up" if close_px > self.open_price else "Down"
+            winner = "Up" if close_px >= self.open_price else "Down"
         proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
