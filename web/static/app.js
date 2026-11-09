@@ -1,275 +1,229 @@
-// PM-Quant Institutional Dashboard Logic & Real-time Canvas Rendering
+const roundsElement = document.getElementById("rounds");
+const openDetails = new Set();
+let requestPending = false;
 
-let currentTab = "history";
-let paramsLoaded = false;
+const RESULT_LABELS = {
+  win: "本轮赢",
+  loss: "本轮亏",
+  flat: "持平",
+  no_trade: "未成交",
+  pending: "进行中",
+};
 
-function switchTab(tab) {
-  currentTab = tab;
-  document.getElementById("tab-btn-history").className = `tab-pill ${tab === "history" ? "active" : ""}`;
-  document.getElementById("tab-btn-params").className = `tab-pill ${tab === "params" ? "active" : ""}`;
-  document.getElementById("tab-history").style.display = tab === "history" ? "block" : "none";
-  document.getElementById("tab-params").style.display = tab === "params" ? "block" : "none";
-
-  if (tab === "params" && !paramsLoaded) {
-    loadParams();
-  }
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+  })[char]);
 }
 
-async function loadParams() {
-  try {
-    const res = await fetch("/api/params");
-    if (!res.ok) return;
-    const data = await res.json();
-    const container = document.getElementById("params-container");
-    if (!data.params) return;
+function money(value, signed = false) {
+  const amount = Number(value) || 0;
+  const sign = amount < 0 ? "-" : signed && amount > 0 ? "+" : "";
+  return `${sign}$${Math.abs(amount).toFixed(2)}`;
+}
 
-    let html = "";
-    for (const [k, v] of Object.entries(data.params)) {
-      html += `
-        <div class="param-item">
-          <span class="param-name">${k}</span>
-          <span class="param-val">${v}</span>
+function price(value) {
+  return value === null || value === undefined ? "—" : `$${Number(value).toFixed(2)}`;
+}
+
+function shares(value) {
+  const amount = Number(value) || 0;
+  return `${Number.isInteger(amount) ? amount : amount.toFixed(2)} 股`;
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function dateParts(timestamp) {
+  const date = new Date((Number(timestamp) || 0) * 1000);
+  return {
+    date: `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`,
+    time: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    minute: `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  };
+}
+
+function sideLabel(side) {
+  if (side !== "Up" && side !== "Down") return "";
+  return `<span class="side-label ${side.toLowerCase()}">${side}</span>`;
+}
+
+function actionText(action) {
+  const hedge = action.purpose === "hedge";
+  if (action.action === "quote") {
+    return hedge ? "挂单对冲" : "挂单买入";
+  }
+  if (action.purpose === "unwind") return "卖出平仓";
+  return hedge ? "对冲成交" : "买入成交";
+}
+
+function renderActions(actions) {
+  return actions.map(action => {
+    const hedge = action.purpose === "hedge" ? "is-hedge" : "";
+    const filled = action.action === "fill" ? "is-fill" : "";
+    return `
+      <div class="action ${filled} ${hedge}">
+        <time class="action-time">${dateParts(action.t).time}</time>
+        <span class="action-dot" aria-hidden="true"></span>
+        <div class="action-content">
+          <span class="action-title">${actionText(action)}</span>
+          ${sideLabel(action.side)}
+          <span class="action-detail">${shares(action.size)} @ ${price(action.price)}</span>
         </div>
-      `;
-    }
-    container.innerHTML = html;
-    paramsLoaded = true;
-  } catch (err) {
-    console.error("Failed to load parameters:", err);
-  }
+      </div>`;
+  }).join("");
 }
 
-async function updateLive() {
-  const t0 = performance.now();
+function renderTimeline(actions, key, expanded = false) {
+  if (!actions.length) {
+    return '<p class="no-trade-note">暂无挂单或成交记录</p>';
+  }
+  const limit = expanded ? actions.length : 7;
+  const visible = actions.slice(0, limit);
+  const remaining = actions.slice(limit);
+  let html = `<div class="timeline">${renderActions(visible)}</div>`;
+  if (remaining.length) {
+    html += `
+      <details class="more-actions" data-key="${escapeHtml(key)}-more" ${openDetails.has(`${key}-more`) ? "open" : ""}>
+        <summary>展开其余 ${remaining.length} 条动作</summary>
+        <div class="timeline">${renderActions(remaining)}</div>
+      </details>`;
+  }
+  return html;
+}
+
+function renderSummary(round) {
+  const resultClass = round.result === "win" ? "profit" : round.result === "loss" ? "loss" : "";
+  const marketResult = round.winner ? `<small>${escapeHtml(round.winner)} 获胜</small>` : "";
+  const finalText = round.result === "pending" ? "等待结算" :
+    round.result === "no_trade" ? "无成交" :
+    round.result === "win" ? "赢" : round.result === "loss" ? "亏" : "持平";
+  return `
+    <div class="round-summary">
+      <div>
+        <p class="summary-label">Up 实际成交均价</p>
+        <p class="summary-value">${price(round.average_prices?.Up)}</p>
+      </div>
+      <div>
+        <p class="summary-label">Down 实际成交均价</p>
+        <p class="summary-value">${price(round.average_prices?.Down)}</p>
+      </div>
+      <div>
+        <p class="summary-label">最终结果</p>
+        <p class="summary-value result-text ${resultClass}">${finalText}${marketResult}</p>
+      </div>
+      <div>
+        <p class="summary-label">单轮落袋</p>
+        <p class="summary-value result-text ${resultClass}">${round.net_pnl === null ? "—" : money(round.net_pnl, true)}</p>
+      </div>
+    </div>`;
+}
+
+function renderRound(round, index, totalRounds) {
+  const start = dateParts(round.start);
+  const end = dateParts(round.end);
+  const hasTime = Number(round.start) > 0 && Number(round.end) > 0;
+  const resultClass = round.result === "win" ? "profit" : round.result === "loss" ? "loss" : "neutral";
+  const pnlText = round.result === "pending" ? "—" : round.result === "no_trade" ? "$0.00" : money(round.net_pnl, true);
+  const sequence = round.result === "pending" ? "LIVE" : `#${String(Math.max(1, totalRounds - index)).padStart(2, "0")}`;
+  const key = round.slug || `round-${index}`;
+
+  let body;
+  if (!round.traded && round.result !== "pending") {
+    body = `
+      <div class="no-trade-body">
+        <p class="no-trade-note">本轮没有成交，没有产生盈亏。</p>
+        ${round.actions.length ? `
+          <details data-key="${escapeHtml(key)}-empty" ${openDetails.has(`${key}-empty`) ? "open" : ""}>
+            <summary>查看 ${round.actions.length} 次挂单</summary>
+            ${renderTimeline(round.actions, `${key}-nested`, true)}
+          </details>` : ""}
+      </div>`;
+  } else {
+    body = `<div class="round-body">${renderTimeline(round.actions, key)}${renderSummary(round)}</div>`;
+  }
+
+  return `
+    <article class="round-card ${round.result === "pending" ? "is-active" : ""} ${!round.traded ? "is-empty" : ""}">
+      <header class="round-head">
+        <div class="round-time-wrap">
+          <span class="round-index">${sequence}</span>
+          <p class="round-time">
+            ${hasTime ? `${start.minute}—${end.minute}<span class="round-date">${start.date}</span>` : "本轮时间待同步"}
+          </p>
+        </div>
+        <span class="result-badge ${round.result}">${RESULT_LABELS[round.result] || "已结算"}</span>
+        <p class="round-pnl ${resultClass}">${pnlText}</p>
+      </header>
+      ${body}
+    </article>`;
+}
+
+function renderMetrics(data) {
+  const pnl = Number(data.total_pnl) || 0;
+  const average = Number(data.avg_pnl) || 0;
+  const pnlElement = document.getElementById("kpi-pnl");
+  const averageElement = document.getElementById("kpi-average");
+  pnlElement.textContent = money(pnl, true);
+  pnlElement.className = `metric-value ${pnl > 0 ? "profit" : pnl < 0 ? "loss" : ""}`;
+  averageElement.textContent = money(average, true);
+  averageElement.className = `metric-value ${average > 0 ? "profit" : average < 0 ? "loss" : ""}`;
+  document.getElementById("kpi-winrate").textContent = `${(Number(data.win_rate) || 0).toFixed(1)}%`;
+  document.getElementById("kpi-winloss").textContent = `${data.wins || 0} 赢 · ${data.losses || 0} 亏`;
+  document.getElementById("kpi-pnl-foot").textContent = `${data.traded_rounds || 0} 轮有成交的累计结果`;
+  document.getElementById("settled-note").textContent = `已结算 ${data.total_rounds || 0} 轮`;
+}
+
+function renderError() {
+  roundsElement.innerHTML = `
+    <div class="error-state">
+      <h3>暂时无法读取收益数据</h3>
+      <p>请确认看板服务正在运行，页面会自动重试。</p>
+      <button type="button" onclick="updateDashboard()">立即重试</button>
+    </div>`;
+}
+
+async function updateDashboard() {
+  if (requestPending) return;
+  requestPending = true;
   try {
-    const res = await fetch("/api/live");
-    if (!res.ok) return;
-    const data = await res.json();
+    const response = await fetch("/api/history", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    renderMetrics(data);
 
-    const ping = Math.round(performance.now() - t0);
-    document.getElementById("poll-ping").textContent = `${ping}ms poll`;
-
-    if (data.batch_id) {
-      document.getElementById("batch-id").textContent = data.batch_id;
-    }
-
-    if (data.status === "idle") {
-      document.getElementById("active-slug").textContent = "Engine Standby (Waiting for Window)";
-      document.getElementById("live-spot").textContent = "--";
-      document.getElementById("live-delta").textContent = "Open: --";
-      document.getElementById("live-tau").textContent = "--";
-      document.getElementById("live-pulse").style.background = "var(--text-tertiary)";
-      document.getElementById("progress-fill").style.width = "0%";
-      return;
-    }
-
-    document.getElementById("live-pulse").style.background = "var(--up)";
-    document.getElementById("active-slug").textContent = data.slug || "--";
-
-    // Progress bar & Phase badge
-    const tau = data.tau_s !== undefined ? data.tau_s : 0;
-    const elapsed = Math.max(0, 300 - tau);
-    const pct = Math.max(0, Math.min(100, (tau / 300) * 100));
-    const fillEl = document.getElementById("progress-fill");
-    fillEl.style.width = `${pct}%`;
-    document.getElementById("progress-text").textContent = `${Math.round(elapsed)}s elapsed (${Math.round(tau)}s left)`;
-
-    const phaseEl = document.getElementById("phase-badge");
-    if (tau <= 60) {
-      phaseEl.textContent = `Phase: Tail Freeze (${Math.round(tau)}s)`;
-      phaseEl.className = "badge badge-warning mono";
-      fillEl.className = "progress-fill freeze";
+    const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+    if (!rounds.length) {
+      roundsElement.innerHTML = "";
+      roundsElement.appendChild(document.getElementById("empty-template").content.cloneNode(true));
     } else {
-      phaseEl.textContent = `Phase: Active Quoting (${Math.round(tau)}s)`;
-      phaseEl.className = "badge badge-accent mono";
-      fillEl.className = "progress-fill";
+      const activeOffset = rounds[0]?.result === "pending" ? 1 : 0;
+      roundsElement.innerHTML = rounds.map((round, index) =>
+        renderRound(round, index - activeOffset, data.total_rounds || rounds.length)
+      ).join("");
     }
 
-    // Spot & Delta vs Open
-    const spot = data.spot || 0;
-    const openPx = data.open_px || 0;
-    const spotEl = document.getElementById("live-spot");
-    spotEl.textContent = spot > 0 ? `$${spot.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : "--";
-
-    const deltaEl = document.getElementById("live-delta");
-    if (openPx > 0 && spot > 0) {
-      const diff = spot - openPx;
-      const bps = (diff / openPx) * 10000;
-      const sign = diff >= 0 ? "+" : "";
-      const arrow = diff >= 0 ? "▲" : "▼";
-      const dirClass = diff >= 0 ? "text-up" : "text-down";
-      deltaEl.innerHTML = `Open: $${openPx.toLocaleString("en-US", {minimumFractionDigits: 2})} <span class="${dirClass}">(${arrow} ${sign}$${diff.toFixed(2)} / ${sign}${bps.toFixed(1)} bps)</span>`;
-    } else {
-      deltaEl.textContent = openPx > 0 ? `Open: $${openPx.toLocaleString("en-US", {minimumFractionDigits: 2})}` : "Open: --";
-    }
-
-    document.getElementById("live-tau").textContent = `${tau.toFixed(1)}s`;
-
-    // Order books
-    const bUp = data.book_up || {};
-    const bDn = data.book_down || {};
-    const upBidStr = bUp.best_bid !== undefined && bUp.best_bid !== null ? `$${bUp.best_bid.toFixed(2)}` : "--";
-    const upAskStr = bUp.best_ask !== undefined && bUp.best_ask !== null ? `$${bUp.best_ask.toFixed(2)}` : "--";
-    const dnBidStr = bDn.best_bid !== undefined && bDn.best_bid !== null ? `$${bDn.best_bid.toFixed(2)}` : "--";
-    const dnAskStr = bDn.best_ask !== undefined && bDn.best_ask !== null ? `$${bDn.best_ask.toFixed(2)}` : "--";
-
-    document.getElementById("live-book-up").textContent = `Bid: ${upBidStr} | Ask: ${upAskStr}`;
-    document.getElementById("live-book-down").textContent = `Bid: ${dnBidStr} | Ask: ${dnAskStr}`;
-
-    // Inventory & Orders
-    if (data.pos_up) {
-      const upAvg = data.pos_up.avg_px ? `@ $${data.pos_up.avg_px.toFixed(2)}` : "";
-      document.getElementById("live-up").textContent = `${data.pos_up.shares} shares ($${data.pos_up.cash.toFixed(2)}) ${upAvg}`;
-    }
-    if (data.pos_down) {
-      const dnAvg = data.pos_down.avg_px ? `@ $${data.pos_down.avg_px.toFixed(2)}` : "";
-      document.getElementById("live-down").textContent = `${data.pos_down.shares} shares ($${data.pos_down.cash.toFixed(2)}) ${dnAvg}`;
-    }
-
-    // Working orders
-    const workingEl = document.getElementById("live-working");
-    if (data.working_orders && data.working_orders.length > 0) {
-      workingEl.textContent = data.working_orders.map(o => `BUY ${o.side} ${o.size} @ $${o.price.toFixed(2)}`).join(", ");
-    } else {
-      workingEl.textContent = "None";
-    }
-
-    // Decision badge
-    const badgeEl = document.getElementById("live-action-badge");
-    const reasonEl = document.getElementById("live-reason");
-    if (data.last_decision) {
-      const dec = data.last_decision;
-      const act = (dec.action || "HOLD").toUpperCase();
-      const side = dec.side ? ` ${dec.side}` : "";
-      const px = dec.price ? ` @ $${dec.price.toFixed(2)}` : "";
-      badgeEl.textContent = `${act}${side}${px}`;
-
-      if (act === "QUOTE") {
-        badgeEl.className = "badge badge-accent mono";
-      } else if (act.includes("HEDGE") || act.includes("UNWIND")) {
-        badgeEl.className = "badge badge-warning mono";
-      } else {
-        badgeEl.className = "badge badge-neutral mono";
-      }
-      reasonEl.textContent = dec.reason || "";
-    } else {
-      badgeEl.textContent = "OBSERVING";
-      badgeEl.className = "badge badge-neutral mono";
-      reasonEl.textContent = "Monitoring market condition";
-    }
-
-  } catch (err) {
-    console.error("Live update error:", err);
+    const now = new Date();
+    document.getElementById("updated-at").textContent = `更新于 ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    document.getElementById("connection").className = "connection is-online";
+    document.getElementById("connection-text").textContent = "自动更新中";
+  } catch (error) {
+    console.error("Dashboard update failed:", error);
+    document.getElementById("connection").className = "connection is-offline";
+    document.getElementById("connection-text").textContent = "连接中断";
+    if (!roundsElement.querySelector(".round-card")) renderError();
+  } finally {
+    requestPending = false;
   }
 }
 
-async function updateHistory() {
-  try {
-    const res = await fetch("/api/history");
-    if (!res.ok) return;
-    const data = await res.json();
+roundsElement.addEventListener("toggle", event => {
+  const details = event.target.closest("details[data-key]");
+  if (!details) return;
+  if (details.open) openDetails.add(details.dataset.key);
+  else openDetails.delete(details.dataset.key);
+}, true);
 
-    // Summary KPIs
-    const pnlEl = document.getElementById("kpi-pnl");
-    pnlEl.textContent = `${data.total_pnl >= 0 ? "+" : ""}$${data.total_pnl.toFixed(2)}`;
-    pnlEl.className = `card-value mono ${data.total_pnl > 0 ? "text-up" : data.total_pnl < 0 ? "text-down" : ""}`;
-
-    document.getElementById("kpi-avg-pnl").textContent = `Avg: ${data.avg_pnl >= 0 ? "+" : ""}$${data.avg_pnl.toFixed(3)} / traded session`;
-    document.getElementById("kpi-winrate").textContent = `${data.win_rate.toFixed(1)}%`;
-    document.getElementById("kpi-winloss").textContent = `${data.wins} Wins ${data.losses} Losses`;
-    document.getElementById("kpi-windows").textContent = `${data.traded_windows || 0} (${data.total_windows || 0})`;
-
-    let totalInsurance = 0;
-    if (data.windows && data.windows.length > 0) {
-      totalInsurance = data.windows.reduce((acc, w) => acc + (w.insurance_paid || 0), 0);
-    }
-    document.getElementById("kpi-insurance").textContent = `$${totalInsurance.toFixed(2)}`;
-
-    // Draw Cumulative Equity Curve SVG
-    renderEquityCurve(data.windows || []);
-
-    // Table update
-    const tbody = document.getElementById("history-tbody");
-    if (!data.windows || data.windows.length === 0) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="8" style="text-align: center; color: var(--text-tertiary); padding: 32px 0;">
-            No settled windows recorded yet in this revision.
-          </td>
-        </tr>
-      `;
-      return;
-    }
-
-    let rowsHtml = "";
-    for (const w of data.windows) {
-      const pnl = w.net_pnl || 0.0;
-      const isWin = pnl > 0;
-      const pnlClass = isWin ? "text-up" : pnl < 0 ? "text-down" : "";
-      const winnerBadge = w.winner === "Up" 
-        ? `<span class="badge badge-up">UP</span>` 
-        : `<span class="badge badge-down">DOWN</span>`;
-
-      rowsHtml += `
-        <tr>
-          <td class="mono">${w.slug}</td>
-          <td>${winnerBadge}</td>
-          <td class="mono">$${(w.open_px || 0).toLocaleString("en-US", {minimumFractionDigits: 2})}</td>
-          <td class="mono">$${(w.close_px || 0).toLocaleString("en-US", {minimumFractionDigits: 2})}</td>
-          <td class="mono">${w.pos_up || 0} / ${w.pos_down || 0}</td>
-          <td class="mono">$${(w.total_cost || 0).toFixed(2)}</td>
-          <td class="mono">$${(w.proceeds || 0).toFixed(2)}</td>
-          <td class="mono ${pnlClass}"><strong>${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}</strong></td>
-        </tr>
-      `;
-    }
-    tbody.innerHTML = rowsHtml;
-
-  } catch (err) {
-    console.error("History fetch error:", err);
-  }
-}
-
-function renderEquityCurve(windows) {
-  if (!windows || windows.length < 2) {
-    document.getElementById("equity-path").setAttribute("d", "");
-    return;
-  }
-
-  // Windows are sorted in descending order (latest first), reverse for chronological equity
-  const chronological = [...windows].reverse();
-  const points = [0];
-  let cum = 0;
-  for (const w of chronological) {
-    cum += (w.net_pnl || 0);
-    points.push(cum);
-  }
-
-  const minVal = Math.min(0, ...points);
-  const maxVal = Math.max(0.1, ...points);
-  const range = (maxVal - minVal) || 1.0;
-
-  const width = 1000;
-  const height = 120;
-  const padding = 15;
-
-  let d = "";
-  for (let i = 0; i < points.length; i++) {
-    const x = (i / (points.length - 1)) * width;
-    // Invert y since svg 0 is top
-    const normalizedY = (points[i] - minVal) / range;
-    const y = height - padding - (normalizedY * (height - 2 * padding));
-    d += (i === 0 ? `M ${x.toFixed(1)} ${y.toFixed(1)}` : ` L ${x.toFixed(1)} ${y.toFixed(1)}`);
-  }
-
-  const pathEl = document.getElementById("equity-path");
-  pathEl.setAttribute("d", d);
-  const finalPnl = points[points.length - 1];
-  pathEl.setAttribute("stroke", finalPnl >= 0 ? "var(--up)" : "var(--down)");
-}
-
-// Initial bootstrap and timers
-updateLive();
-updateHistory();
-setInterval(updateLive, 1000);
-setInterval(updateHistory, 3000);
+updateDashboard();
+setInterval(updateDashboard, 2500);

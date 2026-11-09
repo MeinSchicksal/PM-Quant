@@ -35,6 +35,7 @@ class PaperRunner:
         self.working_orders = []
         self.fills = []
         self.decisions = []
+        self.actions = []
         self.insurance_paid = 0.0
 
     def start_window(self, slug: str, start_t: float, end_t: float, open_px: float):
@@ -49,7 +50,17 @@ class PaperRunner:
         self.working_orders = []
         self.fills = []
         self.decisions = []
+        self.actions = []
         self.insurance_paid = 0.0
+
+    def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
+        """Record one executed fill and its investor-readable action event."""
+        fill = {
+            "t": round(now, 2), "side": side, "price": price,
+            "size": size, "kind": kind, "purpose": purpose
+        }
+        self.fills.append(fill)
+        self.actions.append(dict(fill, action="fill"))
 
     def step(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
         """Execute one evaluation tick."""
@@ -91,12 +102,12 @@ class PaperRunner:
                 else:
                     self.pos_down.shares -= sz
                     self.pos_down.cash -= (sz * px - fee)
-            self.fills.append({
-                "t": round(now, 2), "side": action.side, "price": px, "size": sz, "kind": "taker"
-            })
+            purpose = "unwind" if action.action == "taker_unwind" else "hedge"
+            self._record_fill(now, action.side, px, sz, "taker", purpose)
 
         # 2. Maker quote placement
         elif action and action.action == "quote":
+            purpose = "hedge" if abs(self.pos_up.shares - self.pos_down.shares) > 1e-6 else "entry"
             new_order = Order(
                 id=int(now * 1000) % 1000000,
                 client_order_id=f"pm_{int(now * 1000)}",
@@ -105,10 +116,15 @@ class PaperRunner:
                 size=action.size,
                 remaining=action.size,
                 filled_size=0.0,
+                purpose=purpose,
                 placed_at=now,
                 live_at=now + config.PARAMS["LATENCY_S"]
             )
             self.working_orders.append(new_order)
+            self.actions.append({
+                "t": round(now, 2), "action": "quote", "side": action.side,
+                "price": action.price, "size": action.size, "purpose": purpose
+            })
 
         # 3. Maker queue fill evaluation against order books
         remaining_working = []
@@ -118,16 +134,12 @@ class PaperRunner:
                 if o.side == "Up" and book_up.best_ask is not None and book_up.best_ask <= o.price:
                     self.pos_up.shares += o.remaining
                     self.pos_up.cash += (o.remaining * o.price)
-                    self.fills.append({
-                        "t": round(now, 2), "side": "Up", "price": o.price, "size": o.remaining, "kind": "maker"
-                    })
+                    self._record_fill(now, "Up", o.price, o.remaining, "maker", o.purpose)
                     is_filled = True
                 elif o.side == "Down" and book_down.best_ask is not None and book_down.best_ask <= o.price:
                     self.pos_down.shares += o.remaining
                     self.pos_down.cash += (o.remaining * o.price)
-                    self.fills.append({
-                        "t": round(now, 2), "side": "Down", "price": o.price, "size": o.remaining, "kind": "maker"
-                    })
+                    self._record_fill(now, "Down", o.price, o.remaining, "maker", o.purpose)
                     is_filled = True
 
                 if not is_filled:
@@ -174,7 +186,7 @@ class PaperRunner:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             
         # 2. Archive compressed detailed window log
-        detail = dict(record, fills=self.fills, decisions=self.decisions)
+        detail = dict(record, fills=self.fills, actions=self.actions, decisions=self.decisions)
         out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
         with gzip.open(out_gz, "wt", encoding="utf-8") as gz:
             json.dump(detail, gz, ensure_ascii=False)
@@ -186,6 +198,8 @@ class PaperRunner:
         state = {
             "batch_id": config.BATCH_ID,
             "slug": self.current_slug,
+            "start": self.window_start,
+            "end": self.window_end,
             "now": round(now, 2),
             "tau_s": max(0.0, round(self.window_end - now, 1)),
             "spot": spot.price,
@@ -200,6 +214,7 @@ class PaperRunner:
             "pos_up": {"shares": self.pos_up.shares, "cash": round(self.pos_up.cash, 4), "avg_px": round(self.pos_up.avg_price, 4)},
             "pos_down": {"shares": self.pos_down.shares, "cash": round(self.pos_down.cash, 4), "avg_px": round(self.pos_down.avg_price, 4)},
             "fills_count": len(self.fills),
+            "actions": self.actions,
             "insurance_paid": round(self.insurance_paid, 4),
             "last_decision": self.decisions[-1] if self.decisions else None
         }

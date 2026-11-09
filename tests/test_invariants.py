@@ -9,6 +9,7 @@ Proves core mathematical properties:
 import unittest
 import sys
 import json
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,18 +162,20 @@ class TestMathematicalInvariants(unittest.TestCase):
         from runtime.runner import PaperRunner
         runner = PaperRunner()
         runner.start_window("test_slug", 1000.0, 1300.0, open_px=75000.0)
-        
+
         # Simulate paired fill: 5 UP @ 0.50 ($2.50), 5 DOWN @ 0.46 ($2.30)
         runner.pos_up = Position(shares=5.0, cash=2.50)
         runner.pos_down = Position(shares=5.0, cash=2.30)
         runner.fills = [dict(t=1010.0, side="Up", price=0.50, size=5.0, kind="maker"),
                         dict(t=1020.0, side="Down", price=0.46, size=5.0, kind="maker")]
-        
-        # Close with UP winning (close_px = 75050 > 75000)
-        runner.close_window(close_px=75050.0)
-        
-        # Reads recorded summary
-        lines = runner.summary_file.read_text(encoding="utf-8").splitlines()
+
+        # Keep test journals out of the real investor ledger.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner.summary_file = Path(tmp_dir) / "summary.jsonl"
+            runner.windows_dir = Path(tmp_dir) / "windows"
+            runner.windows_dir.mkdir()
+            runner.close_window(close_px=75050.0)
+            lines = runner.summary_file.read_text(encoding="utf-8").splitlines()
         last_rec = json.loads(lines[-1])
         
         self.assertEqual(last_rec["winner"], "Up")

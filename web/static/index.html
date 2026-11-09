@@ -1,198 +1,86 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PM-Quant Live Monitor</title>
+  <meta name="color-scheme" content="light">
+  <title>PM-Quant · 资方看板</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-
-  <!-- Top App Navigation -->
-  <header class="app-header">
-    <div class="brand">
-      <div class="brand-dot"></div>
-      <div class="brand-title">PM-Quant Live Monitor</div>
-      <div class="batch-badge" id="batch-id">v1_r1</div>
+  <header class="topbar">
+    <div class="brand" aria-label="PM-Quant 资方看板">
+      <span class="brand-mark">P</span>
+      <span class="brand-name">PM-Quant</span>
+      <span class="brand-divider"></span>
+      <span class="brand-view">资方看板</span>
     </div>
-    <div class="header-status">
-      <div class="status-pill">
-        <div class="pulse-indicator" id="live-pulse"></div>
-        <span id="service-status">Engine Active</span>
-      </div>
-      <div class="status-pill mono" style="font-size: 11px;" id="poll-ping">1s poll</div>
+    <div class="connection" id="connection">
+      <span class="connection-dot"></span>
+      <span id="connection-text">正在连接</span>
     </div>
   </header>
 
-  <!-- Main Container -->
-  <main class="container">
-
-    <!-- KPI Summary Row -->
-    <section class="kpi-grid">
-      <div class="card">
-        <div class="card-label">Cumulative Net PnL</div>
-        <div class="card-value" id="kpi-pnl">$0.00</div>
-        <div class="card-sub" id="kpi-avg-pnl">Avg: $0.00 / traded session</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Traded Win Rate</div>
-        <div class="card-value" id="kpi-winrate">0.0%</div>
-        <div class="card-sub" id="kpi-winloss">0 Wins 0 Losses</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Settled Windows</div>
-        <div class="card-value" id="kpi-windows">0 (0)</div>
-        <div class="card-sub">Traded (Total) sessions</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Insurance Paid</div>
-        <div class="card-value" id="kpi-insurance">$0.00</div>
-        <div class="card-sub">Adverse hedge risk expense</div>
-      </div>
-    </section>
-
-    <!-- Active Window State Card -->
-    <section class="card">
-      <div class="section-header">
+  <main class="page">
+    <section class="money-panel" aria-label="核心收益指标">
+      <div class="money-heading">
         <div>
-          <div class="section-title">Current 5-Minute Session</div>
-          <div class="card-sub mono" id="active-slug" style="margin-top: 2px;">Loading active window...</div>
+          <p class="eyebrow">5 分钟做市机器人 · 模拟盘</p>
+          <h1>收益结果</h1>
         </div>
-        <div class="section-actions">
-          <span class="badge badge-neutral mono" id="phase-badge">Phase: Entry (300s)</span>
-        </div>
+        <span class="settled-note" id="settled-note">已结算 0 轮</span>
       </div>
 
-      <!-- 5-Minute Countdown Progress Bar -->
-      <div class="progress-wrap">
-        <div class="progress-header">
-          <span>Session Progress</span>
-          <span class="mono" id="progress-text">-- / 300s</span>
+      <div class="metrics">
+        <article class="metric metric-primary">
+          <p class="metric-label">累计净收益</p>
+          <p class="metric-value" id="kpi-pnl">$0.00</p>
+          <p class="metric-foot" id="kpi-pnl-foot">真金白银的累计结果</p>
+        </article>
+        <article class="metric">
+          <p class="metric-label">胜率</p>
+          <p class="metric-value" id="kpi-winrate">0.0%</p>
+          <p class="metric-foot" id="kpi-winloss">0 赢 · 0 亏</p>
+        </article>
+        <article class="metric">
+          <p class="metric-label">单场平均盈亏</p>
+          <p class="metric-value" id="kpi-average">$0.00</p>
+          <p class="metric-foot">按有成交的已结算轮次计算</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="journal" aria-label="逐轮动作流水">
+      <div class="journal-heading">
+        <div>
+          <p class="eyebrow">ROUND BY ROUND</p>
+          <h2>每一轮，机器人做了什么</h2>
+          <p class="journal-subtitle">挂单、成交、对冲、结果，按发生时间逐条列清。</p>
         </div>
-        <div class="progress-track">
-          <div class="progress-fill" id="progress-fill" style="width: 100%;"></div>
-        </div>
+        <span class="updated-at" id="updated-at">等待数据</span>
       </div>
 
-      <div class="live-columns">
-        <!-- Market & Pricing Column -->
-        <div class="subcard">
-          <div class="subcard-title">Market & Pricing</div>
-
-          <div class="row-item">
-            <span class="item-name">BTC Spot / Strike</span>
-            <div style="text-align: right;">
-              <div class="item-val mono" id="live-spot">--</div>
-              <div class="card-sub mono" id="live-delta" style="margin-top: 2px;">Open: --</div>
-            </div>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">Time to Expiry (&tau;)</span>
-            <span class="item-val mono" id="live-tau">--</span>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">UP Market Book</span>
-            <span class="item-val mono" id="live-book-up">Bid: -- | Ask: --</span>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">DOWN Market Book</span>
-            <span class="item-val mono" id="live-book-down">Bid: -- | Ask: --</span>
-          </div>
-        </div>
-
-        <!-- Inventory & Execution Column -->
-        <div class="subcard">
-          <div class="subcard-title">Inventory & Execution</div>
-
-          <div class="row-item">
-            <span class="item-name">UP Position</span>
-            <span class="item-val mono text-up" id="live-up">0 shares ($0.00)</span>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">DOWN Position</span>
-            <span class="item-val mono text-down" id="live-down">0 shares ($0.00)</span>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">Working Orders</span>
-            <span class="item-val mono" id="live-working">None</span>
-          </div>
-
-          <div class="row-item">
-            <span class="item-name">Model Decision</span>
-            <div style="text-align: right;">
-              <span class="badge badge-accent mono" id="live-action-badge">HOLD</span>
-              <div class="card-sub" id="live-reason" style="margin-top: 4px; max-width: 280px; word-break: break-word;">Evaluating</div>
-            </div>
-          </div>
+      <div class="rounds" id="rounds" aria-live="polite">
+        <div class="loading-state">
+          <span class="loading-line"></span>
+          <span class="loading-line short"></span>
         </div>
       </div>
     </section>
 
-    <!-- Cumulative Equity Chart Card -->
-    <section class="card" id="equity-card">
-      <div class="section-header">
-        <div class="section-title">Cumulative Equity Curve</div>
-        <span class="card-sub mono" id="equity-range">Recent Settled Windows</span>
-      </div>
-      <div class="chart-container" id="chart-wrap">
-        <svg class="chart-svg" id="equity-svg" viewBox="0 0 1000 120" preserveAspectRatio="none">
-          <line x1="0" y1="60" x2="1000" y2="60" stroke="#dee1e6" stroke-width="0.5" stroke-dasharray="4"/>
-          <path id="equity-path" d="" fill="none" stroke="#0052ff" stroke-width="2"/>
-        </svg>
-      </div>
-    </section>
-
-    <!-- Lower Section Tabs -->
-    <section class="card">
-      <div class="section-header">
-        <div class="tab-pill-group">
-          <button class="tab-pill active" id="tab-btn-history" onclick="switchTab('history')">Settled Windows Journal</button>
-          <button class="tab-pill" id="tab-btn-params" onclick="switchTab('params')">10 Core Parameters</button>
-        </div>
-        <span class="card-sub mono" id="last-updated">Live connected</span>
-      </div>
-
-      <!-- Tab Content 1: History Table -->
-      <div id="tab-history">
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Window Slug</th>
-                <th>Outcome</th>
-                <th>Open Px</th>
-                <th>Close Px</th>
-                <th>Inventory (Up / Down)</th>
-                <th>Cost</th>
-                <th>Proceeds</th>
-                <th>Net PnL</th>
-              </tr>
-            </thead>
-            <tbody id="history-tbody">
-              <tr>
-                <td colspan="8" style="text-align: center; color: var(--text-tertiary); padding: 32px 0;">
-                  No settled windows recorded yet in this revision.
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Tab Content 2: Parameters Grid -->
-      <div id="tab-params" style="display: none;">
-        <div class="params-grid" id="params-container">
-          <!-- Dynamically populated via API -->
-        </div>
-      </div>
-    </section>
-
+    <footer class="page-footer">
+      <span>金额单位为美元</span>
+      <span>收益指标仅统计已结算轮次</span>
+    </footer>
   </main>
+
+  <template id="empty-template">
+    <div class="empty-state">
+      <span class="empty-mark">P</span>
+      <h3>还没有已记录的轮次</h3>
+      <p>机器人完成第一轮后，挂单和收益会出现在这里。</p>
+    </div>
+  </template>
 
   <script src="/static/app.js"></script>
 </body>
