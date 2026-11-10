@@ -181,6 +181,9 @@ def _public_round(record, detail=None, active=False):
     }
 
 
+_DETAIL_CACHE = {}
+
+
 def _read_detail(ledger_dir, slug):
     if not slug or Path(slug).name != slug:
         return {}
@@ -188,10 +191,23 @@ def _read_detail(ledger_dir, slug):
     if not path.exists():
         return {}
     try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _DETAIL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
-            return json.load(handle)
+            detail = json.load(handle)
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
+    # Bound the cache: one entry per window archive revision.
+    if len(_DETAIL_CACHE) > 256:
+        _DETAIL_CACHE.clear()
+    _DETAIL_CACHE[key] = detail
+    return detail
 
 
 def _read_live():
@@ -337,7 +353,7 @@ class QuantHandler(BaseHTTPRequestHandler):
             decisive = wins + losses
             win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
 
-            INITIAL_CAPITAL = 100.0
+            INITIAL_CAPITAL = float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0))
             available_capital = round(INITIAL_CAPITAL + total_pnl, 4)
             roi_pct = round((total_pnl / INITIAL_CAPITAL) * 100.0, 2)
             turnover_roi_pct = round((total_pnl / turnover) * 100.0, 2) if turnover > 1e-4 else 0.0

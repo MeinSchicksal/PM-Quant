@@ -41,6 +41,11 @@ class TradeStreamClient:
         self._active_tokens: Set[str] = set()
         self._lock = threading.Lock()
         self._pending_trades: deque = deque(maxlen=1000)
+        # Reconnect guard: the activity stream can replay prints already seen
+        # before a disconnect. Feeding a print twice would double-consume the
+        # maker queue and credit phantom fills.
+        self._seen_keys: Set[tuple] = set()
+        self._seen_order: deque = deque(maxlen=5000)
 
         self.last_trade_t = 0.0
         self.trade_count = 0
@@ -135,42 +140,65 @@ class TradeStreamClient:
                         if not payload or not isinstance(payload, dict):
                             continue
 
-                        tr_slug = payload.get("slug") or payload.get("eventSlug") or ""
-                        tr_asset = payload.get("asset") or payload.get("asset_id") or ""
-
-                        # Check filter relevance
-                        with self._lock:
-                            is_relevant = False
-                            if tr_slug and tr_slug in self._active_slugs:
-                                is_relevant = True
-                            elif tr_asset and tr_asset in self._active_tokens:
-                                is_relevant = True
-                            elif not self._active_slugs and "btc-updown-5m" in tr_slug:
-                                is_relevant = True
-
-                        if is_relevant:
-                            trade_record = {
-                                "token_id": tr_asset,
-                                "slug": tr_slug,
-                                "outcome": payload.get("outcome", ""),
-                                "price": _safe_float(payload.get("price", 0.0)),
-                                "size": _safe_float(payload.get("size", 0.0)),
-                                "side": payload.get("side", ""),
-                                "timestamp": _safe_float(payload.get("timestamp"), time.time()),
-                                "received_at": time.time()
-                            }
-                            with self._lock:
-                                self._pending_trades.append(trade_record)
-                                self.last_trade_t = trade_record["received_at"]
-                                self.trade_count += 1
-
-                            if self.record_raw:
-                                self._record_trade_event(trade_record)
+                        self._ingest(payload)
 
             except Exception:
                 self.connected = False
                 if self.running:
                     await asyncio.sleep(2.0)
+
+    def _ingest(self, payload: Dict[str, Any]) -> bool:
+        """Filter, de-duplicate and queue one raw trade payload.
+
+        Returns True when the print was newly accepted.
+        """
+        tr_slug = payload.get("slug") or payload.get("eventSlug") or ""
+        tr_asset = payload.get("asset") or payload.get("asset_id") or ""
+
+        # Check filter relevance
+        with self._lock:
+            is_relevant = False
+            if tr_slug and tr_slug in self._active_slugs:
+                is_relevant = True
+            elif tr_asset and tr_asset in self._active_tokens:
+                is_relevant = True
+            elif not self._active_slugs and "btc-updown-5m" in tr_slug:
+                is_relevant = True
+
+        if not is_relevant:
+            return False
+
+        trade_record = {
+            "token_id": tr_asset,
+            "slug": tr_slug,
+            "outcome": payload.get("outcome", ""),
+            "price": _safe_float(payload.get("price", 0.0)),
+            "size": _safe_float(payload.get("size", 0.0)),
+            "side": payload.get("side", ""),
+            "timestamp": _safe_float(payload.get("timestamp"), time.time()),
+            "received_at": time.time()
+        }
+        dedupe_key = (
+            trade_record["token_id"],
+            round(trade_record["timestamp"], 3),
+            round(trade_record["price"], 6),
+            round(trade_record["size"], 6),
+        )
+        with self._lock:
+            if dedupe_key in self._seen_keys:
+                return False
+            if len(self._seen_order) == self._seen_order.maxlen:
+                evicted = self._seen_order.popleft()
+                self._seen_keys.discard(evicted)
+            self._seen_order.append(dedupe_key)
+            self._seen_keys.add(dedupe_key)
+            self._pending_trades.append(trade_record)
+            self.last_trade_t = trade_record["received_at"]
+            self.trade_count += 1
+
+        if self.record_raw:
+            self._record_trade_event(trade_record)
+        return True
 
     def _record_trade_event(self, trade: dict):
         try:

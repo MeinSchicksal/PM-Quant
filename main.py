@@ -3,7 +3,7 @@
 Usage:
   python main.py [start]   - 一键启动量化交易管道 + Web看板 + 自动呼起浏览器 (推荐)
   python main.py stop      - 一键停止所有交易进程与释放 8900 端口
-  python main.py run       - 仅启动实盘量化交易做市管道 (Pipeline Driver)
+  python main.py run       - 启动纸面（Paper）量化做市与对冲管道 (Pipeline Driver)
   python main.py web [p]   - 仅启动 Web 投资人监控看板 (默认端口: 8900)
   python main.py test      - 运行所有微观结构与数学不变量单元测试
   python main.py reset     - 重置当前版本账本为干净初始状态 ($100.00)
@@ -48,7 +48,7 @@ def cmd_start(port: int = 8900, open_browser: bool = True):
                 pass
         threading.Thread(target=_launch, daemon=True).start()
 
-    print("[*] 启动实盘交易与对冲管道 (Pipeline Driver)...")
+    print("[*] 启动 Paper 交易与对冲管道 (Pipeline Driver, no live order adapter)...")
     print("[*] 提示: 按 Ctrl+C 可一键平稳退出所有交易与看板服务。\n")
     try:
         driver = PipelineDriver()
@@ -206,7 +206,7 @@ def cmd_reset(auto_stop: bool = True):
             "max_daily_drawdown_usd": config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.0),
             "loss_streak_cooling": config.PARAMS.get("LOSS_STREAK_COOLING", 3)
         },
-        "available_capital": 100.0,
+        "available_capital": float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0)),
         "total_pnl": 0.0,
         "prob_up": 0.5,
         "prob_down": 0.5,
@@ -228,7 +228,7 @@ def cmd_reset(auto_stop: bool = True):
 
     print(f"=== PM-Quant 数据与账本重置完成 ({config.VERSION}) ===")
     print(f"[*] 清理并重置了当前账本 {count_cleared} 个记录项。")
-    print("[*] 账本初始状态已就绪: 可用本金 $100.00，风控状态 NORMAL，连亏归零。")
+    print(f"[*] 账本初始状态已就绪: 可用本金 ${config.PARAMS.get('INITIAL_CAPITAL_USD', 100.0):.2f}，风控状态 NORMAL，连亏归零。")
 
 
 def cmd_replay():

@@ -312,9 +312,16 @@ class TestMathematicalInvariants(unittest.TestCase):
                                      5.0, 1, 3, 2.00),
             0.0
         )
-        # Locked pair (0.54 + 0.44 + fee <= 1.00) allows the full requested size.
+        # A locked pair needs visible hedge depth: 5 shares on the opposite ask
+        # can only lock one lot, so the rest would be naked beyond the budget.
         self.assertEqual(
             risk_adjusted_entry_size(10.0, 0.54, OrderBook(bids=[(0.43, 5)], asks=[(0.44, 5)]),
+                                     5.0, 1, 3, 2.00),
+            5.0
+        )
+        # With enough visible depth the same locked pair allows the full size.
+        self.assertEqual(
+            risk_adjusted_entry_size(10.0, 0.54, OrderBook(bids=[(0.43, 5)], asks=[(0.44, 10)]),
                                      5.0, 1, 3, 2.00),
             10.0
         )

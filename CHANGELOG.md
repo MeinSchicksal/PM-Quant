@@ -58,7 +58,67 @@ silently re-based; these are correctness fixes, not a new experiment.
 - **Tests**: added an end-to-end replay test (synthetic recording -> exact
   locked-pair PnL), depth-limited taker tests, the pre-trade loss-budget gate
   test, and the `urgent_cancel` contract; removed a dead duplicate test that
-  referenced an undefined name. Suite is now 52 tests, all passing.
+  referenced an undefined name. Suite is now 56 tests, all passing.
+
+### Hardened (second audit pass)
+- **Pre-trade sizing needs real hedge depth (`core/policy.py`)**: a "locked"
+  pair is only risk-free if the opposite ladder can absorb it. The gate now
+  walks the ask book and caps the entry at the visible hedgeable size whose
+  VWAP keeps `pair_cost <= 1.00`; the remainder is treated as naked and must
+  fit the $2.00 budget. Previously a single top-of-book price unlocked up to 15
+  shares regardless of how little size was actually there.
+- **Distress exit now compares utilities (`core/policy.py`)**: the emergency
+  hedge/unwind branch used to fire whenever `pair_cost <= $1.05` and the clock
+  was late (`tau < 90 s`), while logging "U_hedge(...) > U_hold(...)" without
+  ever computing the comparison. It now requires `best_immediate > u_hold`, so
+  the bot no longer pays a certain $0.02–$0.05 per pair to "remove risk" when
+  holding to settlement is worth more.
+- **Journal integrity (`runtime/runner.py`)**: `close_window` now settles each
+  slug exactly once. A restart inside an already-settled window (or a double
+  feed settle) used to append a second summary row, double-counting both
+  `total_pnl` and the circuit breaker. Duplicate closes are logged and ignored.
+- **Single-tick fill guard (`runtime/runner.py`)**: when a trade print walks a
+  resting order's price level, the same order is excluded from the crossed-book
+  pass in that tick. Previously the print and the stale snapshot could both
+  consume the same liquidity, over-crediting maker fills.
+- **Trade-stream replay guard (`runtime/trade_stream.py`)**: prints are
+  de-duplicated by `(token, timestamp, price, size)` over a 5,000-entry window,
+  so a WebSocket reconnect cannot replay prints and consume the maker queue
+  twice. Ingest logic is now a testable `_ingest()` method.
+- **TWAP freshness and thread safety (`runtime/market_feed.py`)**: the
+  background TWAP poller uses its own `requests.Session` (the shared session is
+  not thread-safe) and stamps `_last_poly_btc_t`; `get_polymarket_btc_price`
+  returns `None` once the cache is older than `POLY_PRICE_MAX_AGE_S` (10 s)
+  instead of feeding a dead poller's last price into `p_fair`.
+- **Utility double-count (`core/policy.py`)**: `u_hold` no longer adds a
+  `p_fill * maker_gain` bonus on top of the full hold-to-expiry EV. Holding is
+  now valued as the `p_fill`-weighted mix of (hedge fills -> pair settles at
+  $1.00) and (no fill -> settlement EV minus variance penalty). The unreachable
+  legacy arbitration branch was removed, and `P_FILL_MAKER` is a config
+  parameter instead of a magic default.
+- **Atomic reconciliation (`runtime/runner.py`)**: `reconcile_record` rewrites
+  `summary.jsonl` through a `tmp` + `os.replace` step, so a crash mid-rewrite can
+  no longer truncate the accounting journal.
+- **Explicit queue timeout (`runtime/runner.py`)**: `plan_order_actions` receives
+  `MAX_QUEUE_WAIT_S` from config rather than silently relying on a default that
+  happened to match.
+- **Single capital source (`config.py`, `runtime/runner.py`, `web/server.py`,
+  `main.py`)**: `INITIAL_CAPITAL_USD` replaces four hard-coded `100.0` literals
+  (bankroll cap, dashboard ROI, reset state).
+- **Pipeline hygiene (`runtime/pipeline.py`)**: `close_px` is reset every
+  iteration, so a missing open price can no longer inherit a previous round's
+  close through `'close_px' in locals()`; shutdown now warns that the still-open
+  window was not journaled (previously it was dropped silently).
+- **Dashboard load (`web/server.py`)**: window detail archives are cached by
+  `(path, mtime, size)`, so the once-per-second `/api/history` poll no longer
+  gunzips up to 50 archives per request.
+- **Sealed snapshots are complete (`runtime/supervisor.py`)**: `seal_batch()`
+  packaged only `config.py` and `core/*.py`, so matching, replay and dashboard
+  code was missing from the archived version. It now includes `main.py`,
+  `runtime/`, `sim/` and `web/`, and lists the files in `manifest.json`.
+- **Tests**: added `tests/test_runtime_hardening.py` (duplicate close, print +
+  crossed-book double fill, stream replay, stale TWAP) and extended the sizing
+  gate test to cover thin hedge depth. Suite is now 56 tests.
 
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order
@@ -69,8 +129,9 @@ silently re-based; these are correctness fixes, not a new experiment.
   "+$30.391 improvement", "87% of losses from overpriced hedges") with the
   ledger truth: 170 traded windows, **-$31.7998**, mean -$0.1871 (t=-1.63);
   loss structure 49.5% hedged / 39.5% naked / 11% other; and the new replay
-  result over 77 fully recorded windows: 24 traded, **-$1.785**,
-  mean -$0.0232 (t=-1.02), worst window -$1.2946.
+  result over 77 fully recorded windows: 24 traded, **-$1.659**,
+  mean -$0.0215 (sd $0.2529, t=-0.75), 54 fills, worst window -$2.0000
+  (exactly the pre-trade window budget).
 - Noted that `calculate_kelly_order_size` is a reference implementation and is
   **not** wired into Leg-1 sizing (v1.1 sizing comes from
   `regime.recommended_lots`); the earlier claim of "Fractional Kelly dynamic

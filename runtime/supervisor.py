@@ -31,12 +31,23 @@ def seal_batch():
     ledger = config.CURRENT_LEDGER_DIR
     ledger.mkdir(parents=True, exist_ok=True)
 
-    # 1. Zip snapshot of core/ and config.py
+    # 1. Zip snapshot of every module that can change the ledger's behaviour.
+    #    A sealed version must be reconstructable: packaging only core/ hid the
+    #    matching engine, the replay engine and the dashboard behind an
+    #    incomplete snapshot.
     snapshot_zip = ledger / "code_snapshot.zip"
+    files = [(config.ROOT / "main.py", "main.py"), (config.ROOT / "config.py", "config.py")]
+    for pkg in ("core", "runtime", "sim", "web"):
+        pkg_dir = config.ROOT / pkg
+        if not pkg_dir.exists():
+            continue
+        for f in sorted(pkg_dir.rglob("*.py")):
+            if "__pycache__" in f.parts:
+                continue
+            files.append((f, f.relative_to(config.ROOT).as_posix()))
     with zipfile.ZipFile(snapshot_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(config.ROOT / "config.py", "config.py")
-        for f in (config.ROOT / "core").glob("*.py"):
-            zf.write(f, f"core/{f.name}")
+        for path, arcname in files:
+            zf.write(path, arcname)
 
     # 2. Write manifest.json
     manifest = {
@@ -44,6 +55,7 @@ def seal_batch():
         "sealed_at": time.time(),
         "params": config.PARAMS,
         "code_snapshot": str(snapshot_zip.relative_to(config.ROOT)),
+        "files": [arcname for _path, arcname in files],
     }
     (ledger / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"

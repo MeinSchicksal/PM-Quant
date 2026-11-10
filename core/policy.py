@@ -21,6 +21,41 @@ def _wait(reason: str, urgent: bool = False) -> Decision:
 
 
 
+def _hedgeable_shares(
+    quote_px: float,
+    book_opp: OrderBook,
+    fee_rate: float,
+    max_locked_pair_cost: float = 1.00
+) -> float:
+    """Shares the opposite book can absorb while keeping the pair <= max cost.
+
+    Walks the ask ladder (ascending) and returns the largest cumulative size
+    whose VWAP still locks `quote_px + vwap + fee(vwap) <= max_locked_pair_cost`.
+    A locked pair is only risk-free if the hedge can actually be executed, so
+    the *visible size*, not just the top-of-book price, has to cover it.
+    """
+    if book_opp is None or not getattr(book_opp, "asks", None):
+        return 0.0
+    shares = 0.0
+    notional = 0.0
+    for level in book_opp.asks:
+        try:
+            px = float(level[0])
+            sz = float(level[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if px <= 0 or sz <= 0:
+            continue
+        candidate_shares = shares + sz
+        candidate_notional = notional + px * sz
+        vwap = candidate_notional / candidate_shares
+        if quote_px + vwap + taker_fee_per_share(vwap, fee_rate) > max_locked_pair_cost + 1e-9:
+            # Ladder is ascending: deeper levels only get worse.
+            break
+        shares, notional = candidate_shares, candidate_notional
+    return shares
+
+
 def risk_adjusted_entry_size(
     requested_size: float,
     quote_px: float,
@@ -34,28 +69,30 @@ def risk_adjusted_entry_size(
     """Cap a new Leg-1 entry so its worst-case window loss is bounded.
 
     Two cases:
-    1. The opposite ask is cheap enough that a taker hedge would lock
-       pair_cost <= 1.00 right now. The position is (at entry) risk-free, so
-       the requested size is allowed up to the hard lot cap.
+    1. The opposite ask ladder can absorb the size at a VWAP that locks
+       pair_cost <= 1.00. That portion of the position is (at entry) risk-free,
+       so it is allowed up to the hard lot cap.
     2. Otherwise the entry is naked until hedged: its entire premium can be
        lost if the contract expires worthless. Size is capped so that
-       shares * quote_px (+ taker fee) stays inside the window loss budget.
+       shares * quote_px stays inside the window loss budget.
 
     Returns 0.0 when even one lot would breach the budget.
     """
     if requested_size <= 0 or quote_px <= 0:
         return 0.0
 
-    opp_ask = book_opp.best_ask if book_opp is not None else None
-    if opp_ask is not None:
-        locked_pair_cost = quote_px + opp_ask + taker_fee_per_share(opp_ask, fee_rate)
-        if locked_pair_cost <= 1.00:
-            return min(requested_size, lot_size * max_lots)
+    requested_lots = int(round(requested_size / lot_size))
+    requested_lots = max(min_lots, min(max_lots, requested_lots))
+
+    hedgeable = _hedgeable_shares(quote_px, book_opp, fee_rate)
+    if hedgeable >= lot_size - 1e-9:
+        locked_lots = int(hedgeable // lot_size)
+        return float(min(requested_lots, locked_lots) * lot_size)
 
     if budget_usd <= 0:
         return 0.0
     affordable_lots = int((budget_usd / quote_px) // lot_size)
-    lots = min(affordable_lots, max_lots, int(requested_size // lot_size))
+    lots = min(affordable_lots, requested_lots, max_lots)
     return float(lots * lot_size) if lots >= min_lots else 0.0
 
 
@@ -151,16 +188,25 @@ def evaluate_unpaired_utility(
         u_sell = held_shares * (held_bid - taker_fee_per_share(held_bid, fee_rate) - held_basis_price)
         
     # Path 3: Passive Quoting / Holding to Expiration
+    # Utility of quoting the opposite side: with probability p_fill the hedge
+    # fills and the pair settles for $1.00 (payoff 1 - basis - quote per share);
+    # otherwise the position is carried to settlement with EV (p_fair - basis)
+    # minus the inventory variance penalty. The earlier version added a
+    # p_fill * maker_gain term on top of the full hold-to-expiry EV, which
+    # double-counted the same shares and made holding look artificially cheap.
+    opp_bid = book_opp.best_bid
+    maker_quote = round(min(0.98, max(0.02, 1.00 - held_basis_price)), 2)
+    if opp_bid is not None and opp_bid >= 0.02:
+        maker_quote = min(maker_quote, opp_bid)
+    # Guard: Maker quote must never cross the opposite ask into taker territory
+    if book_opp.best_ask is not None:
+        maker_quote = min(maker_quote, round(book_opp.best_ask - 0.01, 2))
+
+    p_fill = min(1.0, max(0.0, p_fill_maker))
+    hedged_gain = held_shares * (1.00 - held_basis_price - maker_quote)
     ev_holding = held_shares * (p_fair_held - held_basis_price)
     variance_penalty = gamma * (held_shares ** 1.2) * var
-    u_hold = ev_holding - variance_penalty
-    
-    # If Maker order has a chance of filling, add expected edge
-    opp_bid = book_opp.best_bid
-    if opp_bid is not None:
-        maker_gain = held_shares * (1.00 - held_basis_price - opp_bid)
-        if maker_gain > 0:
-            u_hold += p_fill_maker * maker_gain
+    u_hold = p_fill * hedged_gain + (1.0 - p_fill) * (ev_holding - variance_penalty)
 
     # === ARBITRATION DECISION ===
     # Check if position is in distress (adverse price drift, adverse regime, or late window)
@@ -171,30 +217,12 @@ def evaluate_unpaired_utility(
     in_distress = adverse_drift or regime_adverse or late_window
 
     best_immediate = max(u_hedge, u_sell)
-    
-    # If in distress and immediate exit provides utility:
-    if in_distress and best_immediate > -900.0:
-        if u_hedge > -990.0 and u_hedge >= u_sell and hedge_ask is not None:
-            return Decision(
-                action="taker_hedge",
-                side=opp_side,
-                price=hedge_ask,
-                size=held_shares,
-                utility=round(u_hedge, 4),
-                reason=f"U_hedge({u_hedge:.2f}) > U_hold({u_hold:.2f}), take hedge @ {hedge_ask}"
-            )
-        elif u_sell > -990.0 and held_bid is not None:
-            return Decision(
-                action="taker_unwind",
-                side=held_side,
-                price=held_bid,
-                size=held_shares,
-                utility=round(u_sell, 4),
-                reason=f"U_sell({u_sell:.2f}) > U_hold({u_hold:.2f}), unwind position @ {held_bid}"
-            )
 
-    # Legacy variance arbitration fallback if in distress or adverse drift:
-    if best_immediate > u_hold and (adverse_drift or in_distress):
+    # If in distress and the immediate exit is actually better than holding,
+    # take it. The comparison against u_hold is the whole point of the
+    # arbitration: emergency exits are a risk trade-off, not an unconditional
+    # command, and the reason string must not claim a comparison that never ran.
+    if in_distress and best_immediate > -900.0 and best_immediate > u_hold:
         if u_hedge > -990.0 and u_hedge >= u_sell and hedge_ask is not None:
             return Decision(
                 action="taker_hedge",
@@ -215,15 +243,7 @@ def evaluate_unpaired_utility(
             )
 
     # Otherwise, maintain optimal Maker quote on the deficit side to complete round trip
-    r_maker_price = round(min(0.98, max(0.02, 1.00 - held_basis_price)), 2)
-    if opp_bid is not None and opp_bid >= 0.02:
-        r_maker_price = min(r_maker_price, opp_bid)
-    
-    # Guard: Maker quote must never cross the opposite ask into taker territory
-    if book_opp.best_ask is not None:
-        r_maker_price = min(r_maker_price, round(book_opp.best_ask - 0.01, 2))
-        
-    r_maker_price = max(0.02, min(0.98, round(r_maker_price, 2)))
+    r_maker_price = max(0.02, min(0.98, round(maker_quote, 2)))
     if book_opp.best_ask is not None and r_maker_price >= book_opp.best_ask:
         return _wait(
             f"Opposite ask ({book_opp.best_ask}) too tight for passive maker quote"
@@ -402,7 +422,7 @@ def plan_decision(
                 )
             return Decision(
                 action="quote", side="Up", price=quote_px, size=entry_size,
-                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {micro_regime}, {entry_size:.0f}s)"
+                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {micro_regime}, {entry_size:.0f} shares)"
             )
         elif can_quote_down and down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35:
             quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
@@ -423,7 +443,7 @@ def plan_decision(
                 )
             return Decision(
                 action="quote", side="Down", price=quote_px, size=entry_size,
-                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {micro_regime}, {entry_size:.0f}s)"
+                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {micro_regime}, {entry_size:.0f} shares)"
             )
             
         return _wait(f"No edge outside uncertainty band (+/-{epsilon:.2f}, {micro_regime})")
@@ -445,6 +465,7 @@ def plan_decision(
         book_held=b_held,
         book_opp=b_opp,
         gamma=params["RISK_AVERSION_GAMMA"],
+        p_fill_maker=float(params.get("P_FILL_MAKER", 0.60)),
         fee_rate=params.get("TAKER_FEE_RATE", 0.07),
         max_pair_cost=float(params.get("MAX_PAIR_HEDGE_COST", 1.05)),
         tau_s=tau_s,

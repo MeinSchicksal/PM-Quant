@@ -105,6 +105,7 @@ class PipelineDriver:
                 start_t = info["start_t"]
                 end_t = info["end_t"]
                 tau_s = info["tau_s"]
+                close_px = 0.0  # only valid for a round settled in this iteration
 
                 # 0. Background Reconciler: Ensure delayed Chainlink TWAP replaces spot fallback
                 if loop_start - last_reconcile_t >= 5.0 and pending_settlements:
@@ -164,7 +165,7 @@ class PipelineDriver:
 
                     poly_open, binance_open = self.feed.fetch_window_open_price(start_t)
                     if poly_open <= 0:
-                        if last_slug and 'close_px' in locals() and close_px > 0:
+                        if last_slug and close_px > 0:
                             poly_open = close_px
                         else:
                             spot_initial = self.feed.fetch_spot_state(0.0, loop_start)
@@ -305,6 +306,11 @@ class PipelineDriver:
             self.trade_stream.stop()
         except Exception:
             pass
+        if last_slug:
+            print(
+                f"\n[Pipeline] WARNING: window {last_slug} was still open at shutdown and is "
+                f"NOT in the journal (positions are dropped, not settled)."
+            )
         self._cleanup_pid()
         print("[Pipeline] Shutdown complete.")
 

@@ -17,7 +17,8 @@ PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares, baseline sizing)
-    "MAX_LOTS": 3,                    # Maximum entry lots (3 lots = 15 shares, fractional Kelly sizing cap)
+    "MAX_LOTS": 3,                    # Maximum entry lots (3 lots = 15 shares, hard risk cap per window)
+    "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll (single source for runner/dashboard/reset)
     "LATENCY_S": 0.30,                # Estimated round-trip wire + engine order insertion delay
     "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: fee = shares * rate * p * (1-p); makers pay zero
 
@@ -53,7 +54,9 @@ PARAMS = {
     "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
     "MAX_FAIR_PROB_ENTRY": 0.58,      # Maximum fair probability for balanced Leg-1 entry (blocks skewed directional drift)
     "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost (basis + hedge ask + fee) for Taker Hedge (disqualifies catastrophic insurance > 1.05)
+    "P_FILL_MAKER": 0.60,             # Assumed probability a resting Leg-2 maker quote fills before expiry (utility arbitration only)
     "DEADMAN_TIMEOUT_S": 3.0,          # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
+    "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Polymarket TWAP older than this (fall back to Binance spot basis)
 }
 
 # Derived Filesystem Paths

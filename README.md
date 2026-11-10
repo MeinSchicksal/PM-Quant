@@ -42,7 +42,7 @@ D:\pm-quant/
 ├── web/                      # 资方极简看板（零第三方重型依赖）
 │   ├── server.py             # 原生 HTTP 服务与净收益/动作流水 API
 │   └── static/               # 前端页面（index.html, style.css, app.js）
-├── tests/                    # 数学不变量、撮合、风控与回放单元测试（52 项用例）
+├── tests/                    # 数学不变量、撮合、风控与回放单元测试（56 项用例）
 └── data/                     # 四层冷热分离数据目录
     ├── 1_market/             # 只读原始市场录制资产（events, oracle, settlements）
     ├── 2_ledgers/            # 按版本隔离的运行账本（如 v1.1/）
@@ -81,7 +81,7 @@ D:\pm-quant/
 # 查看当前版本状态与核心参数
 python main.py status
 
-# 运行全部单元测试（52 项用例）
+# 运行全部单元测试（56 项用例）
 python main.py test
 
 # 事件驱动回放：读取 data/1_market/ 录制的盘口/成交/预言机数据，

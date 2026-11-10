@@ -39,6 +39,7 @@ class MarketFeed:
 
         # Polymarket official real-time Chainlink price cache & poller state
         self._last_poly_btc = None
+        self._last_poly_btc_t = 0.0
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
 
@@ -269,13 +270,23 @@ class MarketFeed:
         return None
 
     def get_polymarket_btc_price(self, now: float = None) -> Optional[float]:
-        """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously."""
+        """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously.
+
+        Returns None when the cached TWAP is stale: a dead poller must not keep
+        feeding an old price into p_fair while Binance keeps moving.
+        """
         current_t = now or time.time()
         if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 1.8):
             self._poly_btc_poller_active = True
             import threading
             def _worker():
+                # Dedicated session: requests.Session is not thread-safe and this
+                # worker runs concurrently with the pipeline's own requests.
+                session = None
                 try:
+                    session = requests.Session()
+                    session.headers.update(self.session.headers)
+                    session.proxies = dict(self.session.proxies)
                     now_iso = datetime.datetime.fromtimestamp(current_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                     url = "https://polymarket.com/api/crypto/crypto-price"
                     params = {
@@ -285,25 +296,37 @@ class MarketFeed:
                         "twapEnabled": "true",
                         "twapLookbackSeconds": "60"
                     }
-                    resp = self.session.get(url, params=params, timeout=3.0)
+                    resp = session.get(url, params=params, timeout=3.0)
                     if resp.status_code == 200:
                         body = resp.json()
                         px = body.get("openPrice")
                         if px and float(px) > 0:
                             self._last_poly_btc = float(px)
+                            self._last_poly_btc_t = time.time()
                             self.record_raw_event("oracle", {
                                 "t": time.time(), "kind": "poly_twap_live", "price": self._last_poly_btc
                             })
                 except Exception:
                     pass
                 finally:
+                    if session is not None:
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
                     self._last_poly_poll_t = time.time()
                     self._poly_btc_poller_active = False
 
             t = threading.Thread(target=_worker, daemon=True)
             t.start()
 
-        return getattr(self, "_last_poly_btc", None)
+        px = getattr(self, "_last_poly_btc", None)
+        if px is None:
+            return None
+        max_age = float(config.PARAMS.get("POLY_PRICE_MAX_AGE_S", 10.0))
+        if (time.time() - getattr(self, "_last_poly_btc_t", 0.0)) > max_age:
+            return None
+        return px
 
     def fetch_spot_state(
         self,

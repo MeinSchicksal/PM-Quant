@@ -48,6 +48,8 @@ class PaperRunner:
         self.actions = []
         self.insurance_paid = 0.0
         self.total_pnl = 0.0
+        self._settled_slugs = set()
+        self._initial_capital = float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0))
         self.price_history = []
         self.regime_counts = {}
         self.regime_dwell = {}
@@ -59,6 +61,7 @@ class PaperRunner:
 
     def _load_ledger_history(self):
         """Restore circuit breaker metrics and total cumulative PnL from summary.jsonl."""
+        self._settled_slugs = set()
         if not self.summary_file.exists():
             return
         records = []
@@ -66,6 +69,7 @@ class PaperRunner:
             for line in self.summary_file.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     records.append(json.loads(line))
+            self._settled_slugs = {r.get("slug") for r in records if r.get("slug")}
             self.circuit_breaker.load_from_summary(records)
             self.total_pnl = sum(float(r.get("net_pnl", 0.0)) for r in records if r.get("traded"))
         except Exception:
@@ -254,7 +258,7 @@ class PaperRunner:
 
         # 3. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
-        available_cap = max(10.0, 100.0 + self.total_pnl)
+        available_cap = max(10.0, self._initial_capital + self.total_pnl)
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
@@ -276,7 +280,10 @@ class PaperRunner:
             "price": decision.price, "size": decision.size, "reason": decision.reason
         })
         
-        to_cancel, action = plan_order_actions(self.working_orders, decision, now)
+        to_cancel, action = plan_order_actions(
+            self.working_orders, decision, now,
+            max_queue_wait_s=float(config.PARAMS.get("MAX_QUEUE_WAIT_S", 15.0))
+        )
         for o in to_cancel:
             o.cancel_at = now
             if o in self.working_orders:
@@ -349,6 +356,7 @@ class PaperRunner:
             })
 
         # 3. Queue Matcher: only real trade prints deplete queue, then crossed books
+        print_touched_ids = set()
         if trade_prints:
             for tp in trade_prints:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
@@ -359,6 +367,11 @@ class PaperRunner:
                     fill_sz = self.matcher.on_trade_print(
                         o, float(tp["price"]), float(tp["size"]), tp_t
                     )
+                    if fill_sz > 0 or o.remaining < o.size - 1e-9:
+                        # The print already walked this price level: the book
+                        # snapshot below is stale for this order, so it must not
+                        # be filled a second time from the same liquidity.
+                        print_touched_ids.add(o.id)
                     if fill_sz > 0:
                         if o.side == "Up":
                             self.pos_up.shares += fill_sz
@@ -370,6 +383,10 @@ class PaperRunner:
 
         remaining_working = []
         for o in self.working_orders:
+            if o.id in print_touched_ids:
+                if o.remaining > 1e-6:
+                    remaining_working.append(o)
+                continue
             target_book = book_up if o.side == "Up" else book_down
             fill_sz = self.matcher.match_order(o, target_book, now)
             if fill_sz > 0:
@@ -390,6 +407,13 @@ class PaperRunner:
 
     def close_window(self, close_px: float, official_winner: str = None):
         """Settle session, append summary record, and compress window archive."""
+        if self.current_slug and self.current_slug in self._settled_slugs:
+            # The journal already holds this window (engine restarted mid-window,
+            # or the feed settled it twice). Appending a second row would
+            # double-count PnL and the circuit breaker, so settle exactly once.
+            print(f"[Runner] Window {self.current_slug} already settled; duplicate close ignored")
+            self.working_orders = []
+            return
         # 1. Resolve winner (prefer official UMA/Gamma settlement truth if available)
         if official_winner in ("Up", "Down"):
             winner = official_winner
@@ -434,6 +458,7 @@ class PaperRunner:
         # 1. Fast append to summary.jsonl
         with open(self.summary_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._settled_slugs.add(self.current_slug)
             
         # Update circuit breaker metrics & total cumulative PnL
         self.circuit_breaker.record_round_result(net_pnl, is_traded, self.window_end)
@@ -475,7 +500,9 @@ class PaperRunner:
                 updated.append(json.dumps(r, ensure_ascii=False))
             except Exception:
                 updated.append(line)
-        self.summary_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        tmp = self.summary_file.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        tmp.replace(self.summary_file)
         # Summary is the single accounting source of truth: rebuild the running
         # total and circuit-breaker state from the rewritten file instead of
         # applying a fragile in-memory delta.
@@ -530,7 +557,7 @@ class PaperRunner:
             "micro_regime": micro_regime,
             "snr": snr,
             "circuit_breaker": self.circuit_breaker.get_status(now),
-            "available_capital": round(max(10.0, 100.0 + self.total_pnl), 2),
+            "available_capital": round(max(10.0, self._initial_capital + self.total_pnl), 2),
             "total_pnl": round(self.total_pnl, 4),
             "prob_up": round(getattr(self, "last_prob_up", 0.5), 4),
             "prob_down": round(1.0 - getattr(self, "last_prob_up", 0.5), 4),
