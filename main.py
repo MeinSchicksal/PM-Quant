@@ -1,10 +1,12 @@
 """PM-Quant Master Entry Point & Command Line Interface.
 
 Usage:
-  python main.py [start]   - 一键启动量化交易管道 + Web看板 + 自动呼起浏览器 (推荐)
+  python main.py [start] [port] [--no-browser]
+                           - 一键启动量化交易管道 + Web看板 (+ 浏览器)
   python main.py stop      - 一键停止所有交易进程与释放 8900 端口
   python main.py run       - 启动纸面（Paper）量化做市与对冲管道 (Pipeline Driver)
-  python main.py web [p]   - 仅启动 Web 投资人监控看板 (默认端口: 8900)
+  python main.py web [p] [--no-browser]
+                           - 仅启动 Web 投资人监控看板 (默认端口: 8900)
   python main.py test      - 运行所有微观结构与数学不变量单元测试
   python main.py reset     - 重置当前版本账本为干净初始状态 ($100.00)
   python main.py replay    - 回放历史微观订单流录制数据
@@ -113,8 +115,20 @@ def cmd_run():
     driver.run()
 
 
-def cmd_web(port: int = 8900):
+def cmd_web(port: int = 8900, open_browser: bool = True):
+    import threading
+    import time
+    import webbrowser
     from web.server import run
+
+    if open_browser:
+        def _launch():
+            time.sleep(0.8)
+            try:
+                webbrowser.open(f"http://127.0.0.1:{port}/#market")
+            except Exception:
+                pass
+        threading.Thread(target=_launch, daemon=True).start()
     run(port)
 
 
@@ -298,15 +312,54 @@ s2.Save()
             print(f"    - {s2}")
 
 
+def _parse_port_flags(args, default_port: int = 8900):
+    """Parse `[port] [--no-browser]` without exploding on unknown flags.
+
+    The old parser did `int(sys.argv[2])`, so `start --no-browser` (or any
+    mistyped argument) died with a bare ValueError traceback instead of telling
+    the user what was wrong.
+    """
+    port = default_port
+    open_browser = True
+    for arg in args:
+        low = arg.lower()
+        if low in ("--no-browser", "-n"):
+            open_browser = False
+        elif low.startswith("--port="):
+            port = _parse_port(low.split("=", 1)[1])
+        elif arg.isdigit():
+            port = _parse_port(arg)
+        elif low in ("--browser", "-b"):
+            open_browser = True
+        else:
+            print(f"[ERROR] Unknown option: {arg}\n")
+            print(__doc__)
+            sys.exit(2)
+    return port, open_browser
+
+
+def _parse_port(raw: str) -> int:
+    try:
+        port = int(raw)
+    except ValueError:
+        port = -1
+    if not (1 <= port <= 65535):
+        print(f"[ERROR] Invalid port: {raw!r} (expected 1-65535)\n")
+        print(__doc__)
+        sys.exit(2)
+    return port
+
+
 def main():
     if len(sys.argv) < 2:
         cmd_start()
         return
 
     cmd = sys.argv[1].lower()
+    rest = sys.argv[2:]
     if cmd in ("start", "all"):
-        p = int(sys.argv[2]) if len(sys.argv) > 2 else 8900
-        cmd_start(p)
+        port, open_browser = _parse_port_flags(rest)
+        cmd_start(port, open_browser=open_browser)
     elif cmd == "stop":
         cmd_stop()
     elif cmd == "shortcut":
@@ -314,8 +367,8 @@ def main():
     elif cmd == "run":
         cmd_run()
     elif cmd == "web":
-        p = int(sys.argv[2]) if len(sys.argv) > 2 else 8900
-        cmd_web(p)
+        port, open_browser = _parse_port_flags(rest)
+        cmd_web(port, open_browser=open_browser)
     elif cmd == "test":
         cmd_test()
     elif cmd == "reset":

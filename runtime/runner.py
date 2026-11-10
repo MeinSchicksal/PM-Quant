@@ -222,10 +222,23 @@ class PaperRunner:
         if net_stats:
             self.net_stats = net_stats
 
-        # 1. Dead-Man Switch & Feed Staleness Protection
+        # 1. Dead-Man Switch: protect against stale inputs and against a stalled
+        # event loop. The old check only measured the interval between step()
+        # calls and called it a "feed gap": a genuinely stale book with a fast
+        # loop never tripped it, while a single slow HTTP round-trip cancelled
+        # every resting quote. Both conditions are now checked separately.
         deadman_timeout = float(config.PARAMS.get("DEADMAN_TIMEOUT_S", 3.0))
-        feed_gap = (now - self._last_step_time) if self._last_step_time is not None else 0.0
-        is_deadman_active = (self._last_step_time is not None and feed_gap > deadman_timeout) or (spot.price <= 0)
+        loop_gap = (now - self._last_step_time) if self._last_step_time is not None else 0.0
+        input_ages = [
+            now - float(getattr(spot, "timestamp", now) or now),
+            now - float(getattr(book_up, "source_t", 0.0) or now),
+            now - float(getattr(book_down, "source_t", 0.0) or now),
+        ]
+        stale_age = max(0.0, max(input_ages))
+        is_deadman_active = stale_age > deadman_timeout or loop_gap > deadman_timeout or spot.price <= 0
+        deadman_reason = (
+            f"feed age {stale_age:.1f}s / loop gap {loop_gap:.1f}s > {deadman_timeout:.1f}s"
+        )
         self._last_step_time = now
 
         if is_deadman_active and self.working_orders:
@@ -267,7 +280,7 @@ class PaperRunner:
         )
 
         if is_deadman_active:
-            decision = Decision(action="wait", reason=f"Dead-man switch active: feed gap {feed_gap:.1f}s > {deadman_timeout:.1f}s")
+            decision = Decision(action="wait", reason=f"Dead-man switch active: {deadman_reason}")
         else:
             decision = plan_decision(
                 self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,

@@ -163,6 +163,25 @@ silently re-based; these are correctness fixes, not a new experiment.
   (mean -$0.0212, t=-0.73, 63 fills, worst -$2.0000); superseded report files
   were removed so `data/3_reports/` holds one authoritative run.
 
+### Operational fixes (launchers, CLI, dead-man switch)
+- **`start.bat` / `stop.bat` were unusable on a Chinese Windows console**:
+  both were UTF-8 files that `call`-ed a Chinese-named sibling, which `cmd.exe`
+  (cp936) decoded into `'dp0...bat' is not recognized`. Double-clicking the
+  desktop shortcut therefore did nothing. They are now ASCII-only, CRLF,
+  no longer route through a Chinese filename, check for `python` on `PATH`, and
+  pause on error instead of closing the window. All `.bat`/`.vbs` launchers
+  were converted to CRLF.
+- **CLI argument parsing (`main.py`)**: `start --no-browser` used to raise
+  `ValueError: invalid literal for int()` from `int(sys.argv[2])`. Arguments
+  are now parsed as `[port] [--no-browser]`, invalid ports and unknown flags
+  print the usage block and exit 2, and `web` accepts `--no-browser` too.
+- **Dead-man switch measured the wrong thing (`runtime/runner.py`)**: the
+  "feed gap" was actually the interval between `step()` calls, so a stale book
+  with a healthy loop never tripped the switch, while one slow HTTP round-trip
+  cancelled every resting quote (observed live: "Dead-man switch active" on a
+  normal 1 Hz feed). It now checks input staleness (`spot.timestamp`,
+  `order_book.source_t`) and loop stall separately, and reports both ages.
+
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order
   adapter yet), described matching honestly, fixed the duplicate "常用命令"
