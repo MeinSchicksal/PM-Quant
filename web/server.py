@@ -8,6 +8,7 @@ import json
 import time
 import gzip
 import mimetypes
+import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -387,6 +388,19 @@ class QuantHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 self.send_error(404)
+
+
+def start_server_in_background(port=8900):
+    """Start investor dashboard HTTP server in a daemon background thread."""
+    server_address = ("127.0.0.1", port)
+    try:
+        httpd = ThreadingHTTPServer(server_address, QuantHandler)
+    except OSError as e:
+        print(f"[Web] 端口 {port} 已被占用 ({e})，复用既有看板服务。")
+        return None
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    return httpd
 
 
 def run(port=8900):

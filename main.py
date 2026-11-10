@@ -1,13 +1,15 @@
 """PM-Quant Master Entry Point & Command Line Interface.
 
 Usage:
-  python main.py run       - Start continuous live paper trading pipeline
-  python main.py web [p]   - Start web dashboard server (default port: 8900)
-  python main.py test      - Run all mathematical & dashboard unit tests
-  python main.py reset     - Reset current version experiment to clean starting slate
-  python main.py replay    - Replay recorded historical market streams
-  python main.py seal      - Seal current version with code snapshot & manifest
-  python main.py status    - Show current version identity and parameters
+  python main.py [start]   - 一键启动量化交易管道 + Web看板 + 自动呼起浏览器 (推荐)
+  python main.py stop      - 一键停止所有交易进程与释放 8900 端口
+  python main.py run       - 仅启动实盘量化交易做市管道 (Pipeline Driver)
+  python main.py web [p]   - 仅启动 Web 投资人监控看板 (默认端口: 8900)
+  python main.py test      - 运行所有微观结构与数学不变量单元测试
+  python main.py reset     - 重置当前版本账本为干净初始状态 ($100.00)
+  python main.py replay    - 回放历史微观订单流录制数据
+  python main.py seal      - 归档封存当前实验批次代码与快照
+  python main.py status    - 查看当前系统版本身份与核心经济学参数
 """
 import sys
 import shutil
@@ -18,6 +20,89 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+
+
+def cmd_start(port: int = 8900, open_browser: bool = True):
+    """Start all-in-one system: web dashboard server + trading pipeline + browser."""
+    import time
+    import threading
+    import webbrowser
+    from web.server import start_server_in_background
+    from runtime.pipeline import PipelineDriver
+
+    print("==================================================================")
+    print(f"        PM-Quant 全自动量化做市与高频对冲系统 ({config.VERSION})        ")
+    print("==================================================================")
+    print(f"[*] 启动看板 Web 服务: http://127.0.0.1:{port}/#market")
+
+    httpd = start_server_in_background(port)
+
+    if open_browser:
+        def _launch():
+            time.sleep(1.0)
+            try:
+                webbrowser.open(f"http://127.0.0.1:{port}/#market")
+            except Exception:
+                pass
+        threading.Thread(target=_launch, daemon=True).start()
+
+    print("[*] 启动实盘交易与对冲管道 (Pipeline Driver)...")
+    print("[*] 提示: 按 Ctrl+C 可一键平稳退出所有交易与看板服务。\n")
+    try:
+        driver = PipelineDriver()
+        driver.run()
+    except KeyboardInterrupt:
+        print("\n\n[PM-Quant] 收到终止信号，正在关闭系统...")
+    finally:
+        if httpd:
+            try:
+                httpd.shutdown()
+                httpd.server_close()
+            except Exception:
+                pass
+        print("[PM-Quant] 所有交易管道与看板服务已安全退出。")
+
+
+def cmd_stop():
+    """Stop all running PM-Quant background processes and release port 8900."""
+    import os
+    import signal
+    import subprocess
+    from runtime.pipeline import is_pid_running, PID_FILE
+
+    stopped_count = 0
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            if is_pid_running(pid):
+                print(f"[*] 正在停止 Pipeline 交易进程 (PID: {pid})...")
+                if sys.platform == "win32":
+                    os.system(f"taskkill /F /PID {pid} >nul 2>&1")
+                else:
+                    os.kill(pid, signal.SIGTERM)
+                stopped_count += 1
+            PID_FILE.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"[!] 清理 PID 文件失败: {e}")
+
+    # Check port 8900
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output('netstat -ano | findstr :8900', shell=True).decode('utf-8', errors='ignore')
+            for line in out.strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and "LISTENING" in parts:
+                    port_pid = parts[-1]
+                    print(f"[*] 正在关闭占用 8900 端口的看板进程 (PID: {port_pid})...")
+                    os.system(f"taskkill /F /PID {port_pid} >nul 2>&1")
+                    stopped_count += 1
+        except Exception:
+            pass
+
+    if stopped_count > 0:
+        print(f"[PM-Quant] 成功停止了 {stopped_count} 个服务进程。")
+    else:
+        print("[PM-Quant] 当前没有检测到正在运行的交易或看板进程。")
 
 
 def cmd_run():
@@ -91,13 +176,59 @@ def cmd_status():
         print(f"  {k:22s}: {v}")
 
 
+def cmd_shortcut():
+    """Create Windows Desktop shortcuts for One-Click PM-Quant Launch and Stop."""
+    import os
+    from pathlib import Path
+    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
+    if not desktop.exists():
+        print(f"[!] 找不到桌面路径: {desktop}")
+        return
+
+    start_bat = ROOT / "启动系统.bat"
+    stop_bat = ROOT / "停止系统.bat"
+
+    vbs_content = f"""
+Set ws = CreateObject("WScript.Shell")
+Set s1 = ws.CreateShortcut("{desktop / 'PM-Quant 一键启动.lnk'}")
+s1.TargetPath = "{start_bat}"
+s1.WorkingDirectory = "{ROOT}"
+s1.WindowStyle = 1
+s1.Description = "PM-Quant 全自动量化做市与高频对冲系统"
+s1.Save()
+
+Set s2 = ws.CreateShortcut("{desktop / 'PM-Quant 一键停止.lnk'}")
+s2.TargetPath = "{stop_bat}"
+s2.WorkingDirectory = "{ROOT}"
+s2.WindowStyle = 1
+s2.Description = "停止 PM-Quant 交易管道与看板"
+s2.Save()
+"""
+    vbs_path = ROOT / "_temp_create_shortcut.vbs"
+    vbs_path.write_text(vbs_content, encoding="gbk")
+    try:
+        os.system(f'cscript //nologo "{vbs_path}"')
+        print(f"[*] 成功在桌面创建快捷方式:")
+        print(f"    - {desktop / 'PM-Quant 一键启动.lnk'}")
+        print(f"    - {desktop / 'PM-Quant 一键停止.lnk'}")
+    finally:
+        vbs_path.unlink(missing_ok=True)
+
+
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
+        cmd_start()
         return
 
     cmd = sys.argv[1].lower()
-    if cmd == "run":
+    if cmd in ("start", "all"):
+        p = int(sys.argv[2]) if len(sys.argv) > 2 else 8900
+        cmd_start(p)
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "shortcut":
+        cmd_shortcut()
+    elif cmd == "run":
         cmd_run()
     elif cmd == "web":
         p = int(sys.argv[2]) if len(sys.argv) > 2 else 8900
