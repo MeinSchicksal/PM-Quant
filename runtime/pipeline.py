@@ -84,6 +84,12 @@ class PipelineDriver:
             pass
 
     def run(self):
+        # Line-buffer stdout so `python main.py start > pipeline.log` tails in
+        # real time instead of flushing in 8 KB blocks.
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
         print(f"=== PM-Quant Live Pipeline Started ({config.BATCH_ID}) ===")
         print(f"Log directory: {config.CURRENT_LEDGER_DIR}")
         print("Press Ctrl+C to terminate gracefully.\n")
