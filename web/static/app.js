@@ -228,23 +228,25 @@
       const posUp = live.pos_up ? live.pos_up.shares || 0 : 0;
       const posDn = live.pos_down ? live.pos_down.shares || 0 : 0;
       const isLocked = posUp > 0 && posDn > 0 && Math.abs(posUp - posDn) < 1e-4;
-      document.getElementById('overview-live-pos').textContent = `看涨(UP) ${posUp.toFixed(1)} / 看跌(DN) ${posDn.toFixed(1)}${isLocked ? ' (已对冲锁仓)' : ''}`;
+      const posEl = document.getElementById('overview-live-pos');
+      posEl.innerHTML = `UP ${posUp.toFixed(1)} / DN ${posDn.toFixed(1)}` +
+        (isLocked ? ' <span class="lock-badge">已锁仓</span>' : '');
     }
 
     // KPI Cards
     const kpiAvail = document.getElementById('kpi-available-cap');
     if (kpiAvail) kpiAvail.textContent = `$${availCap.toFixed(2)}`;
     const kpiAvailSub = document.getElementById('kpi-avail-sub');
-    if (kpiAvailSub) kpiAvailSub.textContent = `初始 $${initialCap.toFixed(2)} · 本金回报率 ${(roiPct >= 0 ? '+' : '') + roiPct.toFixed(2)}%`;
+    if (kpiAvailSub) kpiAvailSub.textContent = `初始 $${initialCap.toFixed(2)} · 回报 ${(roiPct >= 0 ? '+' : '') + roiPct.toFixed(2)}%`;
 
     document.getElementById('kpi-winrate').textContent = `${hist.win_rate || 0.0}%`;
-    document.getElementById('kpi-winloss').textContent = `${hist.wins || 0} 胜 ${hist.losses || 0} 负 ${hist.flats || 0} 平`;
+    document.getElementById('kpi-winloss').textContent = `${hist.wins || 0} 胜 · ${hist.losses || 0} 负 · ${hist.flats || 0} 平`;
 
     const avgPnl = hist.avg_pnl || 0;
     const avgEl = document.getElementById('kpi-avg-pnl');
     avgEl.textContent = (avgPnl >= 0 ? '+' : '-') + '$' + Math.abs(avgPnl).toFixed(2);
     avgEl.className = 'kpi-card-value ' + (avgPnl > 0 ? 'up' : avgPnl < 0 ? 'down' : '');
-    document.getElementById('kpi-avg-split').textContent = `均盈 +$${(hist.avg_win || 0).toFixed(2)} / 均亏 -$${(hist.avg_loss || 0).toFixed(2)}`;
+    document.getElementById('kpi-avg-split').textContent = `均盈 +$${(hist.avg_win || 0).toFixed(2)} · 均亏 -$${(hist.avg_loss || 0).toFixed(2)}`;
 
     // Paired Ratio and Total Fills
     let pairedCount = 0;
@@ -267,67 +269,92 @@
   }
 
   const REGIME_META = {
-    'range_bound': { name: '高确定性箱体震荡', desc: '信噪比 SNR ≤ 1.0, 偏离 ≤ 8 bps (核心价差捕获做市)', badge: 'ok' },
-    'normal_oscillation': { name: '常态微幅震荡', desc: '信噪比 SNR ≤ 1.2, 基线 1 手做市排队', badge: 'normal' },
-    'trending_up': { name: '单边上涨强动量', desc: '信噪比 SNR > 1.8 且偏上, 趋势防守 (禁止逆势买跌)', badge: 'freeze' },
-    'trending_down': { name: '单边下跌强动量', desc: '信噪比 SNR > 1.8 且偏下, 趋势防守 (禁止逆势买涨)', badge: 'freeze' },
-    'toxic': { name: '剧烈跳空毒流', desc: '波动率 > 35 bps 或秒级剧震, 主动收缩挂单避险', badge: 'warn' },
-    'wide_spread': { name: '宽价差流动性缺失', desc: '买卖价差 > 0.06, 摩擦成本过高保持观望', badge: 'freeze' },
-    'transitional': { name: '过渡状态观察', desc: '信噪比 1.2~1.8, 状态切换中观望', badge: 'normal' },
-    'tail_freeze': { name: '交割尾盘流动性冻结', desc: 'Tau < 180s 临近到期, 严禁新开单边仓位', badge: 'freeze' },
-    'legacy': { name: '历史未打标（入场时点未知）', desc: '升级前写入的成交窗口, 无入场时刻 regime 标签, 不可归因', badge: 'normal' },
-    'unlabeled': { name: '未分类窗口', desc: '既无入场标签也无占优 regime 的窗口', badge: 'normal' }
+    'range_bound': { name: '高确定性箱体震荡', desc: '信噪比 SNR ≤ 1.0, 偏离 ≤ 8 bps (核心价差捕获做市)', badge: 'ok', short: '箱体震荡' },
+    'normal_oscillation': { name: '常态微幅震荡', desc: '信噪比 SNR ≤ 1.2, 基线 1 手做市排队', badge: 'normal', short: '常态震荡' },
+    'trending_up': { name: '单边上涨强动量', desc: '信噪比 SNR > 1.8 且偏上, 趋势防守 (禁止逆势买跌)', badge: 'freeze', short: '上涨动量' },
+    'trending_down': { name: '单边下跌强动量', desc: '信噪比 SNR > 1.8 且偏下, 趋势防守 (禁止逆势买涨)', badge: 'freeze', short: '下跌动量' },
+    'toxic': { name: '剧烈跳空毒流', desc: '波动率 > 35 bps 或秒级剧震, 主动收缩挂单避险', badge: 'warn', short: '毒流跳空' },
+    'wide_spread': { name: '宽价差流动性缺失', desc: '买卖价差 > 0.06, 摩擦成本过高保持观望', badge: 'freeze', short: '宽价差' },
+    'transitional': { name: '过渡状态观察', desc: '信噪比 1.2~1.8, 状态切换中观望', badge: 'normal', short: '过渡态' },
+    'tail_freeze': { name: '交割尾盘流动性冻结', desc: 'Tau < 180s 临近到期, 严禁新开单边仓位', badge: 'freeze', short: '尾盘冻结' },
+    'legacy': { name: '历史未打标（入场时点未知）', desc: '升级前写入的成交窗口, 无入场时刻 regime 标签, 不可归因', badge: 'normal', short: '历史未打标' },
+    'unlabeled': { name: '未分类窗口', desc: '既无入场标签也无占优 regime 的窗口', badge: 'normal', short: '未分类' }
   };
 
   function renderRegimeAttribution(stats) {
     const tbody = document.getElementById('regime-attribution-tbody');
     if (!tbody) return;
 
-    if (!stats || Object.keys(stats).length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="action-empty">暂无归因数据</td></tr>';
-      return;
-    }
+    const badge = document.getElementById('regime-sample-badge');
+    const coverage = document.getElementById('regime-coverage');
+    const fmtMoney = (v, digits) => (v >= 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(digits);
 
     const keys = ['range_bound', 'normal_oscillation', 'trending_up', 'trending_down', 'toxic', 'wide_spread', 'transitional', 'tail_freeze'];
-    Object.keys(stats).forEach(k => {
-      if (!keys.includes(k)) keys.push(k);
+    Object.keys(stats || {}).forEach(k => { if (!keys.includes(k)) keys.push(k); });
+
+    const all = keys.map(k => {
+      const s = stats[k] || {};
+      return {
+        key: k,
+        meta: REGIME_META[k] || { name: k, desc: '实时微观统计' },
+        rounds: s.rounds || 0,
+        n: s.traded || 0,
+        wins: s.wins || 0,
+        losses: s.losses || 0,
+        pnl: s.net_pnl || 0,
+        mean: s.mean || 0,
+        ciLow: s.ci_low || 0,
+        ciHigh: s.ci_high || 0,
+        sampleOk: s.sample_ok !== false,
+      };
     });
 
-    const fmtMoney = (v, digits) => (v >= 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(digits);
-    const rows = keys.map(k => {
-      const s = stats[k] || { rounds: 0, traded: 0, wins: 0, losses: 0, flats: 0, net_pnl: 0.0 };
-      const meta = REGIME_META[k] || { name: k, desc: '实时微观统计', badge: 'normal' };
-      const decisive = s.wins + s.losses;
-      const winRate = decisive > 0 ? ((s.wins / decisive) * 100).toFixed(1) + '%' : (s.traded > 0 ? '0.0%' : '--');
-      const pnl = s.net_pnl || 0.0;
-      const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : '';
-      const pnlStr = fmtMoney(pnl, 2);
-      const n = s.traded || 0;
-      const meanStr = n > 0 ? fmtMoney(s.mean || 0, 3) : '--';
-      const ciStr = n > 1
-        ? `[${fmtMoney(s.ci_low || 0, 2)}, ${fmtMoney(s.ci_high || 0, 2)}]`
-        : '--';
-      // A cell with fewer than 30 traded windows cannot distinguish an edge
-      // from noise, so it is dimmed rather than read as a finding.
-      const lowSample = n > 0 && s.sample_ok === false;
-      const sampleTag = lowSample ? '<span class="regime-sample-tag">样本不足</span>' : '';
+    // Only traded windows carry PnL. Regimes that were observed but never
+    // traded are coverage, not performance: printing "0 / 0 / --" for them
+    // reads as "this regime loses nothing", which is not a finding.
+    const traded = all.filter(r => r.n > 0).sort((a, b) => b.n - a.n);
+    const totalN = traded.reduce((sum, r) => sum + r.n, 0);
+    if (badge) {
+      badge.textContent = totalN > 0
+        ? `可归因 ${totalN} 场 · ${traded.length} 类形态`
+        : '暂无成交样本';
+    }
 
-      return `
-        <tr class="${lowSample ? 'regime-low-sample' : ''}">
-          <td><strong class="time-cell-main">${meta.name}</strong></td>
-          <td><small style="color: #64748b;">${meta.desc}</small></td>
-          <td>${s.rounds} 场</td>
-          <td>${n} 场${sampleTag}</td>
-          <td>${s.wins} 胜 / ${s.losses} 负</td>
-          <td><strong>${winRate}</strong></td>
-          <td><strong class="${pnlCls}">${n > 0 ? pnlStr : '--'}</strong></td>
-          <td>${meanStr}</td>
-          <td><small style="color: #94a3b8;">${ciStr}</small></td>
-        </tr>
-      `;
-    }).join('');
+    if (traded.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="action-empty">尚无带入场时点的成交样本 —— 自 v1.1.1 起，只有开仓时刻已打标的成交才参与归因</td></tr>`;
+    } else {
+      tbody.innerHTML = traded.map(r => {
+        const decisive = r.wins + r.losses;
+        const winRate = decisive > 0 ? ((r.wins / decisive) * 100).toFixed(1) + '%' : '—';
+        const pnlCls = r.pnl > 0 ? 'up' : r.pnl < 0 ? 'down' : '';
+        const lowSample = !r.sampleOk;
+        const tag = lowSample ? '<span class="regime-sample-tag">样本不足</span>' : '';
+        const ciStr = r.n > 1 ? `[${fmtMoney(r.ciLow, 2)}, ${fmtMoney(r.ciHigh, 2)}]` : '—';
+        return `
+          <tr class="${lowSample ? 'regime-low-sample' : ''}">
+            <td class="regime-name-cell">
+              <strong>${r.meta.name}</strong>
+              <small>${r.meta.desc}</small>
+            </td>
+            <td class="num"><div class="n-cell"><span class="n-value">${r.n}</span>${tag}</div></td>
+            <td class="num"><div class="n-cell"><strong>${winRate}</strong><small class="n-sub">${r.wins} 胜 / ${r.losses} 负</small></div></td>
+            <td class="num"><strong class="${pnlCls}">${fmtMoney(r.pnl, 2)}</strong></td>
+            <td class="num">${fmtMoney(r.mean, 3)}</td>
+            <td class="num"><span class="ci-cell">${ciStr}</span></td>
+          </tr>
+        `;
+      }).join('');
+    }
 
-    tbody.innerHTML = rows;
+    const untouched = all.filter(r => r.n === 0 && r.rounds > 0).sort((a, b) => b.rounds - a.rounds);
+    if (coverage && untouched.length > 0) {
+      coverage.hidden = false;
+      coverage.innerHTML = '<span class="coverage-label">监测覆盖（未成交，不参与归因）</span>' +
+        untouched.map(r => `<span class="coverage-chip" title="${r.meta.name} · ${r.meta.desc}">${r.meta.short || r.meta.name}<b>${r.rounds}</b></span>`).join('');
+    } else if (coverage) {
+      coverage.hidden = true;
+      coverage.innerHTML = '';
+    }
   }
 
   function renderRecentTable(records) {
@@ -391,12 +418,12 @@
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
-          <td>${posUpShares.toFixed(1)}</td>
-          <td>${posDownShares.toFixed(1)}</td>
-          <td>$${totalCostVal.toFixed(2)}</td>
-          <td>${isPending ? '--' : '$' + proceedsVal.toFixed(2)}</td>
-          <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
-          <td>${r.fills_count || 0}</td>
+          <td class="num">${posUpShares.toFixed(1)}</td>
+          <td class="num">${posDownShares.toFixed(1)}</td>
+          <td class="num">$${totalCostVal.toFixed(2)}</td>
+          <td class="num">${isPending ? '—' : '$' + proceedsVal.toFixed(2)}</td>
+          <td class="num"><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
+          <td class="num">${r.fills_count || 0}</td>
         </tr>
       `;
     }).join('');
@@ -1484,13 +1511,13 @@
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
-          <td>${posUpShares.toFixed(1)}</td>
-          <td>${posDownShares.toFixed(1)}</td>
-          <td>$${totalCostVal.toFixed(2)}</td>
-          <td>${isPending ? '--' : '$' + proceedsVal.toFixed(2)}</td>
-          <td><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
-          <td>${r.fills_count || 0}</td>
-          <td>$${(r.insurance_paid || 0).toFixed(2)}</td>
+          <td class="num">${posUpShares.toFixed(1)}</td>
+          <td class="num">${posDownShares.toFixed(1)}</td>
+          <td class="num">$${totalCostVal.toFixed(2)}</td>
+          <td class="num">${isPending ? '—' : '$' + proceedsVal.toFixed(2)}</td>
+          <td class="num"><strong class="${isPending ? '' : pnlCls}">${isPending ? '--' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3)}</strong></td>
+          <td class="num">${r.fills_count || 0}</td>
+          <td class="num">$${(r.insurance_paid || 0).toFixed(2)}</td>
         </tr>
       `;
     }).join('');

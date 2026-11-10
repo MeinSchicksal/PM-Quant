@@ -224,6 +224,24 @@ silently re-based; these are correctness fixes, not a new experiment.
   normal 1 Hz feed). It now checks input staleness (`spot.timestamp`,
   `order_book.source_t`) and loop stall separately, and reports both ages.
 
+### Dashboard (UI pass)
+- **Regime attribution panel**: the matrix no longer renders ten rows of
+  `0 场 / 0 胜 / --`. Rows are emitted only for regimes with settled
+  (`traded`) windows, sorted by sample size; observed-but-never-traded regimes
+  collapse into a compact "监测覆盖" chip strip below the table. The win/loss
+  counts moved under the win-rate so the panel fits six columns, and the panel
+  header now carries the count of attributable rounds.
+- **Layout**: every table header is single-line (`white-space: nowrap`),
+  numeric columns are right-aligned with tabular figures, KPI labels stack over
+  their sub-badges instead of being squeezed, and the history ledger uses a
+  tighter row rhythm so all ten columns fit without clipping.
+- **Responsive**: added the first media queries (`1280px` / `1024px` / `720px`).
+  The sidebar collapses to icons at 1024px and disappears at 720px; the hero,
+  KPI and quote grids fall back to one or two columns. Before this pass a
+  narrow window simply clipped the right-hand cards off-screen.
+- **Lock state**: a hedged (UP == DN) live position now shows a `已锁仓` badge
+  instead of a trailing text fragment that wrapped onto its own line.
+
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order
   adapter yet), described matching honestly, fixed the duplicate "常用命令"

@@ -591,8 +591,9 @@ body {
 
 .kpi-card-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 
 .kpi-card-label {
@@ -602,10 +603,12 @@ body {
 }
 
 .kpi-sub-badge {
-  font-size: var(--text-small);
+  font-size: 12.5px;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--caption);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .kpi-card-value {
@@ -1238,15 +1241,209 @@ body {
 /* Regime attribution: under-sampled cells are dimmed so a 2-window cell is
    never mistaken for evidence. */
 .regime-low-sample {
-  opacity: 0.62;
+  opacity: 0.74;
 }
 .regime-sample-tag {
-  margin-left: 6px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 10px;
+  display: inline-block;
+  margin: 0;
+  font-size: 11px;
   line-height: 1.4;
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.16);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* PANEL SECTION HEAD: title + subtitle on the left, status badge on the right */
+.panel-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.panel-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.panel-title-group h2 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.panel-subtitle {
+  font-size: 12.5px;
+  color: var(--caption);
+  line-height: 1.45;
+}
+
+/* REGIME ATTRIBUTION: only traded rows are listed; observed-but-idle
+   regimes collapse into a compact coverage strip below the table. */
+.regime-panel {
+  margin-bottom: 20px;
+}
+
+.regime-table th,
+.regime-table td {
+  padding: 12px 12px;
+  white-space: nowrap;
+}
+
+.n-sub {
+  font-size: 11.5px;
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.regime-table td.regime-name-cell {
+  white-space: normal;
+  min-width: 200px;
+  max-width: 320px;
+  font-family: var(--font-sans);
+}
+
+.regime-name-cell strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.regime-name-cell small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--caption);
+}
+
+.history-table th,
+.history-table td {
+  white-space: nowrap;
+  padding: 12px 14px;
+}
+
+.n-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.history-table th.num,
+.history-table td.num {
+  text-align: right;
+}
+
+.ci-cell {
+  display: inline-block;
+  font-size: 12.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.regime-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: var(--border) solid var(--hairline-soft);
+}
+
+.coverage-label {
+  font-size: 12px;
+  color: var(--caption);
+  margin-right: 2px;
+}
+
+.coverage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-strong);
+  font-size: 12px;
+  color: var(--label);
+  white-space: nowrap;
+}
+
+.coverage-chip b {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.n-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* History ledger: ten columns, so it runs a notch tighter than the overview tables */
+.history-table-card .history-table th,
+.history-table-card .history-table td {
+  padding: 11px 12px;
+  font-size: 14px;
+}
+
+/* RESPONSIVE: the dashboard is desktop-first, but a narrow window must
+   degrade to a single column instead of clipping the cards off-screen. */
+@media (max-width: 1280px) {
+  .overview-top-grid { grid-template-columns: 1fr; }
+  .history-table th,
+  .history-table td { padding: 10px 9px; }
+  .history-table-card .history-table th,
+  .history-table-card .history-table td { font-size: 13px; }
+  .regime-table th,
+  .regime-table td { padding: 10px 10px; }
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dual-grid { grid-template-columns: 1fr; }
+  .active-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .action-item { grid-template-columns: 76px 72px 60px 1fr; }
+  .action-item .action-reason { grid-column: 1 / -1; }
+}
+
+@media (max-width: 1024px) {
+  :root { --sidebar-width: 84px; }
+  .sidebar { padding: 24px 10px; }
+  .sidebar-link { justify-content: center; padding: 12px 10px; gap: 0; }
+  .sidebar-link span { display: none; }
+  .sidebar-network { display: none; }
+  .shell { padding: 24px 24px 56px; }
+  .topbar { padding: 0 20px; }
+  .hero-composition-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hero-active-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  :root { --sidebar-width: 0px; }
+  .sidebar { display: none; }
+  .shell { width: 100%; padding: 18px 14px 40px; }
+  .panel { padding: 18px 16px; border-radius: 12px; }
+  .kpi-grid { grid-template-columns: 1fr; }
+  .overview-top-grid, .dual-grid { gap: 16px; }
+  .hero-pnl-split-row { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .hero-won-lost-sub { display: flex; gap: 24px; }
+  .active-strip { grid-template-columns: 1fr 1fr; }
+  .panel-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .page-heading { flex-direction: column; align-items: flex-start; gap: 6px; }
+}
+
+.lock-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--up-soft);
+  color: var(--up);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
   white-space: nowrap;
 }

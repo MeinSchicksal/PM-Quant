@@ -157,7 +157,7 @@
               <strong class="comp-val" id="hero-initial-cap">$100.00</strong>
             </div>
             <div class="comp-box">
-              <span class="comp-label">流水收益率 (收益÷流水)</span>
+              <span class="comp-label" title="净收益 ÷ 周转总流水">流水收益率</span>
               <strong class="comp-val" id="hero-roi">+0.00%</strong>
             </div>
             <div class="comp-box">
@@ -233,31 +233,32 @@
       </section>
 
       <!-- Market Regime Attribution Matrix Panel -->
-      <section class="panel regime-panel" aria-label="微观行情形态盈亏归因" style="margin-bottom: 20px;">
-        <div class="workspace-head">
-          <h2>行情形态策略归因矩阵 (Regime Performance)</h2>
-          <small class="workspace-subtitle" style="color: #64748b; font-size: 12px;">仅统计已成交窗口；n &lt; 30 的格子标记为样本不足，不做结论</small>
+      <section class="panel regime-panel" aria-label="微观行情形态盈亏归因">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <h2>行情形态策略归因</h2>
+            <small class="panel-subtitle">按开仓时刻的行情形态归因 · 仅统计已成交窗口 · n &lt; 30 标记为样本不足</small>
+          </div>
+          <span class="badge-pill" id="regime-sample-badge">可归因 0 场</span>
         </div>
         <div class="table-wrap">
-          <table class="history-table">
+          <table class="history-table regime-table">
             <thead>
               <tr>
-                <th>行情形态分类</th>
-                <th>形态特征</th>
-                <th>监测场次</th>
-                <th>样本 n（已成交）</th>
-                <th>胜 / 负</th>
-                <th>有效胜率</th>
-                <th>累计净盈亏</th>
-                <th>单窗均值</th>
-                <th>95% 置信区间</th>
+                <th>行情形态</th>
+                <th class="num" title="已成交窗口数（只有成交窗口才产生盈亏）">样本 n</th>
+                <th class="num" title="剔除平局后的胜率；下方为胜/负场数">有效胜率</th>
+                <th class="num">累计净盈亏</th>
+                <th class="num" title="每场平均净盈亏 = 累计净盈亏 ÷ 样本 n">单窗均值</th>
+                <th class="num" title="单窗均值的 95% 置信区间；区间跨过零则无法区分 edge 与噪音">95% CI</th>
               </tr>
             </thead>
             <tbody id="regime-attribution-tbody">
-              <tr><td colspan="9" class="action-empty">统计归因数据中...</td></tr>
+              <tr><td colspan="6" class="action-empty">统计归因数据中...</td></tr>
             </tbody>
           </table>
         </div>
+        <div class="regime-coverage" id="regime-coverage" hidden></div>
       </section>
 
       <!-- Overview Recent Settled Rounds Table -->
@@ -272,13 +273,13 @@
               <tr>
                 <th>北京时间轮次</th>
                 <th>胜出方向</th>
-                <th>Polymarket 开 / 收 (涨跌)</th>
-                <th>看涨(UP) 股数</th>
-                <th>看跌(DN) 股数</th>
-                <th>总成本</th>
-                <th>兑现收入</th>
-                <th>净收益</th>
-                <th>成交笔数</th>
+                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开 → 收（涨跌）</th>
+                <th class="num" title="看涨（UP）持仓股数">UP 股数</th>
+                <th class="num" title="看跌（DOWN）持仓股数">DN 股数</th>
+                <th class="num">总成本</th>
+                <th class="num">兑现收入</th>
+                <th class="num">净收益</th>
+                <th class="num" title="该窗口成交笔数">笔数</th>
               </tr>
             </thead>
             <tbody id="overview-recent-tbody">
@@ -470,15 +471,15 @@
             <thead>
               <tr>
                 <th>北京时间轮次</th>
-                <th>胜出方向</th>
-                <th>Polymarket 开 / 收 (涨跌)</th>
-                <th>看涨(UP) 股数</th>
-                <th>看跌(DN) 股数</th>
-                <th>总成本</th>
-                <th>兑现收入</th>
-                <th>净收益</th>
-                <th>成交笔数</th>
-                <th>对冲保险</th>
+                <th>方向</th>
+                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开 → 收（涨跌）</th>
+                <th class="num" title="看涨（UP）持仓股数">UP 股</th>
+                <th class="num" title="看跌（DOWN）持仓股数">DN 股</th>
+                <th class="num">总成本</th>
+                <th class="num">兑现</th>
+                <th class="num">净收益</th>
+                <th class="num" title="该窗口成交笔数">笔数</th>
+                <th class="num" title="为对冲裸头寸支付的保险成本">保险</th>
               </tr>
             </thead>
             <tbody id="history-tbody">
