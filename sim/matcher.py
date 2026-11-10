@@ -12,7 +12,7 @@ fill from (a) a real trade print that executes at or below its price, or
 (b) a genuinely crossed book. Callers must pass the trade prints recorded /
 streamed from the venue; absence of prints means absence of fills.
 """
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Tuple
 
 from core.types import Order, OrderBook
 

@@ -27,7 +27,6 @@ Calibration sources (recorded data, data/1_market + data/2_ledgers)
 """
 import sys
 import math
-import json
 import time
 import random
 import tempfile

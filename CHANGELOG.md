@@ -119,6 +119,11 @@ silently re-based; these are correctness fixes, not a new experiment.
 - **Tests**: added `tests/test_runtime_hardening.py` (duplicate close, print +
   crossed-book double fill, stream replay, stale TWAP) and extended the sizing
   gate test to cover thin hedge depth. Suite is now 56 tests.
+- **Dead imports removed**: `core/estimator.py`, `core/execution.py`,
+  `core/policy.py`, `core/regime.py`, `runtime/market_feed.py`,
+  `runtime/runner.py`, `sim/matcher.py`, `sim/stress.py` no longer import
+  symbols they never use (notably Kelly and micro-regime helpers inside
+  `plan_decision`, which made it look like Kelly sizing was wired in).
 
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order

@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
-from core.types import BookLevel, OrderBook, SpotState
+from core.types import OrderBook, SpotState
 from core.estimator import calculate_dynamic_realized_vol, calculate_adaptive_spread_params
 
 

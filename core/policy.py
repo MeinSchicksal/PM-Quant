@@ -284,9 +284,7 @@ def plan_decision(
     from .estimator import (
         estimate_fair_prob, 
         estimate_uncertainty_envelope,
-        calculate_adaptive_spread_params,
-        calculate_kelly_order_size,
-        classify_market_micro_regime
+        calculate_adaptive_spread_params
     )
     
     # 1. Calculate Fair Prob & Dynamic Volatility Adaptive Bounds

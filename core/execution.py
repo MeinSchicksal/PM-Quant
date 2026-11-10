@@ -3,7 +3,7 @@
 Guarantees discrete lot conservation, throttles redundant order cancellation churn,
 and prevents overshooting residual inventory traps.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from .types import Order, Decision, Side
 
 

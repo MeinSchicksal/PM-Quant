@@ -5,7 +5,6 @@ queue fill probability, and order flow toxicity detection.
 """
 import math
 from typing import Tuple, List, Optional
-from .types import SpotState, OrderBook
 
 
 def normal_cdf(x: float) -> float:

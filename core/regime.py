@@ -21,7 +21,7 @@ Classifies BTC 5-minute prediction market conditions into distinct observable re
 """
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple
 from .types import OrderBook
 from .estimator import estimate_fair_prob
 

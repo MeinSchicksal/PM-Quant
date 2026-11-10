@@ -8,7 +8,7 @@ import json
 import time
 import gzip
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,7 +18,7 @@ import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
 from core.estimator import estimate_fair_prob
-from core.execution import plan_order_actions, quantize_lots, taker_fee_per_share
+from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher
 
