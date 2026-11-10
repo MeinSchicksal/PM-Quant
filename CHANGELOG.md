@@ -38,6 +38,10 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 - **Unit Testing Suite (`tests/test_v1_1_features.py`)**:
   - Added 11 new comprehensive invariant and microstructure unit tests, expanding the test suite to 25 tests passing in ~12ms.
 
+### Added - 2026-11-10 (Synthetic Stress Harness)
+- **`sim/stress.py` + `python main.py stress [N] [seed]`**: 15 synthetic regimes (calm / calibrated normal / volatile / OU range / pin-at-strike / trend / late breakout / fake breakout / flash crash / flash retrace / jump-diffusion / vol shift / whipsaw / single-venue basis dislocation / stale feed) replayed through the real `PaperRunner.step` path with a calibrated Polymarket book + trade-flow simulator (1-tick spread, liquidity evaporation at extremes, strict fills). Includes market-lag / flow / market-vol sensitivity sweeps and multi-window sequences exercising the circuit breaker. Robustness / risk-envelope test only; **not** profitability evidence. `tests/test_stress.py` (+3 tests, 41 total).
+- Empirical findings recorded in `data/3_reports/stress_*.md`: no crashes, per-window loss envelope held, but expectancy is negative whenever the book lags spot by <=2s; real recorded data shows the book lags spot by ~0-1s (lead-lag correlation peaks at lag 0/1, ~0 by lag 3).
+
 ### Fixed & Upgraded - 2026-11-10
 - **Dynamic Drift SNR & Micro-Regime Classifier (`core/estimator.py`, `config.py`)**:
   - Implemented continuous statistical Signal-to-Noise Ratio calculation $\text{SNR} = |\mu_t| \cdot \sqrt{\tau_s} / \sigma_t$ based on drift $\Delta \ln(S_t / S_0)$ and realized volatility.

@@ -8,6 +8,7 @@ Usage:
   python main.py test      - 运行所有微观结构与数学不变量单元测试
   python main.py reset     - 重置当前版本账本为干净初始状态 ($100.00)
   python main.py replay    - 回放历史微观订单流录制数据
+  python main.py stress [N] [seed] - 合成行情压力测试(15种场景×N条路径+敏感性+连续序列)
   python main.py seal      - 归档封存当前实验批次代码与快照
   python main.py status    - 查看当前系统版本身份与核心经济学参数
 """
@@ -235,6 +236,13 @@ def cmd_replay():
     run_replay()
 
 
+def cmd_stress():
+    from sim.stress import run_stress
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 150
+    seed = int(sys.argv[3]) if len(sys.argv) > 3 else 7
+    run_stress(n, seed)
+
+
 def cmd_seal():
     from runtime.supervisor import seal_batch
     seal_batch()
@@ -356,6 +364,8 @@ def main():
         cmd_reset()
     elif cmd == "replay":
         cmd_replay()
+    elif cmd == "stress":
+        cmd_stress()
     elif cmd == "seal":
         cmd_seal()
     elif cmd == "status":
