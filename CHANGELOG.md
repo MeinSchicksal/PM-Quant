@@ -163,6 +163,24 @@ silently re-based; these are correctness fixes, not a new experiment.
   (mean -$0.0212, t=-0.73, 63 fills, worst -$2.0000); superseded report files
   were removed so `data/3_reports/` holds one authoritative run.
 
+### Risk-budget calibration
+- **`MAX_WINDOW_LOSS_USD` could not fund one lot.** The budget was $2.00 while a
+  single lot (5 shares) at `MAX_MAKER_ENTRY_PRICE=0.62` costs $3.10, so the
+  pre-trade gate silently rejected every quote above $0.40 and the system spent
+  most windows waiting (27 of 77 replayed windows traded). The two knobs now
+  agree: window budget $3.00, max maker entry 0.60 (= 5 shares x 0.60).
+- **`config.validate_params()`** runs from `python main.py` before any command and
+  refuses to launch when the window budget cannot fund one minimum lot, when the
+  window budget exceeds the daily drawdown, or when the entry corridor bounds are
+  inverted. Configuration conflicts now fail loudly instead of disabling trading
+  invisibly.
+- **Honest effect** on the same event-driven replay: 41 of 79 recorded windows
+  trade for **-$8.417** (mean -$0.1065, sd $0.5139, t=-1.84, 21 wins / 11 losses /
+  9 flat, 90 fills, worst window -$2.3500) versus 27 windows / -$1.629 at $2.00.
+  Widening the budget scales exposure to a negative edge: this is a consistency
+  fix, not a profitability fix. Do not raise the budget again until a positive
+  post-fill edge is demonstrated.
+
 ### Operational fixes (launchers, CLI, dead-man switch)
 - **`start.bat` / `stop.bat` were unusable on a Chinese Windows console**:
   both were UTF-8 files that `call`-ed a Chinese-named sibling, which `cmd.exe`

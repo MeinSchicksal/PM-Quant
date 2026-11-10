@@ -351,6 +351,14 @@ def _parse_port(raw: str) -> int:
 
 
 def main():
+    # Configuration sanity gate: refuse to start with risk parameters that
+    # contradict each other (e.g. a window budget that cannot fund one lot).
+    try:
+        config.validate_params()
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(2)
+
     if len(sys.argv) < 2:
         cmd_start()
         return

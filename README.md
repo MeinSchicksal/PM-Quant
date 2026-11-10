@@ -68,7 +68,7 @@ D:\pm-quant/
 | `MAX_QUEUE_WAIT_S` | `15.0` | 排队动力学 | 基于盘口成交流速的最大可接受被动排队等待时间 |
 | `TOXICITY_SHOCK_BPS` | `3.5` | 逆向选择保护 | 3 秒内现货剧烈偏移阈值（3.5 bps），触发防知情毒性保护 |
 | `TAIL_FREEZE_S` | `60.0` | 生命周期边界 | 距离结算前停止新开第一腿被动单的保护时间（60s） |
-| `MAX_WINDOW_LOSS_USD` | `2.00` | 尾部风险上限 | 单窗口硬止损风险包络上限 |
+| `MAX_WINDOW_LOSS_USD` | `3.00` | 尾部风险上限 | 单窗口硬止损包络；必须 ≥ `LOT_SIZE × MAX_MAKER_ENTRY_PRICE`（=5×0.60），启动时校验 |
 | `MAX_DAILY_DRAWDOWN_USD` | `8.00` | 账户级风控 | 单日累计最大亏损硬熔断保护阈值（触发仅允许平仓） |
 | `LOSS_STREAK_COOLING` | `3` | 账户级风控 | 连续亏损轮次触发冷却锁定的阈值（3 轮） |
 | `COOLING_ROUNDS` | `3` | 冷却锁定周期 | 连亏后强制休眠观察的轮次数 |

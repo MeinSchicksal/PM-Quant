@@ -37,7 +37,9 @@ PARAMS = {
     "TAIL_FREEZE_S": 60.0,            # Seconds before expiration where all actions are frozen
     "MIN_ENTRY_TAU_S": 180.0,         # Minimum remaining seconds (tau >= 180s) to permit initial Leg-1 entry (first 2 minutes only)
     "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window (prevents revenge re-entry after unwind)
-    "MAX_WINDOW_LOSS_USD": 2.00,      # Hard bounded catastrophic drawdown envelope per window
+    "MAX_WINDOW_LOSS_USD": 3.00,      # Hard per-window loss envelope. Must cover one minimum lot at
+                                      # MAX_MAKER_ENTRY_PRICE (LOT_SIZE * MAX_MAKER_ENTRY_PRICE); otherwise
+                                      # the entry gate rejects every quote the price corridor allows.
     "MAX_DAILY_DRAWDOWN_USD": 8.00,   # Account-level daily drawdown circuit breaker ($8.00 cumulative loss)
     "LOSS_STREAK_COOLING": 3,         # Consecutive losing rounds triggering cooling mode
     "COOLING_ROUNDS": 3,              # Number of rounds to cool off when loss streak triggers
@@ -49,7 +51,8 @@ PARAMS = {
     "MAX_RANGE_DISPLACEMENT_BPS": 8.0,# Max displacement from strike to qualify for range-bound regime
     "MAX_ORDERBOOK_SPREAD": 0.06,     # Max book spread (0.06 = 6 cents) before declaring wide-spread regime
     "ALLOW_INCREASED_RANGE_SIZE": False, # Keep initial Leg-1 entry strictly 1 lot (5 shares) for minimal bare risk
-    "MAX_MAKER_ENTRY_PRICE": 0.62,    # Maximum price allowed for passive Leg-1 entry (avoids buying the top)
+    "MAX_MAKER_ENTRY_PRICE": 0.60,    # Maximum price for passive Leg-1 entry. Kept consistent with
+                                      # MAX_WINDOW_LOSS_USD so a 1-lot entry is always affordable.
     "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive Leg-1 entry
     "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
     "MAX_FAIR_PROB_ENTRY": 0.58,      # Maximum fair probability for balanced Leg-1 entry (blocks skewed directional drift)
@@ -58,6 +61,38 @@ PARAMS = {
     "DEADMAN_TIMEOUT_S": 3.0,          # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Polymarket TWAP older than this (fall back to Binance spot basis)
 }
+
+def validate_params(params=None):
+    """Fail fast when risk parameters contradict each other.
+
+    The entry gate sizes a trade so that ``shares * price <= MAX_WINDOW_LOSS_USD``
+    (a naked binary position can lose its whole premium). If the per-window
+    budget is smaller than one minimum lot at the highest allowed entry price,
+    every quote inside the corridor is rejected and the system silently stops
+    trading. That is a configuration bug, not a market condition, so it raises.
+    """
+    p = PARAMS if params is None else params
+    errors = []
+    min_lot_cost = p["LOT_SIZE"] * p["MAX_MAKER_ENTRY_PRICE"] * p["MIN_LOTS"]
+    if p["MAX_WINDOW_LOSS_USD"] + 1e-9 < min_lot_cost:
+        errors.append(
+            f"MAX_WINDOW_LOSS_USD={p['MAX_WINDOW_LOSS_USD']:.2f} cannot fund one minimum lot at "
+            f"MAX_MAKER_ENTRY_PRICE={p['MAX_MAKER_ENTRY_PRICE']:.2f} "
+            f"({p['LOT_SIZE']:.1f} x {p['MAX_MAKER_ENTRY_PRICE']:.2f} = {min_lot_cost:.2f})"
+        )
+    if p["MAX_WINDOW_LOSS_USD"] > p["MAX_DAILY_DRAWDOWN_USD"]:
+        errors.append(
+            f"MAX_WINDOW_LOSS_USD={p['MAX_WINDOW_LOSS_USD']:.2f} exceeds "
+            f"MAX_DAILY_DRAWDOWN_USD={p['MAX_DAILY_DRAWDOWN_USD']:.2f}"
+        )
+    if p["MIN_MAKER_ENTRY_PRICE"] > p["MAX_MAKER_ENTRY_PRICE"]:
+        errors.append("MIN_MAKER_ENTRY_PRICE exceeds MAX_MAKER_ENTRY_PRICE")
+    if p["MIN_LOTS"] > p["MAX_LOTS"]:
+        errors.append("MIN_LOTS exceeds MAX_LOTS")
+    if errors:
+        raise ValueError("Inconsistent risk parameters: " + "; ".join(errors))
+    return True
+
 
 # Derived Filesystem Paths
 DATA_DIR = ROOT / "data"

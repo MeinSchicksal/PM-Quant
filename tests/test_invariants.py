@@ -300,6 +300,33 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(filled_sell, 1.0)
         self.assertAlmostEqual(vwap_sell, 0.40, places=6)
 
+    def test_risk_budget_covers_corridor_entry_price(self):
+        """Regression: a $2.00 window budget with a 5-share lot capped entries at
+        $0.40, silently rejecting every quote the 0.38-0.62 corridor allowed."""
+        import config
+        from core.policy import plan_decision
+        from core.types import OrderBook, Position, SpotState
+
+        self.assertTrue(config.validate_params())
+        bad = dict(config.PARAMS)
+        bad["MAX_WINDOW_LOSS_USD"] = 1.00
+        with self.assertRaises(ValueError):
+            config.validate_params(bad)
+
+        book_up = OrderBook(bids=[(0.53, 20.0)], asks=[(0.57, 20.0)])
+        book_dn = OrderBook(bids=[(0.42, 20.0)], asks=[(0.47, 20.0)])
+        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
+        dec = plan_decision(
+            Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
+            tau_s=250.0, params=config.PARAMS, p_fair=0.50
+        )
+        self.assertEqual(dec.action, "quote", dec.reason)
+        self.assertGreaterEqual(dec.price, config.PARAMS["MIN_MAKER_ENTRY_PRICE"])
+        self.assertLessEqual(
+            dec.price * dec.size, config.PARAMS["MAX_WINDOW_LOSS_USD"] + 1e-9, dec.reason
+        )
+        self.assertNotIn("loss budget", dec.reason)
+
     def test_pretrade_window_loss_budget_gate(self):
         """Invariant 9c: a naked Leg-1 entry that could breach the window loss budget is refused."""
         import config
