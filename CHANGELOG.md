@@ -242,6 +242,12 @@ silently re-based; these are correctness fixes, not a new experiment.
 - **Lock state**: a hedged (UP == DN) live position now shows a `已锁仓` badge
   instead of a trailing text fragment that wrapped onto its own line.
 
+- **Live chart**: added a readable price axis (three levels), shaded the part
+  of the 5-minute window that has not elapsed (with a `剩余 Ns` marker) instead
+  of leaving a flat line trailing into empty space, gave the probability panel
+  its 25%/75% guides in dual mode, and moved the baseline readouts into grouped
+  header chips (`基准` / `现值` / `概率`) so the right rail only carries the two
+  live price pills. Canvas height 290 -> 340 px.
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order
   adapter yet), described matching honestly, fixed the duplicate "常用命令"

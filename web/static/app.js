@@ -796,8 +796,8 @@
     }
 
     // Coordinates setup
-    const padLeft = 40;
-    const padRight = 135;
+    const padLeft = 54;
+    const padRight = 132;
     const padBottom = 26;
     const plotW = Math.max(10, W - padLeft - padRight);
 
@@ -866,6 +866,28 @@
       ctx.fillText(timeLabels[idx], x, H - 8);
     });
 
+    // 1b. The right-hand part of the window has not happened yet: shade it so
+    //     "flat line stops here" reads as "we are only 111s in", not as a bug.
+    const nowX = padLeft + (Math.min(300, elapsed) / 300.0) * plotW;
+    const plotRight = padLeft + plotW;
+    if (elapsed < 300) {
+      ctx.fillStyle = 'rgba(241, 245, 249, 0.62)';
+      ctx.fillRect(nowX, gridTop, plotRight - nowX, gridBottom - gridTop);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(nowX, gridTop);
+      ctx.lineTo(nowX, gridBottom);
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`剩余 ${300 - elapsed}s`, plotRight - 8, gridTop + 12);
+    }
+
     // 2. Render Price Track: Binance Spot vs Polymarket Official Chainlink Oracle
     if (mode === 'dual' || mode === 'price') {
       // Track Title Label
@@ -884,6 +906,24 @@
       const paddedSpan = paddedMaxY - paddedMinY;
 
       const priceToY = (px) => t1Top + t1H - ((px - paddedMinY) / paddedSpan) * t1H;
+
+      // Left axis: three price levels, otherwise the curve has no readable scale
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      [paddedMaxY, (paddedMaxY + paddedMinY) / 2, paddedMinY].forEach(px => {
+        const y = priceToY(px);
+        ctx.save();
+        ctx.setLineDash([2, 6]);
+        ctx.strokeStyle = '#f1f5f9';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padLeft, y);
+        ctx.lineTo(Math.min(plotRight, Math.max(nowX, padLeft + 1)), y);
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#a3aebd';
+        ctx.fillText(px.toLocaleString('en-US', { maximumFractionDigits: 0 }), padLeft - 6, y + 3);
+      });
 
       // 1. Polymarket Official Strike Baseline (S_0, poly) - Blue Dashed
       let baselinePolyY = null;
@@ -1031,12 +1071,6 @@
 
       // Right rail: baseline labels + live pills laid out together so nothing overlaps
       const railItems = [];
-      if (baselinePolyY !== null) {
-        railItems.push({ pill: false, y: baselinePolyY, h: 12, color: '#2563eb', text: `Poly基准 $${openPx.toFixed(2)}` });
-      }
-      if (baselineBinY !== null) {
-        railItems.push({ pill: false, y: baselineBinY, h: 12, color: '#64748b', text: `币安基准 $${binanceOpenPx.toFixed(2)}` });
-      }
       const binBpsVal = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
       const binBpsSign = binBpsVal >= 0 ? '+' : '';
       railItems.push({ pill: true, y: lastP.y, h: 20, color: binancePriceColor, text: `币安 $${lastP.price.toFixed(2)} (${binBpsSign}${binBpsVal.toFixed(1)})` });
@@ -1113,9 +1147,9 @@
       ctx.fillText('100%', padLeft - 6, t2Top + 8);
       ctx.fillText('0%', padLeft - 6, t2Top + t2H);
 
-      if (mode === 'prob') {
-        const y75 = probToY(0.75);
-        const y25 = probToY(0.25);
+      const y75 = probToY(0.75);
+      const y25 = probToY(0.25);
+      {
         ctx.save();
         ctx.setLineDash([2, 4]);
         ctx.strokeStyle = '#e2e8f0';
@@ -1124,6 +1158,9 @@
         ctx.moveTo(padLeft, y25); ctx.lineTo(padLeft + plotW, y25);
         ctx.stroke();
         ctx.restore();
+        ctx.fillStyle = '#94a3b8';
+        ctx.textAlign = 'right';
+        ctx.font = '10px monospace';
         ctx.fillText('75%', padLeft - 6, y75 + 3);
         ctx.fillText('25%', padLeft - 6, y25 + 3);
       }

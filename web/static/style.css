@@ -892,7 +892,7 @@ body {
 .chart-stats-row {
   display: flex;
   align-items: center;
-  gap: 10px 28px;
+  gap: 6px 10px;
   font-size: 13px;
   color: var(--label);
   font-variant-numeric: tabular-nums;
@@ -902,14 +902,22 @@ body {
 .stat-group {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
+  padding: 3px 10px;
+  background: var(--surface-strong);
+  border-radius: 8px;
+}
+
+.chart-stat-item {
+  white-space: nowrap;
 }
 
 .stat-group-label {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--caption);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--faint);
 }
 
 .chart-stat-item strong {
@@ -1045,7 +1053,7 @@ body {
 .canvas-container {
   position: relative;
   width: 100%;
-  height: 290px;
+  height: 340px;
   border-radius: var(--radius-inner);
   overflow: hidden;
   background: #fcfcfc;
