@@ -466,6 +466,10 @@ class PaperRunner:
             "fills_count": len(self.fills),
             "traded": is_traded,
             "regime": dominant_regime,
+            # "entry_time" = classified on the tick that opened the position and
+            # therefore usable for attribution; "dwell" = time-weighted fallback
+            # for windows that never traded. Legacy rows have no field at all.
+            "regime_source": "entry_time" if self.entry_regime else "dwell",
             "batch_id": config.BATCH_ID
         }
         

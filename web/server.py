@@ -5,6 +5,7 @@ model decisions and parameters remain in the local journals, not the web API.
 """
 import sys
 import json
+import math
 import time
 import gzip
 import mimetypes
@@ -20,6 +21,11 @@ if str(ROOT) not in sys.path:
 import config
 
 STATIC_DIR = config.ROOT / "web" / "static"
+
+# Below this many traded windows a regime cell cannot separate a 5-cent edge
+# from noise (per-window sd is roughly 0.25-1.5 USD), so the dashboard marks
+# it as under-sampled instead of letting it read as a finding.
+ATTRIBUTION_MIN_SAMPLES = 30
 
 
 def _num(value, default=0.0):
@@ -326,23 +332,87 @@ class QuantHandler(BaseHTTPRequestHandler):
                     "start": _num(w.get("start"))
                 })
 
-            # Aggregate Regime Performance Attribution
+            # Aggregate Regime Performance Attribution.
+            #
+            # Only traded windows carry PnL evidence, and only labels recorded at
+            # entry time are meaningful. Rows written before the entry-time label
+            # existed have no regime at all; they are reported as "unlabeled"
+            # instead of being folded into normal_oscillation (the old fallback
+            # silently invented a regime for most of the history).
             regime_stats = {}
+            # Occurrence counts use whatever label the round carries (entry-time
+            # or the dwell fallback) so the matrix still shows how often a
+            # regime was live. PnL evidence is only taken from entry-time labels:
+            # a dwell label says nothing about the conditions that opened the
+            # position, and legacy rows have no usable label at all.
+            occurrence = {}
             for w in records:
-                reg = w.get("regime") or "normal_oscillation"
-                if reg not in regime_stats:
-                    regime_stats[reg] = {"rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0, "net_pnl": 0.0}
-                regime_stats[reg]["rounds"] += 1
-                if w.get("traded") or _num(w.get("fills_count")) > 0 or abs(_num(w.get("net_pnl"))) > 1e-9:
-                    regime_stats[reg]["traded"] += 1
-                    p = _num(w.get("net_pnl"))
-                    regime_stats[reg]["net_pnl"] = round(regime_stats[reg]["net_pnl"] + p, 4)
-                    if p > 1e-9:
-                        regime_stats[reg]["wins"] += 1
-                    elif p < -1e-9:
-                        regime_stats[reg]["losses"] += 1
-                    else:
-                        regime_stats[reg]["flats"] += 1
+                occurrence[w.get("regime") or "unlabeled"] = occurrence.get(w.get("regime") or "unlabeled", 0) + 1
+
+                reg = w.get("regime") or "unlabeled"
+                if w.get("regime_source") != "entry_time":
+                    # Traded rounds from the pre-provenance era cannot be
+                    # attributed to any regime; keep them visible in one
+                    # explicit bucket instead of dropping them from the table.
+                    traded_legacy = (
+                        bool(w.get("traded"))
+                        or _num(w.get("fills_count")) > 0
+                        or abs(_num(w.get("net_pnl"))) > 1e-9
+                    )
+                    if not traded_legacy:
+                        continue
+                    reg = "legacy"
+                bucket = regime_stats.setdefault(reg, {
+                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
+                    "net_pnl": 0.0, "_pnls": [],
+                })
+                traded_row = (
+                    bool(w.get("traded"))
+                    or _num(w.get("fills_count")) > 0
+                    or abs(_num(w.get("net_pnl"))) > 1e-9
+                )
+                if not traded_row:
+                    continue
+                pnl = _num(w.get("net_pnl"))
+                bucket["traded"] += 1
+                bucket["net_pnl"] = round(bucket["net_pnl"] + pnl, 4)
+                bucket["_pnls"].append(pnl)
+                if pnl > 1e-9:
+                    bucket["wins"] += 1
+                elif pnl < -1e-9:
+                    bucket["losses"] += 1
+                else:
+                    bucket["flats"] += 1
+
+            for reg, rounds in occurrence.items():
+                regime_stats.setdefault(reg, {
+                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
+                    "net_pnl": 0.0, "_pnls": [],
+                })["rounds"] = rounds
+
+            # Every legacy row is traded by construction, so its round count is
+            # its sample size (the occurrence map has no "legacy" key).
+            if "legacy" in regime_stats:
+                regime_stats["legacy"]["rounds"] = regime_stats["legacy"]["traded"]
+
+            for bucket in regime_stats.values():
+                pnls = bucket.pop("_pnls", [])
+                n = len(pnls)
+                if n:
+                    mean = sum(pnls) / n
+                    var = sum((x - mean) ** 2 for x in pnls) / (n - 1) if n > 1 else 0.0
+                    sd = math.sqrt(var)
+                    se = sd / math.sqrt(n) if n else 0.0
+                    bucket["mean"] = round(mean, 4)
+                    bucket["sd"] = round(sd, 4)
+                    bucket["ci_low"] = round(mean - 1.96 * se, 4)
+                    bucket["ci_high"] = round(mean + 1.96 * se, 4)
+                    bucket["t_stat"] = round(mean / se, 2) if se else 0.0
+                else:
+                    bucket["mean"] = bucket["sd"] = 0.0
+                    bucket["ci_low"] = bucket["ci_high"] = 0.0
+                    bucket["t_stat"] = 0.0
+                bucket["sample_ok"] = n >= ATTRIBUTION_MIN_SAMPLES
 
             latest = list(reversed(records))[:50]
             rounds = [_public_round(w, _read_detail(ledger_dir, w.get("slug", ""))) for w in latest]

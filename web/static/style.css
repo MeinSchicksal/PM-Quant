@@ -1234,3 +1234,19 @@ body {
 .down {
   color: var(--down) !important;
 }
+
+/* Regime attribution: under-sampled cells are dimmed so a 2-window cell is
+   never mistaken for evidence. */
+.regime-low-sample {
+  opacity: 0.62;
+}
+.regime-sample-tag {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.16);
+  white-space: nowrap;
+}

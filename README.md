@@ -42,7 +42,7 @@ D:\pm-quant/
 ├── web/                      # 资方极简看板（零第三方重型依赖）
 │   ├── server.py             # 原生 HTTP 服务与净收益/动作流水 API
 │   └── static/               # 前端页面（index.html, style.css, app.js）
-├── tests/                    # 数学不变量、撮合、风控与回放单元测试（56 项用例）
+├── tests/                    # 数学不变量、撮合、风控与回放单元测试（59 项用例）
 └── data/                     # 四层冷热分离数据目录
     ├── 1_market/             # 只读原始市场录制资产（events, oracle, settlements）
     ├── 2_ledgers/            # 按版本隔离的运行账本（如 v1.1/）
@@ -81,12 +81,16 @@ D:\pm-quant/
 # 查看当前版本状态与核心参数
 python main.py status
 
-# 运行全部单元测试（56 项用例）
+# 运行全部单元测试（59 项用例）
 python main.py test
 
 # 事件驱动回放：读取 data/1_market/ 录制的盘口/成交/预言机数据，
 # 逐 tick 重新调用真实决策与撮合，结果写入 data/3_reports/replay_*.jsonl
 python main.py replay
+
+# 闸门反事实：同一批窗口回放两次（开闸门 / 关闸门），
+# 直接给出 regime 闸门的净贡献与被拦窗口的反事实盈亏
+python main.py replay --no-gates
 
 # 启动实时运行流水线（纸面，不会提交真实订单）
 python main.py run
@@ -99,4 +103,5 @@ python main.py seal
 ```
 
 > 回放只覆盖具备完整录制数据的窗口；报告同时给出“同窗口账本实际盈亏”作为对照，二者差异来自旧账本撮合缺陷，而不是回放被手工调参。
+> 看板的行情形态归因矩阵只统计“入场时刻”打标的已成交窗口，并给出样本量与 95% 置信区间；样本 n < 30 的格子会标记为“样本不足”，不应据此下结论。历史窗口没有入场标签，统一显示为 `unlabeled`。
 

@@ -181,6 +181,30 @@ silently re-based; these are correctness fixes, not a new experiment.
   fix, not a profitability fix. Do not raise the budget again until a positive
   post-fill edge is demonstrated.
 
+### Attribution honesty and gate counterfactual (fourth pass)
+- **Regime labels must come from the entry tick.** `close_window()` now stamps
+  `regime_source` (`entry_time` when a position was opened, `dwell` otherwise),
+  and `/api/history` only credits a traded window to a regime when the label was
+  taken at entry. Rows written before the field existed are reported as
+  `unlabeled`; previously they were silently folded into `normal_oscillation`
+  (216 of 252 historical rows had no label at all).
+- **No invented default label.** The `w.get("regime") or "normal_oscillation"`
+  fallback is gone: a missing label renders as `unlabeled`, not as a regime.
+- **The matrix shows n, mean and a 95% CI.** Each cell lists the traded sample
+  count, per-window mean and confidence interval. Cells with fewer than
+  `ATTRIBUTION_MIN_SAMPLES = 30` traded windows are dimmed and tagged
+  "样本不足": one window's PnL sd is $0.25-$1.50, so a handful of windows cannot
+  separate a 5-cent edge from noise.
+- **Gate value is measured, not asserted.** `python main.py replay --no-gates`
+  replays the same windows twice (gates on / gates off) and reports the
+  difference. On the current recorded corpus: gates on -$10.552 across 46 traded
+  windows, gates off -$13.568 across 36, so the regime gates are worth +$3.015.
+  The 13 windows the gates refused would have lost $3.775 (mean -$0.2904,
+  t=-1.04), while 23 windows that the gated run traded no longer trade with the
+  gates off, because the single permitted entry gets spent on a worse setup.
+- **Tests**: 59 (added gate-counterfactual and parameter-restore cases).
+
+
 ### Operational fixes (launchers, CLI, dead-man switch)
 - **`start.bat` / `stop.bat` were unusable on a Chinese Windows console**:
   both were UTF-8 files that `call`-ed a Chinese-named sibling, which `cmd.exe`

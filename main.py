@@ -204,8 +204,12 @@ def cmd_reset(auto_stop: bool = True):
 
 
 def cmd_replay():
-    from sim.replay import run_replay
-    run_replay()
+    from sim.replay import run_gate_comparison, run_replay
+    flags = {a.lower() for a in sys.argv[2:]}
+    if "--no-gates" in flags or "gates" in flags:
+        run_gate_comparison()
+    else:
+        run_replay()
 
 
 def cmd_stress():

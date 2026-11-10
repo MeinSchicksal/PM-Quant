@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 import config
-from sim.replay import run_replay
+from sim.replay import GATE_OFF_OVERRIDES, overridden_params, run_replay
 
 
 class TestEventDrivenReplay(unittest.TestCase):
@@ -109,6 +109,8 @@ class TestEventDrivenReplay(unittest.TestCase):
         fee_per_share = 0.07 * 0.50 * (1.0 - 0.50)
         expected = round(5.0 * (1.0 - (0.46 + 0.50 + fee_per_share)), 4)
         self.assertAlmostEqual(r["replay_pnl"], expected, places=3)
+        # The attribution label must come from the entry tick, not a tick-vote.
+        self.assertEqual(r["regime_source"], "entry_time")
 
     def test_print_above_bid_does_not_fill(self):
         # Prints that never reach our bid must not consume the queue or fill:
@@ -126,6 +128,49 @@ class TestEventDrivenReplay(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["replay_traded"])
         self.assertEqual(results[0]["replay_pnl"], 0.0)
+
+    def _move_recording_to_last_100s(self):
+        """Keep only the final 100 seconds: tau < MIN_ENTRY_TAU_S (180s)."""
+        ev_path = config.MARKET_DIR / "events" / self.date / f"events_{self.date}.jsonl"
+        rows = [json.loads(line) for line in ev_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        keep = [r for r in rows if float(r["t"]) >= self.start + 200]
+        ev_path.write_text("\n".join(json.dumps(r) for r in keep) + "\n", encoding="utf-8")
+
+        tr_path = config.MARKET_DIR / "events" / self.date / f"trades_{self.date}.jsonl"
+        trades = [json.loads(line) for line in tr_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for t in trades:
+            t["timestamp"] = self.start + 210
+            t["received_at"] = self.start + 210.2
+        tr_path.write_text("\n".join(json.dumps(t) for t in trades) + "\n", encoding="utf-8")
+
+    def test_late_window_is_blocked_by_default_and_trades_with_gates_off(self):
+        # Same recording, but every quote/fill happens inside the last 100s.
+        self._move_recording_to_last_100s()
+
+        gated = run_replay(limit=1, quiet=True, write=False)[0]
+        self.assertTrue(gated["replayed"])
+        self.assertFalse(gated["replay_traded"], "tail freeze must block entries")
+        self.assertAlmostEqual(gated["replay_pnl"], 0.0, places=6)
+
+        # Counterfactual: the same window with the regime gates removed.
+        off = run_replay(
+            limit=1,
+            quiet=True,
+            write=False,
+            overrides=GATE_OFF_OVERRIDES,
+        )[0]
+        self.assertTrue(off["replay_traded"], "gates-off must quote and fill")
+        self.assertGreater(off["fills"], 0)
+
+    def test_param_overrides_are_restored_on_error(self):
+        original = config.PARAMS["TAIL_FREEZE_S"]
+        with self.assertRaises(RuntimeError):
+            with overridden_params({"TAIL_FREEZE_S": 0.0, "NOT_A_REAL_PARAM": 1}):
+                self.assertEqual(config.PARAMS["TAIL_FREEZE_S"], 0.0)
+                self.assertEqual(config.PARAMS["NOT_A_REAL_PARAM"], 1)
+                raise RuntimeError("boom")
+        self.assertEqual(config.PARAMS["TAIL_FREEZE_S"], original)
+        self.assertNotIn("NOT_A_REAL_PARAM", config.PARAMS)
 
 
 if __name__ == "__main__":

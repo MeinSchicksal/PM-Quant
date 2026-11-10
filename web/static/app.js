@@ -274,7 +274,9 @@
     'toxic': { name: '剧烈跳空毒流', desc: '波动率 > 35 bps 或秒级剧震, 主动收缩挂单避险', badge: 'warn' },
     'wide_spread': { name: '宽价差流动性缺失', desc: '买卖价差 > 0.06, 摩擦成本过高保持观望', badge: 'freeze' },
     'transitional': { name: '过渡状态观察', desc: '信噪比 1.2~1.8, 状态切换中观望', badge: 'normal' },
-    'tail_freeze': { name: '交割尾盘流动性冻结', desc: 'Tau < 180s 临近到期, 严禁新开单边仓位', badge: 'freeze' }
+    'tail_freeze': { name: '交割尾盘流动性冻结', desc: 'Tau < 180s 临近到期, 严禁新开单边仓位', badge: 'freeze' },
+    'legacy': { name: '历史未打标（入场时点未知）', desc: '升级前写入的成交窗口, 无入场时刻 regime 标签, 不可归因', badge: 'normal' },
+    'unlabeled': { name: '未分类窗口', desc: '既无入场标签也无占优 regime 的窗口', badge: 'normal' }
   };
 
   function renderRegimeAttribution(stats) {
@@ -282,7 +284,7 @@
     if (!tbody) return;
 
     if (!stats || Object.keys(stats).length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="action-empty">暂无归因数据</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="action-empty">暂无归因数据</td></tr>';
       return;
     }
 
@@ -291,6 +293,7 @@
       if (!keys.includes(k)) keys.push(k);
     });
 
+    const fmtMoney = (v, digits) => (v >= 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(digits);
     const rows = keys.map(k => {
       const s = stats[k] || { rounds: 0, traded: 0, wins: 0, losses: 0, flats: 0, net_pnl: 0.0 };
       const meta = REGIME_META[k] || { name: k, desc: '实时微观统计', badge: 'normal' };
@@ -298,17 +301,28 @@
       const winRate = decisive > 0 ? ((s.wins / decisive) * 100).toFixed(1) + '%' : (s.traded > 0 ? '0.0%' : '--');
       const pnl = s.net_pnl || 0.0;
       const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : '';
-      const pnlStr = (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2);
+      const pnlStr = fmtMoney(pnl, 2);
+      const n = s.traded || 0;
+      const meanStr = n > 0 ? fmtMoney(s.mean || 0, 3) : '--';
+      const ciStr = n > 1
+        ? `[${fmtMoney(s.ci_low || 0, 2)}, ${fmtMoney(s.ci_high || 0, 2)}]`
+        : '--';
+      // A cell with fewer than 30 traded windows cannot distinguish an edge
+      // from noise, so it is dimmed rather than read as a finding.
+      const lowSample = n > 0 && s.sample_ok === false;
+      const sampleTag = lowSample ? '<span class="regime-sample-tag">样本不足</span>' : '';
 
       return `
-        <tr>
+        <tr class="${lowSample ? 'regime-low-sample' : ''}">
           <td><strong class="time-cell-main">${meta.name}</strong></td>
           <td><small style="color: #64748b;">${meta.desc}</small></td>
           <td>${s.rounds} 场</td>
-          <td>${s.traded} 场</td>
+          <td>${n} 场${sampleTag}</td>
           <td>${s.wins} 胜 / ${s.losses} 负</td>
           <td><strong>${winRate}</strong></td>
-          <td><strong class="${pnlCls}">${s.traded > 0 ? pnlStr : '--'}</strong></td>
+          <td><strong class="${pnlCls}">${n > 0 ? pnlStr : '--'}</strong></td>
+          <td>${meanStr}</td>
+          <td><small style="color: #94a3b8;">${ciStr}</small></td>
         </tr>
       `;
     }).join('');
