@@ -38,6 +38,22 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 - **Unit Testing Suite (`tests/test_v1_1_features.py`)**:
   - Added 11 new comprehensive invariant and microstructure unit tests, expanding the test suite to 25 tests passing in ~12ms.
 
+### Fixed & Upgraded - 2026-11-10
+- **Dynamic Drift SNR & Micro-Regime Classifier (`core/estimator.py`, `config.py`)**:
+  - Implemented continuous statistical Signal-to-Noise Ratio calculation $\text{SNR} = |\mu_t| \cdot \sqrt{\tau_s} / \sigma_t$ based on drift $\Delta \ln(S_t / S_0)$ and realized volatility.
+  - Automatically classifies market state into three distinct regimes: `range_bound` ($\text{SNR} \le 1.2$), `trending_up` ($\text{SNR} > 1.8$), and `trending_down` ($\text{SNR} > 1.8$).
+- **Dual-Regime Execution & Directional Momentum Defense (`core/policy.py`)**:
+  - Pure Avellaneda-Stoikov market making when $\text{SNR} \le 1.2$ (Brownian noise regime, harvesting risk-free spread).
+  - Directional momentum defense when $\text{SNR} > 1.8$: strictly blocks adverse maker quotes (forbids quoting UP when trending down; forbids quoting DOWN when trending up), stopping adverse selection and falling-knife catches.
+  - Maker quote entry clamped strictly within $[0.38, 0.62]$ to avoid buying high-probability tops ($>0.62$) or bottoms ($<0.38$).
+- **No-Arbitrage Pair Cost Ceiling (`core/policy.py`, `config.py`)**:
+  - Enforced `MAX_PAIR_HEDGE_COST = 1.05`. If total pair acquisition cost $\text{held\_basis} + \text{hedge\_ask} + \text{fee} > 1.05$, taker hedge is disqualified (`u_hedge = -999.0`).
+  - Mathematically asserts that paying $\$1.50+$ for a $\$1.00$ binary payout violates no-arbitrage; forces cut-loss `taker_unwind` or passive hold.
+- **Official Taker Fee Model (`config.py`, `core/execution.py`, `core/policy.py`, `runtime/runner.py`)**:
+  - Replaced the stale flat `$0.005/share` taker fee approximation with Polymarket's official dynamic crypto fee `fee = shares × 0.07 × p × (1 - p)` (peak $0.0175/share at 50/50, vanishing at extreme prices), shared by utility arbitration and ledger cash booking via `taker_fee_per_share`. Maker fills remain fee-free per official rules; daily maker rebates are not modeled (conservative).
+- **Unit Testing Suite Expansion (`tests/test_invariants.py`)**:
+  - Added Invariants 13, 14, 15, expanding unit tests to 34 tests passing 100% in ~25ms.
+
 ---
 
 ## [v1.0] - 2026-11-09

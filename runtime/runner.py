@@ -17,7 +17,7 @@ import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
 from core.estimator import estimate_fair_prob
-from core.execution import plan_order_actions, quantize_lots
+from core.execution import plan_order_actions, quantize_lots, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher
 
@@ -218,7 +218,7 @@ class PaperRunner:
         if action and action.action in ("taker_hedge", "taker_unwind"):
             sz = action.size or 0.0
             px = action.price or 0.0
-            fee = sz * 0.005
+            fee = round(sz * taker_fee_per_share(px, config.PARAMS["TAKER_FEE_RATE"]), 4)
             if action.action == "taker_hedge":
                 if action.side == "Down":
                     self.pos_down.shares += sz
@@ -407,6 +407,15 @@ class PaperRunner:
                 print(f"[Runner] Failed to reconcile window gz {slug}: {e}")
 
     def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
+        from core.estimator import classify_market_micro_regime
+        ref_spot = getattr(self, "last_poly_spot", None) or spot.price
+        ref_open = getattr(self, "open_price", 0.0) or getattr(self, "binance_open_price", spot.price)
+        micro_regime, snr, _ = classify_market_micro_regime(
+            ref_spot, ref_open, max(0.0, self.window_end - now), getattr(spot, "realized_vol_bps", 15.0),
+            is_toxic_shock=spot.is_toxic_shock,
+            trend_threshold=config.PARAMS.get("SNR_TREND_THRESHOLD", 1.8),
+            range_threshold=config.PARAMS.get("SNR_RANGE_THRESHOLD", 1.2)
+        )
         state = {
             "batch_id": config.BATCH_ID,
             "slug": self.current_slug,
@@ -422,6 +431,8 @@ class PaperRunner:
             "poly_return_bps": round(((self.last_poly_spot - getattr(self, "open_price", self.last_poly_spot)) / getattr(self, "open_price", self.last_poly_spot)) * 10000.0, 2) if (getattr(self, "open_price", 0.0) > 0 and getattr(self, "last_poly_spot", None)) else 0.0,
             "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
             "regime": getattr(spot, "regime", "normal"),
+            "micro_regime": micro_regime,
+            "snr": snr,
             "circuit_breaker": self.circuit_breaker.get_status(now),
             "available_capital": round(max(10.0, 100.0 + self.total_pnl), 2),
             "total_pnl": round(self.total_pnl, 4),

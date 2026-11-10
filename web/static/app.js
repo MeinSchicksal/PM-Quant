@@ -413,6 +413,19 @@
       };
     }
 
+    if (reason.includes('outside safe entry zone')) {
+      return {
+        text: "🛡️ 价格偏离均衡中枢：报价超出 [0.38, 0.62] 安全做市区间，静待均值回归防追高",
+        level: "freeze"
+      };
+    }
+    if (reason.includes('trending') || reason.includes('downward trend') || reason.includes('upward trend')) {
+      return {
+        text: "📈 单边动量趋势确立：启动单边趋势防守，严禁逆势接单",
+        level: "freeze"
+      };
+    }
+
     // 7. Capital restriction
     if (reason.includes('insufficient capital') || reason.includes('capital')) {
       return {
@@ -600,7 +613,7 @@
     }
 
     // Coordinates setup
-    const padLeft = 24;
+    const padLeft = 40;
     const padRight = 135;
     const padBottom = 26;
     const plotW = Math.max(10, W - padLeft - padRight);
@@ -676,7 +689,7 @@
       ctx.fillStyle = '#64748b';
       ctx.font = '600 11px sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText('BTC 走势: 币安现货 (绿/红) vs Polymarket 官方 (蓝)', padLeft + 6, t1Top + 12);
+      ctx.fillText('BTC 走势: 币安现货 (绿/红) vs Polymarket 官方 (蓝)', padLeft + 6, 12);
 
       // Price bounds
       const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
@@ -690,8 +703,10 @@
       const priceToY = (px) => t1Top + t1H - ((px - paddedMinY) / paddedSpan) * t1H;
 
       // 1. Polymarket Official Strike Baseline (S_0, poly) - Blue Dashed
+      let baselinePolyY = null;
+      let baselineBinY = null;
       if (openPx > 0) {
-        const baselinePolyY = priceToY(openPx);
+        baselinePolyY = priceToY(openPx);
         ctx.save();
         ctx.setLineDash([4, 4]);
         ctx.strokeStyle = '#2563eb';
@@ -701,17 +716,11 @@
         ctx.lineTo(padLeft + plotW, baselinePolyY);
         ctx.stroke();
         ctx.restore();
-
-        // Baseline text on right
-        ctx.fillStyle = '#2563eb';
-        ctx.textAlign = 'left';
-        ctx.font = '600 10.5px monospace';
-        ctx.fillText(`Poly基准 $${openPx.toFixed(2)}`, padLeft + plotW + 8, baselinePolyY + 3);
       }
 
       // 2. Binance Spot Open Baseline (S_0, binance) - Gray Dashed
       if (binanceOpenPx > 0 && Math.abs(binanceOpenPx - openPx) > 0.5) {
-        const baselineBinY = priceToY(binanceOpenPx);
+        baselineBinY = priceToY(binanceOpenPx);
         ctx.save();
         ctx.setLineDash([4, 4]);
         ctx.strokeStyle = '#94a3b8';
@@ -721,12 +730,6 @@
         ctx.lineTo(padLeft + plotW, baselineBinY);
         ctx.stroke();
         ctx.restore();
-
-        // Baseline text on right
-        ctx.fillStyle = '#64748b';
-        ctx.textAlign = 'left';
-        ctx.font = '600 10.5px monospace';
-        ctx.fillText(`币安基准 $${binanceOpenPx.toFixed(2)}`, padLeft + plotW + 8, baselineBinY + 3);
       }
 
       // Build points for Binance Spot Price
@@ -843,61 +846,63 @@
       ctx.fillStyle = binancePriceColor;
       ctx.fill();
 
-      // Right tag pills with Anti-Collision Logic
-      const tagW = 126;
-      const tagH = 20;
-      const tagX = padLeft + plotW + 8;
+      // Right rail: baseline labels + live pills laid out together so nothing overlaps
+      const railItems = [];
+      if (baselinePolyY !== null) {
+        railItems.push({ pill: false, y: baselinePolyY, h: 12, color: '#2563eb', text: `Poly基准 $${openPx.toFixed(2)}` });
+      }
+      if (baselineBinY !== null) {
+        railItems.push({ pill: false, y: baselineBinY, h: 12, color: '#64748b', text: `币安基准 $${binanceOpenPx.toFixed(2)}` });
+      }
+      const binBpsVal = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
+      const binBpsSign = binBpsVal >= 0 ? '+' : '';
+      railItems.push({ pill: true, y: lastP.y, h: 20, color: binancePriceColor, text: `币安 $${lastP.price.toFixed(2)} (${binBpsSign}${binBpsVal.toFixed(1)})` });
+      if (lastPolyP) {
+        const polyBpsVal = openPx > 0 ? ((lastPolyP.price - openPx) / openPx * 10000) : 0;
+        const polyBpsSign = polyBpsVal >= 0 ? '+' : '';
+        railItems.push({ pill: true, y: lastPolyP.y, h: 20, color: '#2563eb', text: `Poly $${lastPolyP.price.toFixed(2)} (${polyBpsSign}${polyBpsVal.toFixed(1)})` });
+      }
 
-      let tagY_binance = Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastP.y - tagH / 2));
-      let tagY_poly = lastPolyP ? Math.max(t1Top, Math.min(t1Top + t1H - tagH, lastPolyP.y - tagH / 2)) : null;
-
-      if (tagY_poly !== null) {
-        const gap = tagH + 4; // 24px vertical separation
-        const diff = tagY_binance - tagY_poly;
-        if (Math.abs(diff) < gap) {
-          const shift = (gap - Math.abs(diff)) / 2;
-          if (diff >= 0) {
-            tagY_binance = Math.min(t1Top + t1H - tagH, tagY_binance + shift);
-            tagY_poly = Math.max(t1Top, tagY_poly - shift);
-          } else {
-            tagY_binance = Math.max(t1Top, tagY_binance - shift);
-            tagY_poly = Math.min(t1Top + t1H - tagH, tagY_poly + shift);
+      const railTop = t1Top;
+      const railBottom = t1Top + t1H;
+      railItems.forEach(it => { it.top = Math.max(railTop, Math.min(railBottom - it.h, it.y - it.h / 2)); });
+      railItems.sort((a, b) => a.top - b.top);
+      for (let i = 1; i < railItems.length; i++) {
+        railItems[i].top = Math.max(railItems[i].top, railItems[i - 1].top + railItems[i - 1].h + 3);
+      }
+      if (railItems.length > 0) {
+        const lastItem = railItems[railItems.length - 1];
+        const overflow = lastItem.top + lastItem.h - railBottom;
+        if (overflow > 0) {
+          lastItem.top -= overflow;
+          for (let i = railItems.length - 2; i >= 0; i--) {
+            railItems[i].top = Math.min(railItems[i].top, railItems[i + 1].top - railItems[i].h - 3);
           }
         }
       }
 
-      // Draw Binance Tag Pill (bps calculated from binanceOpenPx)
-      const binBpsVal = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
-      const binBpsSign = binBpsVal >= 0 ? '+' : '';
-      ctx.fillStyle = binancePriceColor;
-      if (ctx.roundRect) {
-        ctx.beginPath();
-        ctx.roundRect(tagX, tagY_binance, tagW, tagH, 4);
-        ctx.fill();
-      } else {
-        ctx.fillRect(tagX, tagY_binance, tagW, tagH);
-      }
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '600 10.5px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(`币安 $${lastP.price.toFixed(2)} (${binBpsSign}${binBpsVal.toFixed(1)})`, tagX + tagW / 2, tagY_binance + 14);
-
-      // Draw Polymarket Official Tag Pill (bps calculated from openPx)
-      if (lastPolyP && tagY_poly !== null) {
-        const polyBpsVal = openPx > 0 ? ((lastPolyP.price - openPx) / openPx * 10000) : 0;
-        const polyBpsSign = polyBpsVal >= 0 ? '+' : '';
-        ctx.fillStyle = '#2563eb';
-        if (ctx.roundRect) {
-          ctx.beginPath();
-          ctx.roundRect(tagX, tagY_poly, tagW, tagH, 4);
-          ctx.fill();
+      const tagW = 126;
+      const tagX = padLeft + plotW + 8;
+      for (const it of railItems) {
+        if (it.pill) {
+          ctx.fillStyle = it.color;
+          if (ctx.roundRect) {
+            ctx.beginPath();
+            ctx.roundRect(tagX, it.top, tagW, it.h, 4);
+            ctx.fill();
+          } else {
+            ctx.fillRect(tagX, it.top, tagW, it.h);
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '600 10.5px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(it.text, tagX + tagW / 2, it.top + 14);
         } else {
-          ctx.fillRect(tagX, tagY_poly, tagW, tagH);
+          ctx.fillStyle = it.color;
+          ctx.font = '600 10.5px monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText(it.text, tagX, it.top + 10);
         }
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '600 10.5px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`Poly $${lastPolyP.price.toFixed(2)} (${polyBpsSign}${polyBpsVal.toFixed(1)})`, tagX + tagW / 2, tagY_poly + 14);
       }
     }
 
@@ -917,13 +922,13 @@
       ctx.stroke();
       ctx.restore();
 
-      // Right axis labels
+      // Left axis labels (right rail is reserved for the live probability pills)
       ctx.fillStyle = '#94a3b8';
-      ctx.textAlign = 'left';
+      ctx.textAlign = 'right';
       ctx.font = '10px monospace';
-      ctx.fillText('50% 平衡线', padLeft + plotW + 8, baseProbY + 3);
-      ctx.fillText('100%', padLeft + plotW + 8, t2Top + 8);
-      ctx.fillText('0%', padLeft + plotW + 8, t2Top + t2H);
+      ctx.fillText('50%', padLeft - 6, baseProbY + 3);
+      ctx.fillText('100%', padLeft - 6, t2Top + 8);
+      ctx.fillText('0%', padLeft - 6, t2Top + t2H);
 
       if (mode === 'prob') {
         const y75 = probToY(0.75);
@@ -936,8 +941,8 @@
         ctx.moveTo(padLeft, y25); ctx.lineTo(padLeft + plotW, y25);
         ctx.stroke();
         ctx.restore();
-        ctx.fillText('75%', padLeft + plotW + 8, y75 + 3);
-        ctx.fillText('25%', padLeft + plotW + 8, y25 + 3);
+        ctx.fillText('75%', padLeft - 6, y75 + 3);
+        ctx.fillText('25%', padLeft - 6, y25 + 3);
       }
 
       // Track Title & Interactive Legend in top-left
@@ -947,18 +952,20 @@
       ctx.font = '600 11px sans-serif';
       ctx.textAlign = 'left';
 
+      // Track title & legend live in the gap above the plot so curves never strike through them
+      const legendY = t2Top - 8;
       ctx.fillStyle = '#4b5563';
-      ctx.fillText('胜率与定价走势对比:', padLeft + 6, t2Top + 12);
+      ctx.fillText('胜率与定价走势对比:', padLeft + 6, legendY);
 
       // Legend 1: 市场盘口
       ctx.fillStyle = COLOR_MARKET;
-      ctx.fillRect(padLeft + 120, t2Top + 7, 10, 3);
-      ctx.fillText('市场盘口概率 (Polymarket)', padLeft + 134, t2Top + 12);
+      ctx.fillRect(padLeft + 120, legendY - 5, 10, 3);
+      ctx.fillText('市场盘口概率 (Polymarket)', padLeft + 134, legendY);
 
       // Legend 2: 模型理论
       ctx.fillStyle = COLOR_MODEL;
-      ctx.fillRect(padLeft + 280, t2Top + 7, 10, 3);
-      ctx.fillText('模型理论公允胜率', padLeft + 294, t2Top + 12);
+      ctx.fillRect(padLeft + 280, legendY - 5, 10, 3);
+      ctx.fillText('模型理论公允胜率', padLeft + 294, legendY);
 
       // Extract points
       const pts = history.map(pt => {
@@ -1144,9 +1151,8 @@
     // UP Side
     const bUp = live.book_up || {};
     document.getElementById('up-bid-px').textContent = bUp.best_bid !== null && bUp.best_bid !== undefined ? `$${Number(bUp.best_bid).toFixed(2)}` : '--';
-    document.getElementById('up-bid-sz').textContent = bUp.best_bid !== null ? '深度就绪' : '--';
     document.getElementById('up-ask-px').textContent = bUp.best_ask !== null && bUp.best_ask !== undefined ? `$${Number(bUp.best_ask).toFixed(2)}` : '--';
-    document.getElementById('up-ask-sz').textContent = bUp.best_ask !== null ? '深度就绪' : '--';
+    document.getElementById('up-book-status').textContent = bUp.best_bid !== null && bUp.best_bid !== undefined && bUp.best_ask !== null && bUp.best_ask !== undefined ? '深度就绪' : '盘口缺失';
 
     const posUp = live.pos_up || { shares: 0, cash: 0, avg_px: 0 };
     document.getElementById('up-pos-shares').textContent = `${(posUp.shares || 0).toFixed(1)} 股`;
@@ -1156,9 +1162,8 @@
     // DOWN Side
     const bDn = live.book_down || {};
     document.getElementById('down-bid-px').textContent = bDn.best_bid !== null && bDn.best_bid !== undefined ? `$${Number(bDn.best_bid).toFixed(2)}` : '--';
-    document.getElementById('down-bid-sz').textContent = bDn.best_bid !== null ? '深度就绪' : '--';
     document.getElementById('down-ask-px').textContent = bDn.best_ask !== null && bDn.best_ask !== undefined ? `$${Number(bDn.best_ask).toFixed(2)}` : '--';
-    document.getElementById('down-ask-sz').textContent = bDn.best_ask !== null ? '深度就绪' : '--';
+    document.getElementById('down-book-status').textContent = bDn.best_bid !== null && bDn.best_bid !== undefined && bDn.best_ask !== null && bDn.best_ask !== undefined ? '深度就绪' : '盘口缺失';
 
     const posDn = live.pos_down || { shares: 0, cash: 0, avg_px: 0 };
     document.getElementById('down-pos-shares').textContent = `${(posDn.shares || 0).toFixed(1)} 股`;

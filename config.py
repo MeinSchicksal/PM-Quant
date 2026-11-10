@@ -19,6 +19,7 @@ PARAMS = {
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares, baseline sizing)
     "MAX_LOTS": 3,                    # Maximum entry lots (3 lots = 15 shares, fractional Kelly sizing cap)
     "LATENCY_S": 0.30,                # Estimated round-trip wire + engine order insertion delay
+    "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: fee = shares * rate * p * (1-p); makers pay zero
 
     # 2. Probability Estimation, Margin of Safety & Sizing
     "BASE_EDGE": 0.025,               # Minimum price edge demanded over uncertainty band (2.5 ticks)
@@ -37,6 +38,13 @@ PARAMS = {
     "MAX_DAILY_DRAWDOWN_USD": 8.00,   # Account-level daily drawdown circuit breaker ($8.00 cumulative loss)
     "LOSS_STREAK_COOLING": 3,         # Consecutive losing rounds triggering cooling mode
     "COOLING_ROUNDS": 3,              # Number of rounds to cool off when loss streak triggers
+
+    # 5. Dual-Regime & Adverse Selection Boundaries
+    "SNR_TREND_THRESHOLD": 1.8,       # Signal-to-Noise Ratio threshold to classify momentum trend (p < 0.05)
+    "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify mean-reverting oscillating regime (noise band)
+    "MAX_MAKER_ENTRY_PRICE": 0.62,    # Maximum price allowed for passive Leg-1 entry (avoids buying the top)
+    "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive Leg-1 entry
+    "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost (basis + hedge ask + fee) for Taker Hedge
 }
 
 # Derived Filesystem Paths

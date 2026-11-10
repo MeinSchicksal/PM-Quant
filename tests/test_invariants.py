@@ -72,7 +72,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         - Market: Down ask is 0.63 (pair cost = 0.38 + 0.63 = 1.01).
         - BTC crashes, p_fair of Up drops from 0.50 to 0.20 (Down is 80% likely to win).
         
-        The model MUST output taker_hedge immediately at t=0, locking -$0.10 loss
+        The model MUST output taker_hedge immediately at t=0, locking -$0.26 loss
         instead of passively waiting and bleeding -$3.80!
         """
         book_up = OrderBook(bids=[(0.20, 50.0)], asks=[(0.23, 50.0)])
@@ -93,8 +93,40 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(decision.side, "Down")
         self.assertAlmostEqual(decision.price, 0.63)
         self.assertIn("U_hedge", decision.reason)
-        # Expected utility is -$0.15 (10 shares * (1.00 - 1.015)), far superior to -$2.00+ holding loss
-        self.assertGreater(decision.utility, -0.25)
+        # Official taker fee @ 0.63 = 0.07*0.63*0.37 = 0.016317/share -> pair cost 1.026317,
+        # utility -$0.2632, still far superior to the -$2.00+ holding loss
+        self.assertAlmostEqual(decision.utility, -0.2632, places=4)
+
+    def test_official_taker_fee_curve_and_booking(self):
+        """Invariant 12: Taker fee follows the official rate*p*(1-p) curve and is booked into cash."""
+        from core.execution import taker_fee_per_share
+        from runtime.runner import PaperRunner
+        import config
+        rate = config.PARAMS["TAKER_FEE_RATE"]
+
+        # Peak at 50/50: 0.07 * 0.5 * 0.5 = 0.0175 per share
+        self.assertAlmostEqual(taker_fee_per_share(0.50, rate), 0.0175, places=10)
+        # Symmetric around 0.5, vanishing at certain outcomes
+        self.assertAlmostEqual(taker_fee_per_share(0.63, rate), taker_fee_per_share(0.37, rate), places=10)
+        self.assertEqual(taker_fee_per_share(0.0, rate), 0.0)
+        self.assertEqual(taker_fee_per_share(1.0, rate), 0.0)
+
+        # Taker hedge must book the official fee into position cash
+        runner = PaperRunner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner.live_file = Path(tmp_dir) / "live.json"
+            runner.summary_file = Path(tmp_dir) / "summary.jsonl"
+            runner.windows_dir = Path(tmp_dir) / "windows"
+            runner.windows_dir.mkdir()
+            runner.start_window("test_fee", 1000.0, 1300.0, open_px=75000.0)
+            runner.pos_up = Position(shares=10.0, cash=3.80)
+            book_up = OrderBook(bids=[(0.20, 50.0)], asks=[(0.23, 50.0)])
+            book_down = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
+            spot = SpotState(timestamp=1150.0, price=74700.0, open_price=75000.0, realized_vol_bps=15.0)
+            runner.step(1150.0, spot, book_up, book_down, poly_spot=74700.0)
+            expected_fee = round(10.0 * rate * 0.63 * 0.37, 4)
+            self.assertEqual(runner.pos_down.shares, 10.0)
+            self.assertAlmostEqual(runner.pos_down.cash, 10.0 * 0.63 + expected_fee, places=4)
 
     def test_max_lots_boundary(self):
         """Invariant 4: Once position reaches MAX_LOTS, policy must output WAIT."""
@@ -310,6 +342,71 @@ class TestMathematicalInvariants(unittest.TestCase):
         # With 0 bps move, no edge exists outside uncertainty band
         self.assertEqual(dec.action, "wait")
         self.assertIn("No edge", dec.reason)
+
+    def test_drift_snr_and_micro_regime_classification(self):
+        """Invariant 13: Statistical drift SNR and micro-regime classification must be mathematically exact."""
+        from core.estimator import calculate_drift_snr, classify_market_micro_regime
+
+        # Case 1: Flat market (0 return) -> SNR = 0.0, oscillating
+        snr_flat, ret_flat = calculate_drift_snr(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0)
+        self.assertEqual(snr_flat, 0.0)
+        self.assertEqual(ret_flat, 0.0)
+        regime_flat, _, _ = classify_market_micro_regime(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0)
+        self.assertEqual(regime_flat, "oscillating")
+
+        # Case 2: Strong downward drift (-30 bps, vol=10 bps) -> SNR = 3.0 / sqrt(200/300) = ~3.67 > 1.8 -> trending_down
+        regime_down, snr_down, ret_down = classify_market_micro_regime(74775.0, 75000.0, tau_s=200.0, vol_bps=10.0)
+        self.assertEqual(regime_down, "trending_down")
+        self.assertGreater(snr_down, 1.8)
+
+        # Case 3: Toxic jump shock -> regime is toxic
+        regime_toxic, _, _ = classify_market_micro_regime(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0, is_toxic_shock=True)
+        self.assertEqual(regime_toxic, "toxic")
+
+    def test_dual_regime_directional_momentum_defense(self):
+        """Invariant 14: Downward momentum regime strictly forbids quoting Up maker entry."""
+        from core.policy import plan_decision
+        import config
+
+        pos_flat = Position(0.0, 0.0)
+        # Downward drift: spot is 74,700 vs open 75,000 (-40 bps)
+        spot_down = SpotState(
+            timestamp=1000.0,
+            price=74700.0,
+            open_price=75000.0,
+            poly_price=74700.0,
+            binance_open_price=75000.0,
+            realized_vol_bps=10.0
+        )
+        book_up = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+        book_dn = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
+
+        dec = plan_decision(pos_flat, pos_flat, book_up, book_dn, spot_down, tau_s=200.0, params=config.PARAMS)
+        # Must NEVER quote Up in trending_down regime
+        if dec.action == "quote":
+            self.assertNotEqual(dec.side, "Up")
+
+    def test_catastrophic_pair_cost_hedge_disqualification(self):
+        """Invariant 15: When pair_cost > 1.05, taker hedge is disqualified and taker unwind dominates."""
+        from core.policy import evaluate_unpaired_utility
+
+        # Trader holds 15 Down bought at 0.74
+        # Market moved violently: Up ask is 0.83 (pair_cost = 0.74 + 0.83 + fee = 1.575 > 1.05)
+        # Down bid is 0.20
+        b_held = OrderBook(bids=[(0.20, 20.0)], asks=[(0.25, 20.0)])
+        b_opp = OrderBook(bids=[(0.80, 20.0)], asks=[(0.83, 20.0)])
+
+        dec = evaluate_unpaired_utility(
+            held_side="Down",
+            held_shares=15.0,
+            held_basis_price=0.74,
+            p_fair_held=0.10,
+            book_held=b_held,
+            book_opp=b_opp,
+            max_pair_cost=1.05
+        )
+        # Taker hedge at 0.83 must be disqualified; should unwind position or hold, NOT buy hedge @ 0.83
+        self.assertNotEqual(dec.action, "taker_hedge")
 
 
 if __name__ == "__main__":

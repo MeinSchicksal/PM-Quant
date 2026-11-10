@@ -4,7 +4,7 @@ Handles continuous probability estimation, uncertainty envelope calculation,
 queue fill probability, and order flow toxicity detection.
 """
 import math
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 from .types import SpotState, OrderBook
 
 
@@ -232,3 +232,62 @@ def calculate_kelly_order_size(
         target_lots = max_lots
         
     return float(target_lots * lot_size)
+
+
+def calculate_drift_snr(
+    spot: Optional[float],
+    open_price: Optional[float],
+    tau_s: float,
+    vol_bps: float
+) -> Tuple[float, float]:
+    """Calculate the statistical Signal-to-Noise Ratio (SNR) of directional drift.
+    
+    Formula:
+        SNR = |ret_bps| / (vol_bps * sqrt(tau_s / 300.0))
+        
+    Statistical meaning:
+        - SNR <= 1.2: Brownian motion noise (Mean-reverting / Oscillating).
+        - SNR > 1.8: Statistically significant drift (p < 0.05, Momentum trend).
+    """
+    if spot is None or open_price is None or open_price <= 0 or spot <= 0:
+        return 0.0, 0.0
+    ret_bps = ((spot - open_price) / open_price) * 10000.0
+    tau_norm = max(1.0, tau_s) / 300.0
+    sigma_horizon = max(0.5, vol_bps * math.sqrt(tau_norm))
+    snr = round(abs(ret_bps) / sigma_horizon, 4)
+    return snr, round(ret_bps, 2)
+
+
+def classify_market_micro_regime(
+    spot: Optional[float],
+    open_price: Optional[float],
+    tau_s: float,
+    vol_bps: float,
+    is_toxic_shock: bool = False,
+    trend_threshold: float = 1.8,
+    range_threshold: float = 1.2
+) -> Tuple[str, float, float]:
+    """Classify 5-minute market micro-regime based on drift SNR and volatility.
+    
+    Regimes:
+        - 'toxic': Rapid spot shock (>= 3.5 bps in 3s) or extreme volatility (> 35 bps).
+        - 'oscillating': SNR <= range_threshold (Noise dominated, optimal for maker MM).
+        - 'trending_up': SNR > trend_threshold and ret_bps > 0 (Upward momentum drift).
+        - 'trending_down': SNR > trend_threshold and ret_bps < 0 (Downward momentum drift).
+        - 'transitional': range_threshold < SNR <= trend_threshold (Moderate drift).
+        
+    Returns:
+        (regime_name, snr, ret_bps)
+    """
+    if is_toxic_shock or vol_bps > 35.0:
+        snr, ret_bps = calculate_drift_snr(spot, open_price, tau_s, vol_bps)
+        return "toxic", snr, ret_bps
+
+    snr, ret_bps = calculate_drift_snr(spot, open_price, tau_s, vol_bps)
+    if snr <= range_threshold:
+        return "oscillating", snr, ret_bps
+    elif snr > trend_threshold:
+        return ("trending_up" if ret_bps > 0 else "trending_down"), snr, ret_bps
+    else:
+        return "transitional", snr, ret_bps
+

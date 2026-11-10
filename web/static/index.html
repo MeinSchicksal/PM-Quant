@@ -306,20 +306,7 @@
             <span class="side-settle-pnl" id="pnl-forecast-up">胜出预期: --</span>
           </div>
 
-          <div class="quote-levels">
-            <div class="level-box">
-              <span class="level-label">买一 (Bid 1)</span>
-              <strong class="level-price" id="up-bid-px">--</strong>
-              <small class="level-size" id="up-bid-sz">-- 股</small>
-            </div>
-            <div class="level-box">
-              <span class="level-label">卖一 (Ask 1)</span>
-              <strong class="level-price" id="up-ask-px">--</strong>
-              <small class="level-size" id="up-ask-sz">-- 股</small>
-            </div>
-          </div>
-
-          <div class="position-box">
+          <div class="position-box lead">
             <div class="pos-item">
               <span class="pos-label">已成交持仓</span>
               <strong class="pos-val" id="up-pos-shares">0 股</strong>
@@ -333,6 +320,18 @@
               <strong class="pos-val" id="up-pos-cost">$0.00</strong>
             </div>
           </div>
+
+          <div class="quote-levels compact">
+            <span class="level-inline">
+              <span class="level-label">买一</span>
+              <strong class="level-price-sm" id="up-bid-px">--</strong>
+            </span>
+            <span class="level-inline">
+              <span class="level-label">卖一</span>
+              <strong class="level-price-sm" id="up-ask-px">--</strong>
+            </span>
+            <small class="level-status" id="up-book-status">--</small>
+          </div>
         </section>
 
         <!-- DOWN Panel -->
@@ -342,20 +341,7 @@
             <span class="side-settle-pnl" id="pnl-forecast-down">胜出预期: --</span>
           </div>
 
-          <div class="quote-levels">
-            <div class="level-box">
-              <span class="level-label">买一 (Bid 1)</span>
-              <strong class="level-price" id="down-bid-px">--</strong>
-              <small class="level-size" id="down-bid-sz">-- 股</small>
-            </div>
-            <div class="level-box">
-              <span class="level-label">卖一 (Ask 1)</span>
-              <strong class="level-price" id="down-ask-px">--</strong>
-              <small class="level-size" id="down-ask-sz">-- 股</small>
-            </div>
-          </div>
-
-          <div class="position-box">
+          <div class="position-box lead">
             <div class="pos-item">
               <span class="pos-label">已成交持仓</span>
               <strong class="pos-val" id="down-pos-shares">0 股</strong>
@@ -368,6 +354,18 @@
               <span class="pos-label">累计成本</span>
               <strong class="pos-val" id="down-pos-cost">$0.00</strong>
             </div>
+          </div>
+
+          <div class="quote-levels compact">
+            <span class="level-inline">
+              <span class="level-label">买一</span>
+              <strong class="level-price-sm" id="down-bid-px">--</strong>
+            </span>
+            <span class="level-inline">
+              <span class="level-label">卖一</span>
+              <strong class="level-price-sm" id="down-ask-px">--</strong>
+            </span>
+            <small class="level-status" id="down-book-status">--</small>
           </div>
         </section>
       </div>
@@ -386,23 +384,24 @@
               </div>
             </div>
             <div class="chart-stats-row">
-              <span class="chart-stat-item">Poly基准: <strong class="poly-tag" id="chart-stat-open">$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">币安基准: <strong id="chart-stat-binance-open">$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">Poly现价: <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">基差: <strong class="basis-tag" id="chart-stat-basis">±$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">最高: <strong class="up" id="chart-stat-high">$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">最低: <strong class="down" id="chart-stat-low">$0.00</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">盘口概率: <strong class="prob-tag-up" id="chart-stat-prob-up">UP --%</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">模型胜率: <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
-              <span class="chart-stat-sep">·</span>
-              <span class="chart-stat-item">套利价差: <strong id="chart-stat-edge">+0.0%</strong></span>
+              <div class="stat-group">
+                <span class="stat-group-label">基准</span>
+                <span class="chart-stat-item">Poly基准: <strong class="poly-tag" id="chart-stat-open">$0.00</strong></span>
+                <span class="chart-stat-item">币安基准: <strong id="chart-stat-binance-open">$0.00</strong></span>
+              </div>
+              <div class="stat-group">
+                <span class="stat-group-label">现值</span>
+                <span class="chart-stat-item">Poly现价: <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
+                <span class="chart-stat-item">基差: <strong class="basis-tag" id="chart-stat-basis">±$0.00</strong></span>
+                <span class="chart-stat-item">最高: <strong class="up" id="chart-stat-high">$0.00</strong></span>
+                <span class="chart-stat-item">最低: <strong class="down" id="chart-stat-low">$0.00</strong></span>
+              </div>
+              <div class="stat-group">
+                <span class="stat-group-label">概率</span>
+                <span class="chart-stat-item">盘口概率: <strong class="prob-tag-up" id="chart-stat-prob-up">UP --%</strong></span>
+                <span class="chart-stat-item">模型胜率: <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
+                <span class="chart-stat-item">套利价差: <strong id="chart-stat-edge">+0.0%</strong></span>
+              </div>
             </div>
           </div>
           <div class="chart-status-group">

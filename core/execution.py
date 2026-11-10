@@ -22,6 +22,14 @@ def quantize_lots(raw_size: float, lot_size: float = 5.0, max_lots: int = 2) -> 
     return float(lots * lot_size)
 
 
+def taker_fee_per_share(price: float, fee_rate: float = 0.07) -> float:
+    """Official Polymarket crypto taker fee per share: feeRate * p * (1 - p).
+
+    Peaks at p=0.5 and vanishes at certain outcomes. Maker orders pay zero.
+    """
+    return fee_rate * price * (1.0 - price)
+
+
 def is_order_diff_significant(
     existing: Order, 
     desired_side: Side, 
