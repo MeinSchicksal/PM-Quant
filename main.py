@@ -176,43 +176,87 @@ def cmd_status():
         print(f"  {k:22s}: {v}")
 
 
+def _get_desktop_paths():
+    """Retrieve actual Windows desktop directory paths from registry and system defaults."""
+    import os
+    from pathlib import Path
+    found = []
+
+    # 1. Windows Registry (User Shell Folders) - Most authoritative
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+        val, _ = winreg.QueryValueEx(key, "Desktop")
+        expanded = os.path.expandvars(val)
+        p = Path(expanded)
+        if p.exists() and p not in found:
+            found.append(p)
+    except Exception:
+        pass
+
+    # 2. Common redirection locations (e.g. D:\桌面, D:\Desktop)
+    for candidate in [Path("D:/桌面"), Path("D:/Desktop")]:
+        if candidate.exists() and candidate not in found:
+            found.append(candidate)
+
+    # 3. User profile default
+    up = os.environ.get("USERPROFILE", "")
+    if up:
+        for candidate in [Path(up) / "Desktop", Path(up) / "桌面"]:
+            if candidate.exists() and candidate not in found:
+                found.append(candidate)
+
+    return found
+
+
 def cmd_shortcut():
     """Create Windows Desktop shortcuts for One-Click PM-Quant Launch and Stop."""
     import os
     from pathlib import Path
-    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
-    if not desktop.exists():
-        print(f"[!] 找不到桌面路径: {desktop}")
+
+    desktops = _get_desktop_paths()
+    if not desktops:
+        print("[!] 未检测到有效的 Windows 桌面路径。")
         return
 
     start_bat = ROOT / "启动系统.bat"
     stop_bat = ROOT / "停止系统.bat"
 
-    vbs_content = f"""
+    success_paths = []
+    for desktop in desktops:
+        s1_path = desktop / "PM-Quant 一键启动.lnk"
+        s2_path = desktop / "PM-Quant 一键停止.lnk"
+        vbs_content = f"""
 Set ws = CreateObject("WScript.Shell")
-Set s1 = ws.CreateShortcut("{desktop / 'PM-Quant 一键启动.lnk'}")
+Set s1 = ws.CreateShortcut("{s1_path}")
 s1.TargetPath = "{start_bat}"
 s1.WorkingDirectory = "{ROOT}"
 s1.WindowStyle = 1
 s1.Description = "PM-Quant 全自动量化做市与高频对冲系统"
 s1.Save()
 
-Set s2 = ws.CreateShortcut("{desktop / 'PM-Quant 一键停止.lnk'}")
+Set s2 = ws.CreateShortcut("{s2_path}")
 s2.TargetPath = "{stop_bat}"
 s2.WorkingDirectory = "{ROOT}"
 s2.WindowStyle = 1
 s2.Description = "停止 PM-Quant 交易管道与看板"
 s2.Save()
 """
-    vbs_path = ROOT / "_temp_create_shortcut.vbs"
-    vbs_path.write_text(vbs_content, encoding="gbk")
-    try:
-        os.system(f'cscript //nologo "{vbs_path}"')
-        print(f"[*] 成功在桌面创建快捷方式:")
-        print(f"    - {desktop / 'PM-Quant 一键启动.lnk'}")
-        print(f"    - {desktop / 'PM-Quant 一键停止.lnk'}")
-    finally:
-        vbs_path.unlink(missing_ok=True)
+        vbs_path = ROOT / "_temp_create_shortcut.vbs"
+        try:
+            vbs_path.write_text(vbs_content, encoding="gbk")
+            os.system(f'cscript //nologo "{vbs_path}"')
+            success_paths.append((s1_path, s2_path))
+        except Exception as e:
+            print(f"[!] 在 {desktop} 创建快捷方式失败: {e}")
+        finally:
+            vbs_path.unlink(missing_ok=True)
+
+    if success_paths:
+        print("[*] 成功在以下桌面位置创建快捷方式:")
+        for s1, s2 in success_paths:
+            print(f"    - {s1}")
+            print(f"    - {s2}")
 
 
 def main():
