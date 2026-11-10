@@ -228,7 +228,7 @@
       const posUp = live.pos_up ? live.pos_up.shares || 0 : 0;
       const posDn = live.pos_down ? live.pos_down.shares || 0 : 0;
       const isLocked = posUp > 0 && posDn > 0 && Math.abs(posUp - posDn) < 1e-4;
-      document.getElementById('overview-live-pos').textContent = `UP ${posUp.toFixed(1)} / DN ${posDn.toFixed(1)}${isLocked ? ' (已锁仓)' : ''}`;
+      document.getElementById('overview-live-pos').textContent = `看涨(UP) ${posUp.toFixed(1)} / 看跌(DN) ${posDn.toFixed(1)}${isLocked ? ' (已对冲锁仓)' : ''}`;
     }
 
     // KPI Cards
@@ -322,7 +322,7 @@
       return `
         <tr>
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
-          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
+          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
           <td>${posUpShares.toFixed(1)}</td>
           <td>${posDownShares.toFixed(1)}</td>
@@ -339,22 +339,36 @@
   // Translate internal strategy arbitration into professional investor Chinese
   function translateDecisionReason(decision) {
     if (!decision || (!decision.reason && !decision.action)) {
-      return { text: "实时微观行情评估中...", level: "normal" };
+      return { text: "系统微观跟踪中，实时评估盘口深度与价差", level: "normal" };
     }
-    const reason = (decision.reason || '').toLowerCase();
-    const action = (decision.action || '').toLowerCase();
-    const side = (decision.side || '').toUpperCase();
+    const rawReason = String(decision.reason || '');
+    const reason = rawReason.toLowerCase();
+    const action = String(decision.action || '').toLowerCase();
+    const side = String(decision.side || '').toUpperCase();
     const pxStr = decision.price !== undefined && decision.price !== null ? `$${Number(decision.price).toFixed(2)}` : '';
 
-    // 1. Toxic shock
+    // If reason is already native Chinese, return it directly
+    if (/[\u4e00-\u9fa5]/.test(rawReason)) {
+      let level = "normal";
+      if (rawReason.includes("熔断") || rawReason.includes("高危") || rawReason.includes("止损") || rawReason.includes("警告") || rawReason.includes("休眠") || rawReason.includes("毒流")) {
+        level = "warn";
+      } else if (rawReason.includes("冻结") || rawReason.includes("防守") || rawReason.includes("上限") || rawReason.includes("观望") || rawReason.includes("偏离")) {
+        level = "freeze";
+      } else if (rawReason.includes("买入") || rawReason.includes("做市") || rawReason.includes("对冲") || rawReason.includes("配平") || rawReason.includes("锁赢")) {
+        level = (side === 'DOWN' || rawReason.includes('看跌') || rawReason.includes('DOWN')) ? "down" : "ok";
+      }
+      return { text: rawReason, level };
+    }
+
+    // 1. Toxic shock & Extreme Volatility
     if (reason.includes('toxic') || reason.includes('shock')) {
       return {
-        text: "⚠️ 现货剧烈跳空 (毒流冲击)：挂单主动收缩，防范逆选择吃单",
+        text: "⚠️ 现货剧烈跳空 (高危毒流防守)：挂单主动收缩，防范逆向吃单",
         level: "warn"
       };
     }
 
-    // 2. Circuit breaker / drawdown / streak
+    // 2. Circuit breaker / drawdown / streak / cooling
     if (reason.includes('circuit') || reason.includes('drawdown')) {
       return {
         text: "🛑 日度熔断看门狗生效：已禁止新开 Leg-1 单边仓位，仅保留对冲防守",
@@ -368,76 +382,119 @@
       };
     }
 
-    // 3. Max position reached
+    // 3. Max position or entries reached
     if (reason.includes('max position') || reason.includes('position reached')) {
       return {
         text: "⏸️ 单轮持仓已达风控上限 (15 股)：停止增仓，锁定底仓等待期末清算",
         level: "freeze"
       };
     }
-
-    // 4. Tail freeze
-    if (reason.includes('tail freeze') || reason.includes('freeze') || reason.includes('tau <') || reason.includes('tau<')) {
+    if (reason.includes('max entries') || reason.includes('entries reached') || reason.includes('per window reached')) {
       return {
-        text: "⏱️ 临近结算交割窗口 (Tau ≤ 60s)：冻结新开仓以规避尾盘剧震风险",
+        text: "⏸️ 本轮开仓次数已达上限 (单窗仅限1次)：锁定仓位等待到期清算",
         level: "freeze"
       };
     }
 
-    // 5. Entries (Maker)
+    // 4. Tail freeze & Late window (tau < 180s or tau < 60s)
+    if (reason.includes('tail freeze') || reason.includes('late window') || reason.includes('tau <') || reason.includes('tau<') || reason.includes('tau ')) {
+      return {
+        text: "⏱️ 临近交割尾盘 (尾盘流动性保护)：禁止新开第1腿，锁定挂单防守",
+        level: "freeze"
+      };
+    }
+
+    // 5. Directional Momentum / Trend (SNR > 1.8)
+    if (reason.includes('bullish trend') || (reason.includes('trend') && reason.includes('up') && !reason.includes('down'))) {
+      return {
+        text: "📈 检测到单边看涨强动量趋势 (信噪比>1.8)：启动单边趋势防守，严禁逆势买跌",
+        level: "freeze"
+      };
+    }
+    if (reason.includes('bearish trend') || (reason.includes('trend') && reason.includes('down'))) {
+      return {
+        text: "📉 检测到单边看跌强动量趋势 (信噪比>1.8)：启动单边趋势防守，严禁逆势买涨",
+        level: "freeze"
+      };
+    }
+    if (reason.includes('trending') || reason.includes('trend')) {
+      return {
+        text: "📈 单边强动量趋势确立：启动单边趋势防守，严格禁止逆势接单",
+        level: "freeze"
+      };
+    }
+
+    // 6. Balanced odds boundary [0.42, 0.58]
+    if (reason.includes('balanced entry zone') || reason.includes('balanced odds') || reason.includes('outside balanced')) {
+      return {
+        text: "⚖️ 胜率偏离中性平衡带：公允胜率超出 [42%, 58%] 区间，禁止单边冒险追单",
+        level: "freeze"
+      };
+    }
+
+    // 7. Safe entry price zone corridor [0.38, 0.62]
+    if (reason.includes('outside safe entry zone') || reason.includes('safe entry zone')) {
+      return {
+        text: "🛡️ 报价超出安全做市走廊：当前价格偏离 [0.38, 0.62] 安全区间，防范追高",
+        level: "freeze"
+      };
+    }
+
+    // 8. Leg-2 Maker Quoting to capture bid-ask spread
+    if (reason.includes('work leg-2 maker') || reason.includes('capture spread') || reason.includes('quote maker') || reason.includes('u_hold')) {
+      const targetSide = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `🎯 挂单第2腿 ${targetSide} 做市 ${pxStr}：在买一排队捕获买卖价差收益 (零手续费)`,
+        level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+
+    // 9. Initial Leg-1 Maker Entries
     if (reason.includes('enter up') || (action === 'maker' && side === 'UP')) {
       return {
-        text: `🟢 概率优势触发：在买一排队挂 Maker 订单买入 UP ${pxStr}`,
+        text: `🟢 理论概率优势触发：在买一挂 Maker 订单买入 看涨(UP) ${pxStr}`,
         level: "ok"
       };
     }
     if (reason.includes('enter down') || (action === 'maker' && side === 'DOWN')) {
       return {
-        text: `🔴 概率优势触发：在买一排队挂 Maker 订单买入 DOWN ${pxStr}`,
+        text: `🔴 理论概率优势触发：在买一挂 Maker 订单买入 看跌(DOWN) ${pxStr}`,
         level: "down"
       };
     }
 
-    // 6. Hedge / Unwind
-    if (reason.includes('u_hedge') || reason.includes('take hedge') || reason.includes('hedge')) {
-      const sideText = side === 'DOWN' ? 'DOWN' : 'UP';
+    // 10. Arbitrage Lock / Hedge / Unwind
+    if (reason.includes('arbitrage') && (reason.includes('hedge') || action === 'taker_hedge')) {
+      const sideText = side === 'DOWN' ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `🛡️ 锁定无风险套利 (总对冲成本≤$1.00)：市价买入 ${sideText} 锁定净利润`,
+        level: "ok"
+      };
+    }
+    if (reason.includes('u_hedge') || reason.includes('take hedge') || reason.includes('hedge') || action === 'taker_hedge') {
+      const sideText = side === 'DOWN' ? '看跌 (DOWN)' : '看涨 (UP)';
       return {
         text: `🛡️ 组合腿失衡对冲：市价抢单买入 ${sideText} 完成配平锁赢`,
         level: "ok"
       };
     }
-    if (reason.includes('unwind') || reason.includes('u_sell')) {
+    if (reason.includes('unwind') || reason.includes('u_sell') || action === 'taker_unwind') {
       return {
-        text: `🔄 逆风平仓止损：主动减仓化解单边敞口暴露`,
+        text: `🔄 逆风平仓止损：主动减仓化解单边风险敞口暴露`,
         level: "warn"
       };
     }
 
-    if (reason.includes('outside safe entry zone')) {
-      return {
-        text: "🛡️ 价格偏离均衡中枢：报价超出 [0.38, 0.62] 安全做市区间，静待均值回归防追高",
-        level: "freeze"
-      };
-    }
-    if (reason.includes('trending') || reason.includes('downward trend') || reason.includes('upward trend')) {
-      return {
-        text: "📈 单边动量趋势确立：启动单边趋势防守，严禁逆势接单",
-        level: "freeze"
-      };
-    }
-
-    // 7. Capital restriction
-    if (reason.includes('insufficient capital') || reason.includes('capital')) {
-      return {
-        text: "⚠️ 账户可用资金受限：不足以满足凯利单笔最小下单要求，维持守势",
-        level: "warn"
-      };
-    }
-
-    // 8. Queue timeout / tight spread
+    // 11. Spread & Book depth restrictions
     if (reason.includes('too tight')) {
       return {
-        text: "⏳ 盘口对家价差过窄：被动 Maker 期望收益不足，暂缓挂单",
+        text: "⏳ 盘口买卖价差过窄：被动做市期望收益不足，暂缓挂单",
+        level: "normal"
+      };
+    }
+    if (reason.includes('wide_spread') || reason.includes('spread too wide') || reason.includes('wait for tighter')) {
+      return {
+        text: "↔️ 市场买卖价差过宽 (超出安全阈值)：摩擦成本过高，静待盘口收窄",
         level: "normal"
       };
     }
@@ -448,17 +505,49 @@
       };
     }
 
-    // 9. No edge
-    if (reason.includes('no edge') || reason.includes('uncertainty')) {
+    // 12. Regimes & Edge observation
+    if (reason.includes('no edge') || reason.includes('uncertainty band')) {
       return {
         text: "⚖️ 胜率未超安全垫阈值 (±ε)：当前价差不具备统计套利优势，保持观望",
         level: "normal"
       };
     }
+    if (reason.includes('range_bound') || reason.includes('mean-reverting')) {
+      return {
+        text: "🎯 箱体窄幅震荡区间：激活做市双向捕获价差模式",
+        level: "normal"
+      };
+    }
+    if (reason.includes('normal oscillation') || reason.includes('normal_oscillation')) {
+      return {
+        text: "〰️ 常态微幅震荡：微观盘口深度良好，实时监测做市挂单机会",
+        level: "normal"
+      };
+    }
+    if (reason.includes('transitional')) {
+      return {
+        text: "⏳ 市场状态过渡中 (信噪比未确认)：等待微观结构明朗后再行挂单",
+        level: "normal"
+      };
+    }
+    if (reason.includes('drift')) {
+      return {
+        text: "↗️ 现货价格漂移偏大：胜率预测偏斜，暂停盲目挂单以避险",
+        level: "normal"
+      };
+    }
 
-    // 10. Default clean fallback
+    // 13. Capital restriction
+    if (reason.includes('insufficient capital') || reason.includes('capital')) {
+      return {
+        text: "⚠️ 账户可用资金受限：不足以满足最小下单要求，维持守势",
+        level: "warn"
+      };
+    }
+
+    // 14. Absolute fallback: NEVER leak raw English to user!
     return {
-      text: decision.reason || "系统微观跟踪中，实时评估盘口深度与价差",
+      text: "系统微观跟踪中，实时评估盘口深度与价差",
       level: "normal"
     };
   }
@@ -593,7 +682,7 @@
     const statEdge = document.getElementById('chart-stat-edge');
 
     if (statProbUp) {
-      statProbUp.textContent = `UP ${(livePolyUp * 100).toFixed(1)}% ($${livePolyUp.toFixed(2)})`;
+      statProbUp.textContent = `看涨 ${(livePolyUp * 100).toFixed(1)}% ($${livePolyUp.toFixed(2)})`;
       statProbUp.style.color = COLOR_UP; // 绿色
     }
     if (statProbModel) {
@@ -1133,16 +1222,31 @@
 
     if (cb.active) {
       riskPill.className = 'status-pill status-warn';
-      riskText.textContent = `熔断看门狗: ${cb.reason || '仅限对冲平仓'}`;
+      let cbMsg = cb.reason || '仅限对冲平仓';
+      if (cbMsg.toLowerCase().includes('drawdown')) {
+        cbMsg = '已达单日最大回撤限制，仅限平仓';
+      } else if (cbMsg.toLowerCase().includes('cooling')) {
+        cbMsg = `连续亏损观察冷却中 (剩余 ${cb.cooling_rounds_left || 1} 轮)`;
+      }
+      riskText.textContent = `熔断看门狗: ${cbMsg}`;
     } else if (live.is_toxic_shock) {
       riskPill.className = 'status-pill status-warn';
-      riskText.textContent = `剧烈波动冲击 (Toxic Shock)${volStr}`;
-    } else if (live.regime === 'volatile') {
+      riskText.textContent = `剧烈跳空冲击 (高危毒流防守)${volStr}`;
+    } else if (live.regime === 'volatile' || live.regime === 'toxic') {
       riskPill.className = 'status-pill status-warn';
       riskText.textContent = `高波动防守区${volStr}`;
-    } else if (live.regime === 'calm') {
+    } else if (live.regime === 'range_bound') {
       riskPill.className = 'status-pill status-ready';
-      riskText.textContent = `平稳行情·窄价差抢占${volStr}`;
+      riskText.textContent = `高确定性箱体震荡·做市区间${volStr}`;
+    } else if (live.regime === 'trending_up') {
+      riskPill.className = 'status-pill status-ready';
+      riskText.textContent = `单边看涨动量趋势${volStr}`;
+    } else if (live.regime === 'trending_down') {
+      riskPill.className = 'status-pill status-warn';
+      riskText.textContent = `单边看跌动量趋势${volStr}`;
+    } else if (live.regime === 'calm' || live.regime === 'normal_oscillation') {
+      riskPill.className = 'status-pill status-ready';
+      riskText.textContent = `常态微幅震荡·价差捕捉${volStr}`;
     } else {
       riskPill.className = 'status-pill status-ready';
       riskText.textContent = `流动性正常${volStr}`;
@@ -1188,7 +1292,8 @@
     const pill = document.getElementById('working-order-pill');
     if (orders.length > 0) {
       const o = orders[0];
-      pill.textContent = `在途挂单: ${o.side} ${o.size}股 @ $${Number(o.price).toFixed(2)}`;
+      const sideText = (o.side === 'Up' || o.side === 'UP') ? '看涨 (UP)' : '看跌 (DOWN)';
+      pill.textContent = `在途挂单: 买入${sideText} ${o.size}股 @ $${Number(o.price).toFixed(2)}`;
       pill.className = 'order-pill active';
     } else {
       pill.textContent = '无在途挂单';
@@ -1217,6 +1322,13 @@
     if (actions.length === 0) {
       feed.innerHTML = '<li class="action-empty">本轮尚无挂单或成交动作</li>';
     } else {
+      const purposeMap = {
+        'entry': '首次开仓',
+        'hedge': '对冲配平',
+        'unwind': '平仓止损',
+        'spread_capture': '捕获价差',
+        'leg2_maker': '第2腿做市'
+      };
       const items = actions.slice(-20).reverse().map(a => {
         const tStr = a.t ? new Date(a.t * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
         const isFill = a.action === 'fill';
@@ -1224,13 +1336,15 @@
         const sideCls = (a.side || '').toLowerCase();
         const actionLabel = isFill ? '成交' : '挂单';
         const kindLabel = a.kind === 'taker' ? 'Taker 吃单' : 'Maker 挂单';
+        const sideLabel = (a.side === 'Up' || a.side === 'UP') ? '看涨 (UP)' : (a.side === 'Down' || a.side === 'DOWN') ? '看跌 (DOWN)' : (a.side || '--');
+        const purposeLabel = purposeMap[a.purpose] || (a.purpose ? a.purpose : '首次开仓');
         return `
           <li class="action-item">
             <span class="action-time">${tStr}</span>
             <span class="action-type ${actionCls}">${actionLabel}</span>
-            <span class="action-side ${sideCls}">${a.side || '--'}</span>
+            <span class="action-side ${sideCls}">${sideLabel}</span>
             <span>$${Number(a.price || 0).toFixed(2)} × ${a.size || 0}股</span>
-            <span>${kindLabel} (${a.purpose || 'entry'})</span>
+            <span>${kindLabel} (${purposeLabel})</span>
           </li>
         `;
       }).join('');
@@ -1301,7 +1415,7 @@
       return `
         <tr>
           <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
-          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner || '--')}</span></td>
+          <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
           <td>${posUpShares.toFixed(1)}</td>
           <td>${posDownShares.toFixed(1)}</td>
