@@ -78,6 +78,9 @@ def plan_order_actions(
             or "circuit breaker" in reason_lower
             or "trend" in reason_lower
             or "safe entry" in reason_lower
+            or "late window" in reason_lower
+            or "max entries" in reason_lower
+            or "balanced entry" in reason_lower
         )
         
         for o in working_orders:

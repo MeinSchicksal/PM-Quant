@@ -431,6 +431,45 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(len(to_cancel_2), 1)
         self.assertEqual(to_cancel_2[0].id, 1)
 
+    def test_min_entry_tau_cutoff_boundary(self):
+        """Invariant 17: When remaining time tau < 180s, new Leg-1 entry is strictly forbidden."""
+        import config
+        from core.policy import plan_decision
+        pos_flat = Position(0.0, 0.0)
+        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        spot = SpotState(timestamp=1000.0, price=75010.0, open_price=75000.0)
+        
+        # tau = 120s (less than MIN_ENTRY_TAU_S = 180s)
+        dec = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=120.0, params=config.PARAMS)
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("Late window", dec.reason)
+
+    def test_balanced_odds_entry_boundary(self):
+        """Invariant 18: Skewed fair probability outside [0.42, 0.58] strictly blocks Leg-1 maker entry."""
+        import config
+        from core.policy import plan_decision
+        pos_flat = Position(0.0, 0.0)
+        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
+        
+        # Pass skewed p_fair = 0.81 (like in round 1794289800)
+        dec_skewed = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.81)
+        self.assertEqual(dec_skewed.action, "wait")
+        self.assertIn("balanced entry zone", dec_skewed.reason)
+
+    def test_single_entry_per_window_lockout(self):
+        """Invariant 19: When entries_count >= MAX_ENTRIES_PER_WINDOW, policy waits for next window."""
+        import config
+        from core.policy import plan_decision
+        pos_flat = Position(0.0, 0.0)
+        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
+        
+        # entries_count = 1 (position was already unwound this round)
+        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.50, entries_count=1)
+        self.assertEqual(dec_locked.action, "wait")
+        self.assertIn("Max entries per window reached", dec_locked.reason)
+
 
 if __name__ == "__main__":
     import json

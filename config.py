@@ -33,7 +33,9 @@ PARAMS = {
     "TOXICITY_SHOCK_BPS": 3.5,        # 3-second rapid price shock threshold indicating informed toxicity
 
     # 4. Lifecycle & Account-Level Watchdog Boundaries
-    "TAIL_FREEZE_S": 60.0,            # Seconds before expiration where new leg-1 entries are disabled
+    "TAIL_FREEZE_S": 60.0,            # Seconds before expiration where all actions are frozen
+    "MIN_ENTRY_TAU_S": 180.0,         # Minimum remaining seconds (tau >= 180s) to permit initial Leg-1 entry (first 2 minutes only)
+    "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window (prevents revenge re-entry after unwind)
     "MAX_WINDOW_LOSS_USD": 2.00,      # Hard bounded catastrophic drawdown envelope per window
     "MAX_DAILY_DRAWDOWN_USD": 8.00,   # Account-level daily drawdown circuit breaker ($8.00 cumulative loss)
     "LOSS_STREAK_COOLING": 3,         # Consecutive losing rounds triggering cooling mode
@@ -44,6 +46,8 @@ PARAMS = {
     "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify mean-reverting oscillating regime (noise band)
     "MAX_MAKER_ENTRY_PRICE": 0.62,    # Maximum price allowed for passive Leg-1 entry (avoids buying the top)
     "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive Leg-1 entry
+    "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
+    "MAX_FAIR_PROB_ENTRY": 0.58,      # Maximum fair probability for balanced Leg-1 entry (blocks skewed directional drift)
     "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost (basis + hedge ask + fee) for Taker Hedge
 }
 

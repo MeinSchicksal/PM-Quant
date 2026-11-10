@@ -159,7 +159,8 @@ def plan_decision(
     params: Dict[str, float],
     circuit_breaker_active: bool = False,
     circuit_breaker_reason: str = "",
-    p_fair: Optional[float] = None
+    p_fair: Optional[float] = None,
+    entries_count: int = 0
 ) -> Decision:
     """Master decision cycle called every tick/event.
     
@@ -224,10 +225,23 @@ def plan_decision(
             cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
             return Decision(action="wait", reason=f"Circuit breaker active ({cb_msg}): new Leg-1 disabled")
 
-        # If in tail freeze window (< 60s), do not open new windows
+        # 2a. Time Horizon Gates:
+        # If in tail freeze window (< 60s), do not open new entries
         if tau_s <= params["TAIL_FREEZE_S"]:
             return Decision(action="wait", reason="Tail freeze active, no new entries")
             
+        # Entry horizon cutoff: only permit initial Leg-1 entry in the first 2 minutes (tau >= 180s)
+        # Prevents entering binary gamma traps where opposite hedge liquidity evaporates
+        min_entry_tau = float(params.get("MIN_ENTRY_TAU_S", 180.0))
+        if tau_s < min_entry_tau:
+            return Decision(action="wait", reason=f"Late window (tau {tau_s:.0f}s < {min_entry_tau:.0f}s): new Leg-1 entry disabled")
+
+        # 2b. Window Lifecycle & Single Entry Constraint:
+        # Forbid re-entering after an unwind in the same 5-minute round (prevents revenge trading in chop)
+        max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
+        if entries_count >= max_entries:
+            return Decision(action="wait", reason=f"Max entries per window reached ({entries_count}/{max_entries}), waiting for next window")
+
         # If toxic spot shock or toxic regime detected, hold off
         if spot.is_toxic_shock or micro_regime == "toxic":
             return Decision(action="wait", reason=f"Toxic regime detected (vol={spot.realized_vol_bps:.1f}bps, shock={spot.is_toxic_shock})")
@@ -245,22 +259,34 @@ def plan_decision(
         
         available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
         min_lots = int(params.get("MIN_LOTS", 1))
-        k_frac = float(params.get("KELLY_FRACTION", 0.25))
         lot_size = float(params.get("LOT_SIZE", 5.0))
         
         up_bid = book_up.best_bid or 0.0
         down_bid = book_down.best_bid or 0.0
         max_entry_px = float(params.get("MAX_MAKER_ENTRY_PRICE", 0.62))
         min_entry_px = float(params.get("MIN_MAKER_ENTRY_PRICE", 0.38))
+        min_fair_p = float(params.get("MIN_FAIR_PROB_ENTRY", 0.42))
+        max_fair_p = float(params.get("MAX_FAIR_PROB_ENTRY", 0.58))
         
         # Dual-Regime Quoting Rules:
         # - If trending_down: strictly forbid quoting Up (prevents catching falling knives)
         # - If trending_up: strictly forbid quoting Down (prevents standing in front of surges)
         # - Maker entry quotes must stay within [min_entry_px, max_entry_px] to prevent buying at the top
-        can_quote_up = (micro_regime != "trending_down")
-        can_quote_down = (micro_regime != "trending_up")
+        # - Fair probability must stay within balanced odds [min_fair_p, max_fair_p] (prevents entering skewed drift)
+        can_quote_up = (micro_regime != "trending_down") and (min_fair_p <= p_fair <= max_fair_p)
+        can_quote_down = (micro_regime != "trending_up") and (min_fair_p <= (1.0 - p_fair) <= max_fair_p)
         
-        if can_quote_up and up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35 and p_fair >= 0.48:
+        # Check fair probability bounds for clear diagnostic reason if outside balanced band
+        if p_fair > max_fair_p or p_fair < min_fair_p:
+            return Decision(action="wait", reason=f"p_fair ({p_fair:.2f}) outside balanced entry zone [{min_fair_p:.2f}, {max_fair_p:.2f}]")
+
+        # Initial Leg-1 bare risk is strictly capped at baseline 1 lot (5 shares)
+        # Prevents full 15-share exposure before opposite leg is confirmed
+        entry_size = float(min_lots * lot_size)
+        if available_cap < (entry_size * 0.50):
+            return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
+        
+        if can_quote_up and up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35:
             quote_px = max(0.02, min(0.98, round(min(r_up, up_bid), 2)))
             if book_up.best_ask is not None:
                 quote_px = min(quote_px, round(book_up.best_ask - 0.01, 2))
@@ -268,16 +294,11 @@ def plan_decision(
                 return Decision(action="wait", reason=f"Up quote ({quote_px:.2f}) outside safe entry zone [{min_entry_px:.2f}, {max_entry_px:.2f}]")
             if quote_px < 0.02 or (book_up.best_ask is not None and quote_px >= book_up.best_ask):
                 return Decision(action="wait", reason=f"Up ask ({book_up.best_ask}) too tight for passive maker entry")
-            size = calculate_kelly_order_size(
-                available_cap, p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
-            )
-            if size < lot_size:
-                return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
             return Decision(
-                action="quote", side="Up", price=quote_px, size=size,
-                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {micro_regime}, {size:.0f}s)"
+                action="quote", side="Up", price=quote_px, size=entry_size,
+                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {micro_regime}, {entry_size:.0f}s)"
             )
-        elif can_quote_down and down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35 and (1.0 - p_fair) >= 0.48:
+        elif can_quote_down and down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35:
             quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
             if book_down.best_ask is not None:
                 quote_px = min(quote_px, round(book_down.best_ask - 0.01, 2))
@@ -285,14 +306,9 @@ def plan_decision(
                 return Decision(action="wait", reason=f"Down quote ({quote_px:.2f}) outside safe entry zone [{min_entry_px:.2f}, {max_entry_px:.2f}]")
             if quote_px < 0.02 or (book_down.best_ask is not None and quote_px >= book_down.best_ask):
                 return Decision(action="wait", reason=f"Down ask ({book_down.best_ask}) too tight for passive maker entry")
-            size = calculate_kelly_order_size(
-                available_cap, 1.0 - p_fair, quote_px, lot_size, min_lots, max_lots, k_frac
-            )
-            if size < lot_size:
-                return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
             return Decision(
-                action="quote", side="Down", price=quote_px, size=size,
-                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {micro_regime}, {size:.0f}s)"
+                action="quote", side="Down", price=quote_px, size=entry_size,
+                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {micro_regime}, {entry_size:.0f}s)"
             )
             
         return Decision(action="wait", reason=f"No edge outside uncertainty band (+/-{epsilon:.2f}, {micro_regime})")

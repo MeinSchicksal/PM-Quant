@@ -65,16 +65,41 @@ def replay_window(gz_path: Path) -> Optional[Dict[str, Any]]:
     first_side = first_fill.get("side", "")
 
     # Upgraded Policy Rules:
-    # 1. Safe entry zone [0.38, 0.62]: blocks buying high-probability tops or catching extreme bottoms
+    # 1. Evaluate entry fills sequentially respecting single-entry per window and tau >= 180s
     min_entry_px = float(config.PARAMS.get("MIN_MAKER_ENTRY_PRICE", 0.38))
     max_entry_px = float(config.PARAMS.get("MAX_MAKER_ENTRY_PRICE", 0.62))
+    min_entry_tau = float(config.PARAMS.get("MIN_ENTRY_TAU_S", 180.0))
+    window_start = float(data.get("start", 0.0))
+    window_end = float(data.get("end", window_start + 300.0))
     
-    is_blocked = False
-    if first_px < min_entry_px or first_px > max_entry_px:
-        is_blocked = True
+    first_fill = fills[0]
+    first_px = float(first_fill.get("price", 0.50))
+    first_t = float(first_fill.get("t", window_start))
+    first_tau = max(0.0, window_end - first_t)
+    
+    # If first entry itself was late or outside safe price zone, block entire round
+    if first_tau < min_entry_tau or first_px < min_entry_px or first_px > max_entry_px:
         return {
             "slug": slug, "traded": True, "orig_pnl": orig_pnl, "sim_pnl": 0.0,
-            "blocked": True, "unwound": False, "block_reason": f"Entry px {first_px:.2f} outside [{min_entry_px:.2f}, {max_entry_px:.2f}]",
+            "blocked": True, "unwound": False, "block_reason": f"First entry (tau={first_tau:.0f}s, px={first_px:.2f}) blocked",
+            "winner": winner, "open_px": open_px, "close_px": close_px
+        }
+
+    # If round had an unwind followed by a late second entry (like 1794289800):
+    # Single entry rule & tau cutoff strictly block the second entry, keeping only the early unwind loss
+    has_unwind = any(f.get("purpose") == "unwind" for f in fills)
+    entries = [f for f in fills if f.get("purpose") == "entry"]
+    if has_unwind and len(entries) > 1:
+        # Calculate PnL strictly from the first entry and its unwind
+        unwind_fills = [f for f in fills if f.get("purpose") == "unwind"]
+        first_entry = entries[0]
+        unwind = unwind_fills[0]
+        cost = first_entry["size"] * first_entry["price"]
+        recovered = unwind["size"] * unwind["price"]
+        clean_loss = round(recovered - cost, 4)
+        return {
+            "slug": slug, "traded": True, "orig_pnl": orig_pnl, "sim_pnl": clean_loss,
+            "blocked": False, "unwound": True, "saved_ins": round(orig_pnl - clean_loss, 4),
             "winner": winner, "open_px": open_px, "close_px": close_px
         }
 

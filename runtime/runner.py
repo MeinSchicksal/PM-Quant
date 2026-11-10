@@ -81,6 +81,7 @@ class PaperRunner:
         self.decisions = []
         self.actions = []
         self.insurance_paid = 0.0
+        self.entries_count = 0
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
             {
@@ -117,6 +118,8 @@ class PaperRunner:
 
     def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
         """Record one executed fill and its investor-readable action event."""
+        if purpose == "entry":
+            self.entries_count += 1
         fill = {
             "t": round(now, 2), "side": side, "price": price,
             "size": size, "kind": kind, "purpose": purpose
@@ -201,7 +204,8 @@ class PaperRunner:
         decision = plan_decision(
             self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
             circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
-            p_fair=p_fair
+            p_fair=p_fair,
+            entries_count=self.entries_count
         )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,

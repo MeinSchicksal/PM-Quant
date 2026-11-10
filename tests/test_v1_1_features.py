@@ -242,7 +242,7 @@ class TestFractionalKellyDynamicSizing(unittest.TestCase):
         pos_flat = Position(0.0, 0.0)
         book_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         book_dn = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
-        spot = SpotState(timestamp=1000.0, price=75050.0, open_price=75000.0) # Up edge exists
+        spot = SpotState(timestamp=1000.0, price=75010.0, open_price=75000.0) # Balanced Up edge within [0.42, 0.58]
         params_tiny = dict(config.PARAMS, AVAILABLE_CAPITAL=capital_tiny)
 
         dec = plan_decision(pos_flat, pos_flat, book_up, book_dn, spot, tau_s=180.0, params=params_tiny)
