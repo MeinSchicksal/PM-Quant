@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import config
 from core.types import OrderBook, Position, SpotState, Decision
 from core.estimator import estimate_fair_prob, estimate_uncertainty_envelope
 from core.policy import calculate_reservation_bids, evaluate_unpaired_utility
@@ -393,24 +394,35 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertIn("No edge", dec.reason)
 
     def test_drift_snr_and_micro_regime_classification(self):
-        """Invariant 13: Statistical drift SNR and micro-regime classification must be mathematically exact."""
-        from core.estimator import calculate_drift_snr, classify_market_micro_regime
+        """Invariant 13: Statistical drift SNR and regime classification must be mathematically exact."""
+        from core.estimator import calculate_drift_snr
+        from core.regime import classify_market_regime
 
-        # Case 1: Flat market (0 return) -> SNR = 0.0, oscillating
+        book = OrderBook(bids=[(0.49, 50.0)], asks=[(0.51, 50.0)])
+
+        # Case 1: Flat market (0 return) -> SNR = 0.0, mean-reverting range
         snr_flat, ret_flat = calculate_drift_snr(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0)
         self.assertEqual(snr_flat, 0.0)
         self.assertEqual(ret_flat, 0.0)
-        regime_flat, _, _ = classify_market_micro_regime(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0)
-        self.assertEqual(regime_flat, "oscillating")
+        regime_flat = classify_market_regime(
+            75000.0, 75000.0, 200.0, 15.0, book, book, params=config.PARAMS
+        )
+        self.assertEqual(regime_flat.regime, "range_bound")
 
-        # Case 2: Strong downward drift (-30 bps, vol=10 bps) -> SNR = 3.0 / sqrt(200/300) = ~3.67 > 1.8 -> trending_down
-        regime_down, snr_down, ret_down = classify_market_micro_regime(74775.0, 75000.0, tau_s=200.0, vol_bps=10.0)
-        self.assertEqual(regime_down, "trending_down")
+        # Case 2: Strong downward drift (-30 bps, vol=10 bps) -> SNR ~3.67 > 1.8 -> trending_down
+        snr_down, ret_down = calculate_drift_snr(74775.0, 75000.0, tau_s=200.0, vol_bps=10.0)
         self.assertGreater(snr_down, 1.8)
+        regime_down = classify_market_regime(
+            74775.0, 75000.0, 200.0, 10.0, book, book, params=config.PARAMS
+        )
+        self.assertEqual(regime_down.regime, "trending_down")
 
         # Case 3: Toxic jump shock -> regime is toxic
-        regime_toxic, _, _ = classify_market_micro_regime(75000.0, 75000.0, tau_s=200.0, vol_bps=15.0, is_toxic_shock=True)
-        self.assertEqual(regime_toxic, "toxic")
+        regime_toxic = classify_market_regime(
+            75000.0, 75000.0, 200.0, 15.0, book, book,
+            is_toxic_shock=True, params=config.PARAMS
+        )
+        self.assertEqual(regime_toxic.regime, "toxic")
 
     def test_dual_regime_directional_momentum_defense(self):
         """Invariant 14: Downward momentum regime strictly forbids quoting Up maker entry."""

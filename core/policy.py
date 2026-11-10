@@ -181,10 +181,13 @@ def evaluate_unpaired_utility(
                     reason=f"U_hedge({u_hedge:.2f}) arbitrage (pair_cost={pair_cost:.3f} <= 1.00), take hedge @ {hedge_ask}"
                 )
         
-    # Path 2: Immediate Taker Unwind / Sell of Held Side (only valid if >= 5 shares)
+    # Path 2: Immediate Taker Unwind / Sell of Held Side.
+    # Any positive size is sellable: depth-limited matching produces partial
+    # fills (e.g. 1.93 shares), and the old ">= 5 shares" floor stranded those
+    # legs with no exit other than holding to expiry.
     u_sell = -999.0
     held_bid = book_held.best_bid
-    if held_shares >= 5.0 - 1e-6 and held_bid is not None:
+    if held_shares > 1e-9 and held_bid is not None and held_bid > 0:
         u_sell = held_shares * (held_bid - taker_fee_per_share(held_bid, fee_rate) - held_basis_price)
         
     # Path 3: Passive Quoting / Holding to Expiration
@@ -242,20 +245,16 @@ def evaluate_unpaired_utility(
                 reason=f"U_sell({u_sell:.2f}) > U_hold({u_hold:.2f}), unwind position @ {held_bid}"
             )
 
-    # Otherwise, maintain optimal Maker quote on the deficit side to complete round trip
-    r_maker_price = max(0.02, min(0.98, round(maker_quote, 2)))
-    if book_opp.best_ask is not None and r_maker_price >= book_opp.best_ask:
-        return _wait(
-            f"Opposite ask ({book_opp.best_ask}) too tight for passive maker quote"
-        )
-        
+    # Otherwise, maintain the optimal Maker quote on the deficit side to
+    # complete the round trip. `maker_quote` is already clamped inside
+    # [0.02, 0.98] and below the opposite ask, so no second guard is needed.
     return Decision(
         action="quote",
         side=opp_side,
-        price=r_maker_price,
+        price=round(maker_quote, 2),
         size=held_shares,
         utility=round(u_hold, 4),
-        reason=f"U_hold({u_hold:.2f}) optimal, quote maker @ {r_maker_price}"
+        reason=f"U_hold({u_hold:.2f}) optimal, quote maker @ {round(maker_quote, 2)}"
     )
 
 
@@ -270,7 +269,8 @@ def plan_decision(
     circuit_breaker_active: bool = False,
     circuit_breaker_reason: str = "",
     p_fair: Optional[float] = None,
-    entries_count: int = 0
+    entries_count: int = 0,
+    regime_info=None
 ) -> Decision:
     """Master decision cycle called every tick/event.
     
@@ -282,22 +282,23 @@ def plan_decision(
     net_gap = round(u_shares - d_shares, 4)
     
     from .estimator import (
-        estimate_fair_prob, 
+        estimate_p_fair,
         estimate_uncertainty_envelope,
         calculate_adaptive_spread_params
     )
     
     # 1. Calculate Fair Prob & Dynamic Volatility Adaptive Bounds
-    # Ensure consistent reference basis to avoid exchange spread contamination
+    # The runner computes this every tick and passes it in; the fallback exists
+    # for direct callers (tests, research scripts) and uses the same helper so
+    # the reference chain cannot drift between the two paths.
     if p_fair is None:
-        poly_spot = getattr(spot, "poly_price", None)
-        bin_open = getattr(spot, "binance_open_price", None)
-        if poly_spot and poly_spot > 0 and spot.open_price > 0:
-            p_fair = estimate_fair_prob(poly_spot, spot.open_price, tau_s, spot.realized_vol_bps)
-        elif bin_open and bin_open > 0 and spot.price > 0:
-            p_fair = estimate_fair_prob(spot.price, bin_open, tau_s, spot.realized_vol_bps)
-        else:
-            p_fair = estimate_fair_prob(spot.price, spot.open_price, tau_s, spot.realized_vol_bps)
+        p_fair = estimate_p_fair(
+            spot,
+            getattr(spot, "open_price", 0.0),
+            tau_s,
+            spot.realized_vol_bps,
+            poly_price=getattr(spot, "poly_price", None),
+        )
     
     adaptive_edge, adaptive_k, regime = calculate_adaptive_spread_params(
         spot.realized_vol_bps, 
@@ -307,27 +308,27 @@ def plan_decision(
     
     epsilon = estimate_uncertainty_envelope(
         spot.realized_vol_bps,
-        params["LATENCY_S"],
+        float(params.get("LATENCY_S", 0.30)),
         adaptive_k,
         tau_s=tau_s
     )
 
     # 1b. Dynamic Market Micro-Regime Classification (Multi-Dimensional Statistical Metrics)
-    from .regime import classify_market_regime
-    ref_spot = getattr(spot, "poly_price", None) or spot.price
-    ref_open = getattr(spot, "open_price", 0.0)
-    if not (getattr(spot, "poly_price", None) and spot.poly_price > 0):
-        ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
-    if not ref_open or ref_open <= 0:
-        ref_open = getattr(spot, "open_price", 0.0) or 0.0
-
-    regime_info = classify_market_regime(
-        ref_spot, ref_open, tau_s, spot.realized_vol_bps,
-        book_up, book_down,
-        is_toxic_shock=spot.is_toxic_shock,
-        params=params,
-        p_fair=p_fair
-    )
+    if regime_info is None:
+        from .regime import classify_market_regime
+        ref_spot = getattr(spot, "poly_price", None) or spot.price
+        ref_open = getattr(spot, "open_price", 0.0)
+        if not (getattr(spot, "poly_price", None) and spot.poly_price > 0):
+            ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
+        if not ref_open or ref_open <= 0:
+            ref_open = getattr(spot, "open_price", 0.0) or 0.0
+        regime_info = classify_market_regime(
+            ref_spot, ref_open, tau_s, spot.realized_vol_bps,
+            book_up, book_down,
+            is_toxic_shock=spot.is_toxic_shock,
+            params=params,
+            p_fair=p_fair
+        )
     micro_regime = regime_info.regime
     snr = regime_info.snr
     ret_bps = regime_info.ret_bps
@@ -340,16 +341,13 @@ def plan_decision(
             cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
             return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
 
-        # 2a. Time Horizon Gates:
-        # If in tail freeze window (< 60s), do not open new entries
-        if tau_s <= params["TAIL_FREEZE_S"]:
-            return _wait("Tail freeze active, no new entries", urgent=True)
-            
-        # Entry horizon cutoff: only permit initial Leg-1 entry in the first 2 minutes (tau >= 180s)
-        # Prevents entering binary gamma traps where opposite hedge liquidity evaporates
+        # 2a. Entry horizon: no new Leg-1 once the window is late (tau < 180s).
+        # The tail-freeze band (tau <= 60s) is a strict subset of this cutoff, so
+        # it is a label on the same gate rather than a second, unreachable gate.
         min_entry_tau = float(params.get("MIN_ENTRY_TAU_S", 180.0))
         if tau_s < min_entry_tau:
-            return _wait(f"Late window (tau {tau_s:.0f}s < {min_entry_tau:.0f}s): new Leg-1 entry disabled", urgent=True)
+            label = "Tail freeze" if tau_s <= float(params.get("TAIL_FREEZE_S", 60.0)) else "Late window"
+            return _wait(f"{label} (tau {tau_s:.0f}s < {min_entry_tau:.0f}s): new Leg-1 entry disabled", urgent=True)
 
         # 2b. Window Lifecycle & Single Entry Constraint:
         # Forbid re-entering after an unwind in the same 5-minute round (prevents revenge trading in chop)
@@ -357,13 +355,14 @@ def plan_decision(
         if entries_count >= max_entries:
             return _wait(f"Max entries per window reached ({entries_count}/{max_entries}), waiting for next window", urgent=True)
 
-        # If toxic spot shock or toxic regime detected, hold off
-        if spot.is_toxic_shock or micro_regime == "toxic":
-            return _wait(f"Toxic regime detected (vol={spot.realized_vol_bps:.1f}bps, shock={spot.is_toxic_shock})", urgent=True)
+        # Toxic shock is one of the regimes the classifier already detects, so
+        # the decision only needs to consult the regime, not the raw flag.
+        if micro_regime == "toxic":
+            return _wait(f"Toxic regime detected: {regime_info.reason}", urgent=True)
 
         # Check max position limit: if already holding max paired lots, wait for settlement
         max_lots = int(params.get("MAX_LOTS", 3))
-        max_shares = params["LOT_SIZE"] * max_lots
+        max_shares = float(params.get("LOT_SIZE", 5.0)) * max_lots
         if u_shares >= max_shares - 1e-4:
             return _wait(f"Max position reached ({u_shares:.0f} shares), holding to settlement", urgent=True)
             
@@ -374,76 +373,90 @@ def plan_decision(
         can_quote_up = regime_info.can_quote_up
         can_quote_down = regime_info.can_quote_down
 
-        # Reservation bids for both sides using adaptive edge
+            # Reservation bids for both sides using adaptive edge
         r_up, r_down = calculate_reservation_bids(
-            p_fair, epsilon, adaptive_edge, q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
+            p_fair, epsilon, adaptive_edge, q=0.0, gamma=float(params.get("RISK_AVERSION_GAMMA", 0.15))
         )
-        
+
         available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
         min_lots = int(params.get("MIN_LOTS", 1))
         lot_size = float(params.get("LOT_SIZE", 5.0))
-        
-        up_bid = book_up.best_bid or 0.0
-        down_bid = book_down.best_bid or 0.0
+
         max_entry_px = float(params.get("MAX_MAKER_ENTRY_PRICE", 0.62))
         min_entry_px = float(params.get("MIN_MAKER_ENTRY_PRICE", 0.38))
         # Hard pre-trade risk budget: an unhedged Leg-1 premium is the true
         # worst-case loss for the window and must fit inside the envelope.
         loss_budget = float(params.get("WINDOW_RISK_BUDGET_USD", params.get("MAX_WINDOW_LOSS_USD", 2.00)))
-        
-        # Initial Leg-1 bare risk sizing:
-        # In confirmed 'range_bound' regime, use recommended lots (up to 2 lots = 10 shares) to capture edge
-        # Otherwise standard 1 lot (5 shares)
+        fee_rate = params.get("TAKER_FEE_RATE", 0.07)
+
+        # Initial Leg-1 bare risk sizing: range_bound may recommend more than one
+        # lot (only if the config opts in), everything else is one lot.
         target_lots = regime_info.recommended_lots if regime_info.recommended_lots > 0 else min_lots
         entry_size = float(target_lots * lot_size)
-        if available_cap < (entry_size * 0.50):
+        # Capital gate: a 50% buffer is kept on top of the premium at risk so a
+        # hedge or unwind can still be paid for after the first leg is filled.
+        hedge_reserve = 0.50
+        if available_cap < (entry_size * hedge_reserve):
             entry_size = float(min_lots * lot_size)
-        if available_cap < (entry_size * 0.50):
+        if available_cap < (entry_size * hedge_reserve):
             return _wait(f"Insufficient capital (${available_cap:.2f}) for 1 lot")
-        
-        if can_quote_up and up_bid >= 0.02 and r_up >= up_bid and r_up >= 0.35:
-            quote_px = max(0.02, min(0.98, round(min(r_up, up_bid), 2)))
-            if book_up.best_ask is not None:
-                quote_px = min(quote_px, round(book_up.best_ask - 0.01, 2))
+
+        def _plan_entry(
+            side: Side,
+            can_quote: bool,
+            reservation: float,
+            book_side: OrderBook,
+            book_opp: OrderBook,
+            p_side: float,
+        ) -> Optional[Decision]:
+            """One Leg-1 maker quote; None means this side simply has no edge."""
+            if not can_quote or not book_side.bids:
+                return None
+            best_bid = book_side.best_bid
+            if best_bid is None or best_bid < 0.02:
+                return None
+            # We only join the bid if the reservation price is at least the bid and
+            # inside the safe corridor; otherwise there is nothing worth quoting.
+            if reservation < min_entry_px or reservation < best_bid:
+                return None
+            quote_px = max(0.02, min(0.98, round(min(reservation, best_bid), 2)))
+            if book_side.best_ask is not None:
+                quote_px = min(quote_px, round(book_side.best_ask - 0.01, 2))
             if quote_px < min_entry_px or quote_px > max_entry_px:
-                return _wait(f"Up quote ({quote_px:.2f}) outside safe entry zone [{min_entry_px:.2f}, {max_entry_px:.2f}]", urgent=True)
-            if quote_px < 0.02 or (book_up.best_ask is not None and quote_px >= book_up.best_ask):
-                return _wait(f"Up ask ({book_up.best_ask}) too tight for passive maker entry")
-            entry_size = risk_adjusted_entry_size(
-                entry_size, quote_px, book_down, lot_size, min_lots, max_lots,
-                loss_budget, params.get("TAKER_FEE_RATE", 0.07)
-            )
-            if entry_size <= 0:
                 return _wait(
-                    f"Up entry @ {quote_px:.2f} would breach ${loss_budget:.2f} worst-case window loss budget (no locked hedge)",
+                    f"{side} quote ({quote_px:.2f}) outside safe entry zone "
+                    f"[{min_entry_px:.2f}, {max_entry_px:.2f}]",
+                    urgent=True,
+                )
+            size = risk_adjusted_entry_size(
+                entry_size, quote_px, book_opp, lot_size, min_lots, max_lots, loss_budget, fee_rate
+            )
+            if size <= 0:
+                return _wait(
+                    f"{side} entry @ {quote_px:.2f} would breach ${loss_budget:.2f} "
+                    "worst-case window loss budget (no locked hedge)",
                     urgent=True,
                 )
             return Decision(
-                action="quote", side="Up", price=quote_px, size=entry_size,
-                utility=round(p_fair - quote_px, 4), reason=f"Enter Up maker @ {quote_px} (p_fair={p_fair:.2f}, {micro_regime}, {entry_size:.0f} shares)"
+                action="quote",
+                side=side,
+                price=quote_px,
+                size=size,
+                utility=round(p_side - quote_px, 4),
+                reason=(
+                    f"Enter {side} maker @ {quote_px} "
+                    f"(p_fair={p_side:.2f}, {micro_regime}, {size:.0f} shares)"
+                ),
             )
-        elif can_quote_down and down_bid >= 0.02 and r_down >= down_bid and r_down >= 0.35:
-            quote_px = max(0.02, min(0.98, round(min(r_down, down_bid), 2)))
-            if book_down.best_ask is not None:
-                quote_px = min(quote_px, round(book_down.best_ask - 0.01, 2))
-            if quote_px < min_entry_px or quote_px > max_entry_px:
-                return _wait(f"Down quote ({quote_px:.2f}) outside safe entry zone [{min_entry_px:.2f}, {max_entry_px:.2f}]", urgent=True)
-            if quote_px < 0.02 or (book_down.best_ask is not None and quote_px >= book_down.best_ask):
-                return _wait(f"Down ask ({book_down.best_ask}) too tight for passive maker entry")
-            entry_size = risk_adjusted_entry_size(
-                entry_size, quote_px, book_up, lot_size, min_lots, max_lots,
-                loss_budget, params.get("TAKER_FEE_RATE", 0.07)
-            )
-            if entry_size <= 0:
-                return _wait(
-                    f"Down entry @ {quote_px:.2f} would breach ${loss_budget:.2f} worst-case window loss budget (no locked hedge)",
-                    urgent=True,
-                )
-            return Decision(
-                action="quote", side="Down", price=quote_px, size=entry_size,
-                utility=round((1.0 - p_fair) - quote_px, 4), reason=f"Enter Down maker @ {quote_px} (p_fair={1.0-p_fair:.2f}, {micro_regime}, {entry_size:.0f} shares)"
-            )
-            
+
+        for side, can_quote_side, reservation, book_side, book_opp, p_side in (
+            ("Up", regime_info.can_quote_up, r_up, book_up, book_down, p_fair),
+            ("Down", regime_info.can_quote_down, r_down, book_down, book_up, 1.0 - p_fair),
+        ):
+            entry = _plan_entry(side, can_quote_side, reservation, book_side, book_opp, p_side)
+            if entry is not None:
+                return entry
+
         return _wait(f"No edge outside uncertainty band (+/-{epsilon:.2f}, {micro_regime})")
 
     # 3. Case: Unpaired Inventory (Holding excess Up or Down)
@@ -462,7 +475,7 @@ def plan_decision(
         p_fair_held=p_fair_held,
         book_held=b_held,
         book_opp=b_opp,
-        gamma=params["RISK_AVERSION_GAMMA"],
+        gamma=float(params.get("RISK_AVERSION_GAMMA", 0.15)),
         p_fill_maker=float(params.get("P_FILL_MAKER", 0.60)),
         fee_rate=params.get("TAKER_FEE_RATE", 0.07),
         max_pair_cost=float(params.get("MAX_PAIR_HEDGE_COST", 1.05)),

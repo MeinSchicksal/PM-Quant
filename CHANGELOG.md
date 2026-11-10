@@ -125,6 +125,44 @@ silently re-based; these are correctness fixes, not a new experiment.
   symbols they never use (notably Kelly and micro-regime helpers inside
   `plan_decision`, which made it look like Kelly sizing was wired in).
 
+### Consolidated (third audit pass)
+- **One probability chain (`core/estimator.py`)**: `estimate_p_fair()` is now
+  the single place that decides which reference price prices the market
+  (Polymarket TWAP vs strike -> Binance spot vs Binance open -> spot vs strike
+  -> 0.50). `runtime/runner.py`, `core/policy.py` and `core/regime.py` all call
+  it instead of re-implementing the precedence inline.
+- **One regime sample per tick**: `plan_decision()` accepts `regime_info`, so
+  the runner no longer classifies the market a second time inside the policy.
+  The dashboard now reports `_last_regime` / `_last_snr` -- the classification
+  that actually drove the decision -- instead of a separate display-only
+  classifier, which could contradict the trade log.
+- **Removed dead and duplicate code**: `estimate_queue_wait_time` (no callers)
+  and the 77-line `classify_market_micro_regime` (a second, subtly different
+  regime vocabulary used only by the dashboard) were deleted; the duplicated
+  `calculate_drift_snr` in `core/regime.py` now imports the canonical one.
+  `ALLOW_INCREASED_RANGE_SIZE` defaulted to `True` inside `regime.py` while the
+  config said `False`; the code default now matches the config.
+- **Single Leg-1 entry path (`core/policy.py`)**: the ~70 duplicated lines for
+  quoting Up and for quoting Down were merged into one `_plan_entry()` helper
+  that returns `None` when that side simply has no edge, so the pair is tried
+  in a loop and the fall-through reason is "no edge" instead of an urgent
+  cancel. The hard-coded `r_up >= 0.35` / `r_down >= 0.35` checks are gone
+  (they disagreed with `MIN_MAKER_ENTRY_PRICE = 0.38`), as is the unreachable
+  second maker/ask guard in the unpaired path.
+- **One late-window gate**: `TAIL_FREEZE_S` (60 s) is a strict subset of
+  `MIN_ENTRY_TAU_S` (180 s), so the ladder now has a single entry cut-off that
+  labels the reason "Tail freeze" or "Late window"; the toxic gate consults the
+  regime (which already detects the shock) instead of OR-ing the raw spot flag.
+- **Partial fills are exitable**: `u_sell` required `held_shares >= 5`, so a
+  depth-limited partial fill (e.g. 1.93 shares) could never be unwound and had
+  to be held to expiry. Any positive size with a live bid is now sellable.
+- **No second live schema (`main.py`)**: `reset` used to hand-write a 45-field
+  `live.json` copy next to the runner's writer; it now deletes the stale file
+  and lets `runtime/runner._write_live` be the only producer.
+- **Replay refreshed**: 27 of 77 recorded windows now trade for **-$1.629**
+  (mean -$0.0212, t=-0.73, 63 fills, worst -$2.0000); superseded report files
+  were removed so `data/3_reports/` holds one authoritative run.
+
 ### Documentation
 - `README.md`: corrected "live trading system" (there is no live order
   adapter yet), described matching honestly, fixed the duplicate "常用命令"
@@ -134,8 +172,8 @@ silently re-based; these are correctness fixes, not a new experiment.
   "+$30.391 improvement", "87% of losses from overpriced hedges") with the
   ledger truth: 170 traded windows, **-$31.7998**, mean -$0.1871 (t=-1.63);
   loss structure 49.5% hedged / 39.5% naked / 11% other; and the new replay
-  result over 77 fully recorded windows: 24 traded, **-$1.659**,
-  mean -$0.0215 (sd $0.2529, t=-0.75), 54 fills, worst window -$2.0000
+  result over 77 fully recorded windows: 27 traded, **-$1.629**,
+  mean -$0.0212 (sd $0.2529, t=-0.73), 63 fills, worst window -$2.0000
   (exactly the pre-trade window budget).
 - Noted that `calculate_kelly_order_size` is a reference implementation and is
   **not** wired into Leg-1 sizing (v1.1 sizing comes from

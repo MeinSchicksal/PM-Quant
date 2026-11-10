@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision
-from core.estimator import estimate_fair_prob
+from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher
@@ -172,7 +172,7 @@ class PaperRunner:
         trade_prints: list = None,
         poly_spot: float = None
     ):
-        """Execute one evaluation tick with circuit breaker, Kelly sizing, and live trade prints."""
+        """Execute one evaluation tick: probability, regime, risk gates, matching."""
         tau = max(0.0, self.window_end - now)
         open_px = getattr(self, "open_price", 0.0)
         vol_bps = getattr(spot, "realized_vol_bps", 15.0)
@@ -182,17 +182,13 @@ class PaperRunner:
 
         self.last_spot_price = spot.price
 
-        # Consistent probability estimation:
-        # If Polymarket official live TWAP is available, evaluate Poly spot vs Poly open strike.
-        # Otherwise evaluate Binance spot vs Binance open baseline.
-        if getattr(self, "last_poly_spot", None) and getattr(self, "last_poly_spot", 0) > 0 and open_px > 0:
-            p_fair = estimate_fair_prob(self.last_poly_spot, open_px, tau, vol_bps)
-        elif spot.price > 0 and getattr(self, "binance_open_price", 0) > 0:
-            p_fair = estimate_fair_prob(spot.price, self.binance_open_price, tau, vol_bps)
-        elif open_px > 0 and spot.price > 0:
-            p_fair = estimate_fair_prob(spot.price, open_px, tau, vol_bps)
-        else:
-            p_fair = 0.5
+        # Consistent probability estimation: single reference chain shared with
+        # plan_decision's fallback (Poly TWAP vs strike -> Binance vs Binance
+        # open -> spot vs strike).
+        p_fair = estimate_p_fair(
+            spot, open_px, tau, vol_bps,
+            poly_price=getattr(self, "last_poly_spot", None),
+        )
         self.last_prob_up = p_fair
 
         poly_up = getattr(book_up, "mid", None) or getattr(book_up, "best_bid", None) or getattr(book_up, "best_ask", None) or 0.5
@@ -256,6 +252,10 @@ class PaperRunner:
         self._last_regime_t = now
         self._last_regime = regime_info.regime
 
+        # Keep the last classification for attribution and for the dashboard;
+        # plan_decision receives it instead of re-classifying the same tick.
+        self._last_snr = regime_info.snr
+
         # 3. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
         available_cap = max(10.0, self._initial_capital + self.total_pnl)
@@ -273,7 +273,8 @@ class PaperRunner:
                 self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
                 circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
                 p_fair=p_fair,
-                entries_count=self.entries_count
+                entries_count=self.entries_count,
+                regime_info=regime_info
             )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,
@@ -530,15 +531,12 @@ class PaperRunner:
                 print(f"[Runner] Failed to reconcile window gz {slug}: {e}")
 
     def _write_live(self, now: float, spot: SpotState, book_up: OrderBook, book_down: OrderBook):
-        from core.estimator import classify_market_micro_regime
-        ref_spot = getattr(self, "last_poly_spot", None) or spot.price
-        ref_open = getattr(self, "open_price", 0.0) or getattr(self, "binance_open_price", spot.price)
-        micro_regime, snr, _ = classify_market_micro_regime(
-            ref_spot, ref_open, max(0.0, self.window_end - now), getattr(spot, "realized_vol_bps", 15.0),
-            is_toxic_shock=spot.is_toxic_shock,
-            trend_threshold=config.PARAMS.get("SNR_TREND_THRESHOLD", 1.8),
-            range_threshold=config.PARAMS.get("SNR_RANGE_THRESHOLD", 1.2)
-        )
+        # The dashboard used to run a second, slightly different regime
+        # classifier just for display, so the regime shown could disagree with
+        # the one that drove decisions.
+        # It now reports the classification that actually ran this tick.
+        micro_regime = getattr(self, "_last_regime", None) or getattr(spot, "regime", "normal")
+        snr = getattr(self, "_last_snr", 0.0)
         state = {
             "batch_id": config.BATCH_ID,
             "slug": self.current_slug,

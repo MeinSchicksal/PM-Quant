@@ -177,54 +177,12 @@ def cmd_reset(auto_stop: bool = True):
 
     (ledger / "windows").mkdir(parents=True, exist_ok=True)
 
-    # 4. Initialize clean initial live.json
-    now_t = time.time()
-    clean_live = {
-        "batch_id": config.BATCH_ID,
-        "slug": f"btc-updown-5m-{int(now_t // 300) * 300}",
-        "start": float(int(now_t // 300) * 300),
-        "end": float(int(now_t // 300) * 300 + 300),
-        "now": round(now_t, 2),
-        "tau_s": max(0.0, round(int(now_t // 300) * 300 + 300 - now_t, 1)),
-        "spot": 0.0,
-        "poly_spot": None,
-        "open_px": 0.0,
-        "binance_open_px": 0.0,
-        "return_bps": 0.0,
-        "poly_return_bps": 0.0,
-        "realized_vol_bps": 15.0,
-        "regime": "normal",
-        "micro_regime": "range_bound",
-        "snr": 0.0,
-        "circuit_breaker": {
-            "status": "NORMAL",
-            "active": False,
-            "reason": "",
-            "daily_pnl": 0.0,
-            "consecutive_losses": 0,
-            "cooling_rounds_left": 0,
-            "max_daily_drawdown_usd": config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.0),
-            "loss_streak_cooling": config.PARAMS.get("LOSS_STREAK_COOLING", 3)
-        },
-        "available_capital": float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0)),
-        "total_pnl": 0.0,
-        "prob_up": 0.5,
-        "prob_down": 0.5,
-        "poly_up": 0.5,
-        "poly_down": 0.5,
-        "price_history": [],
-        "book_up": {"best_bid": None, "best_ask": None},
-        "book_down": {"best_bid": None, "best_ask": None},
-        "working_orders": [],
-        "pos_up": {"shares": 0.0, "cash": 0.0, "avg_px": 0.0},
-        "pos_down": {"shares": 0.0, "cash": 0.0, "avg_px": 0.0},
-        "fills_count": 0,
-        "actions": [],
-        "insurance_paid": 0.0,
-        "network": {},
-        "last_decision": None
-    }
-    (ledger / "live.json").write_text(json.dumps(clean_live, indent=2, ensure_ascii=False), encoding="utf-8")
+    # 4. Remove stale live state instead of hand-writing a second copy of the
+    # live schema. runtime/runner._write_live is the only producer of
+    # live.json; duplicating its 45 fields here let the two drift apart.
+    live_file = ledger / "live.json"
+    if live_file.exists():
+        live_file.unlink()
 
     print(f"=== PM-Quant 数据与账本重置完成 ({config.VERSION}) ===")
     print(f"[*] 清理并重置了当前账本 {count_cleared} 个记录项。")

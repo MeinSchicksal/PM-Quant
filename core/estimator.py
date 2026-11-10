@@ -1,7 +1,7 @@
 """Mathematical Estimation & Microstructure Metrics.
 
 Handles continuous probability estimation, uncertainty envelope calculation,
-queue fill probability, and order flow toxicity detection.
+order flow toxicity detection and regime-shift statistics.
 """
 import math
 from typing import Tuple, List, Optional
@@ -38,6 +38,31 @@ def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: fl
     return max(0.01, min(0.99, round(prob, 4)))
 
 
+def estimate_p_fair(
+    spot,
+    open_px: float,
+    tau_s: float,
+    vol_bps: float,
+    poly_price: Optional[float] = None
+) -> float:
+    """Probability that Up settles above the window strike `open_px`.
+
+    Single source of truth for the reference chain. The runner and the policy
+    used to carry two slightly different chains (Poly TWAP vs Poly strike,
+    Binance spot vs Binance open, spot vs strike), which could disagree on the
+    same tick. `open_px` is always the window strike; `poly_price` is the live
+    Polymarket TWAP when available.
+    """
+    if poly_price and poly_price > 0 and open_px > 0:
+        return estimate_fair_prob(poly_price, open_px, tau_s, vol_bps)
+    bin_open = getattr(spot, "binance_open_price", None)
+    if bin_open and bin_open > 0 and getattr(spot, "price", 0.0) > 0:
+        return estimate_fair_prob(spot.price, bin_open, tau_s, vol_bps)
+    if open_px > 0 and getattr(spot, "price", 0.0) > 0:
+        return estimate_fair_prob(spot.price, open_px, tau_s, vol_bps)
+    return 0.50
+
+
 def estimate_uncertainty_envelope(
     vol_bps: float,
     latency_s: float = 0.30,
@@ -71,12 +96,6 @@ def estimate_uncertainty_envelope(
     epsilon = k_mult * (prob_uncertainty + basis_error)
     # Hard bounds: never quote inside 0.8 cents, never widen past 8 cents.
     return max(floor, min(cap, round(epsilon, 4)))
-
-
-def estimate_queue_wait_time(queue_ahead: float, trade_rate_per_sec: float) -> float:
-    """Estimate passive fill waiting time in seconds based on recent order flow velocity."""
-    rate = max(0.5, trade_rate_per_sec) # minimum 0.5 shares/sec baseline
-    return queue_ahead / rate
 
 
 def detect_toxicity_shock(
@@ -271,38 +290,3 @@ def calculate_drift_snr(
     sigma_horizon = max(0.5, vol_bps * math.sqrt(tau_norm))
     snr = round(abs(ret_bps) / sigma_horizon, 4)
     return snr, round(ret_bps, 2)
-
-
-def classify_market_micro_regime(
-    spot: Optional[float],
-    open_price: Optional[float],
-    tau_s: float,
-    vol_bps: float,
-    is_toxic_shock: bool = False,
-    trend_threshold: float = 1.8,
-    range_threshold: float = 1.2
-) -> Tuple[str, float, float]:
-    """Classify 5-minute market micro-regime based on drift SNR and volatility.
-    
-    Regimes:
-        - 'toxic': Rapid spot shock (>= 3.5 bps in 3s) or extreme volatility (> 35 bps).
-        - 'oscillating': SNR <= range_threshold (Noise dominated, optimal for maker MM).
-        - 'trending_up': SNR > trend_threshold and ret_bps > 0 (Upward momentum drift).
-        - 'trending_down': SNR > trend_threshold and ret_bps < 0 (Downward momentum drift).
-        - 'transitional': range_threshold < SNR <= trend_threshold (Moderate drift).
-        
-    Returns:
-        (regime_name, snr, ret_bps)
-    """
-    if is_toxic_shock or vol_bps > 35.0:
-        snr, ret_bps = calculate_drift_snr(spot, open_price, tau_s, vol_bps)
-        return "toxic", snr, ret_bps
-
-    snr, ret_bps = calculate_drift_snr(spot, open_price, tau_s, vol_bps)
-    if snr <= range_threshold:
-        return "oscillating", snr, ret_bps
-    elif snr > trend_threshold:
-        return ("trending_up" if ret_bps > 0 else "trending_down"), snr, ret_bps
-    else:
-        return "transitional", snr, ret_bps
-

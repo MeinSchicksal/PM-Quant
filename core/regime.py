@@ -23,7 +23,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 from .types import OrderBook
-from .estimator import estimate_fair_prob
+from .estimator import estimate_fair_prob, calculate_drift_snr
 
 
 @dataclass(frozen=True)
@@ -38,30 +38,6 @@ class MarketRegimeInfo:
     can_quote_down: bool
     recommended_lots: int
     reason: str
-
-
-def calculate_drift_snr(
-    spot: Optional[float],
-    open_price: Optional[float],
-    tau_s: float,
-    vol_bps: float
-) -> Tuple[float, float]:
-    """Calculate the statistical Signal-to-Noise Ratio (SNR) of directional drift.
-    
-    Formula:
-        SNR = |ret_bps| / (vol_bps * sqrt(tau_s / 300.0))
-        
-    Statistical meaning:
-        - SNR <= 1.0: Noise dominated (Mean-reverting / Oscillating).
-        - SNR > 1.8: Statistically significant drift (p < 0.05, Momentum trend).
-    """
-    if spot is None or open_price is None or open_price <= 0 or spot <= 0:
-        return 0.0, 0.0
-    ret_bps = ((spot - open_price) / open_price) * 10000.0
-    tau_norm = max(1.0, tau_s) / 300.0
-    sigma_horizon = max(0.5, vol_bps * math.sqrt(tau_norm))
-    snr = round(abs(ret_bps) / sigma_horizon, 4)
-    return snr, round(ret_bps, 2)
 
 
 def classify_market_regime(
@@ -176,7 +152,7 @@ def classify_market_regime(
         abs(ret_bps) <= max_range_disp and 
         vol_bps <= 25.0 and 
         min_fair_p <= p_fair <= max_fair_p):
-        allow_boost = bool(params.get("ALLOW_INCREASED_RANGE_SIZE", True))
+        allow_boost = bool(params.get("ALLOW_INCREASED_RANGE_SIZE", False))
         rec_lots = 2 if allow_boost else 1
         return MarketRegimeInfo(
             regime="range_bound", snr=snr, ret_bps=ret_bps, p_fair=p_fair,
