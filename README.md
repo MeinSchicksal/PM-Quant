@@ -3,6 +3,7 @@
 面向 **Polymarket BTC 5 分钟二元预测市场**的极简、真实、可证伪的量化实验与实盘交易系统。
 
 完整的系统设计、总体目标与四阶段演进规划请参见 **[PLAN.md](file:///D:/pm-quant/PLAN.md)**。
+交易哲学、历史亏损病根解剖与“三做三不做”军规请参见 **[docs/CORE_STRATEGY_PHILOSOPHY.md](file:///D:/pm-quant/docs/CORE_STRATEGY_PHILOSOPHY.md)**。
 
 ---
 

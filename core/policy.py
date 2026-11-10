@@ -62,7 +62,7 @@ def evaluate_unpaired_utility(
     Compares:
     1. U_hedge: Immediate Taker hedge on opposite side (zero variance, lock-in cost).
        - STRICT GUARD: Disqualified if pair_cost > max_pair_cost ($1.05) to prevent
-         catastrophic whipsaw where trader pays $1.50+ for a $1.00 payout.
+         catastrophic whipsaw where trader overpays for a $1.00 payout.
        - ARBITRAGE LOCK: If pair_cost <= 1.00, executes immediately to lock guaranteed non-negative return.
     2. U_sell: Immediate Taker sell of held side (zero variance, cut loss if >= 5 shares).
        Dominates when hedge is exorbitant.

@@ -261,6 +261,59 @@
 
     // Render Recent 5 Settled Rounds on Overview
     renderRecentTable(hist.records ? hist.records.slice(0, 5) : []);
+
+    // Render Market Regime Performance Attribution Matrix
+    renderRegimeAttribution(hist.regime_stats || {});
+  }
+
+  const REGIME_META = {
+    'range_bound': { name: '高确定性箱体震荡', desc: '信噪比 SNR ≤ 1.0, 偏离 ≤ 8 bps (核心价差捕获做市)', badge: 'ok' },
+    'normal_oscillation': { name: '常态微幅震荡', desc: '信噪比 SNR ≤ 1.2, 基线 1 手做市排队', badge: 'normal' },
+    'trending_up': { name: '单边上涨强动量', desc: '信噪比 SNR > 1.8 且偏上, 趋势防守 (禁止逆势买跌)', badge: 'freeze' },
+    'trending_down': { name: '单边下跌强动量', desc: '信噪比 SNR > 1.8 且偏下, 趋势防守 (禁止逆势买涨)', badge: 'freeze' },
+    'toxic': { name: '剧烈跳空毒流', desc: '波动率 > 35 bps 或秒级剧震, 主动收缩挂单避险', badge: 'warn' },
+    'wide_spread': { name: '宽价差流动性缺失', desc: '买卖价差 > 0.06, 摩擦成本过高保持观望', badge: 'freeze' },
+    'transitional': { name: '过渡状态观察', desc: '信噪比 1.2~1.8, 状态切换中观望', badge: 'normal' },
+    'tail_freeze': { name: '交割尾盘流动性冻结', desc: 'Tau < 180s 临近到期, 严禁新开单边仓位', badge: 'freeze' }
+  };
+
+  function renderRegimeAttribution(stats) {
+    const tbody = document.getElementById('regime-attribution-tbody');
+    if (!tbody) return;
+
+    if (!stats || Object.keys(stats).length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="action-empty">暂无归因数据</td></tr>';
+      return;
+    }
+
+    const keys = ['range_bound', 'normal_oscillation', 'trending_up', 'trending_down', 'toxic', 'wide_spread', 'transitional', 'tail_freeze'];
+    Object.keys(stats).forEach(k => {
+      if (!keys.includes(k)) keys.push(k);
+    });
+
+    const rows = keys.map(k => {
+      const s = stats[k] || { rounds: 0, traded: 0, wins: 0, losses: 0, flats: 0, net_pnl: 0.0 };
+      const meta = REGIME_META[k] || { name: k, desc: '实时微观统计', badge: 'normal' };
+      const decisive = s.wins + s.losses;
+      const winRate = decisive > 0 ? ((s.wins / decisive) * 100).toFixed(1) + '%' : (s.traded > 0 ? '0.0%' : '--');
+      const pnl = s.net_pnl || 0.0;
+      const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : '';
+      const pnlStr = (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2);
+
+      return `
+        <tr>
+          <td><strong class="time-cell-main">${meta.name}</strong></td>
+          <td><small style="color: #64748b;">${meta.desc}</small></td>
+          <td>${s.rounds} 场</td>
+          <td>${s.traded} 场</td>
+          <td>${s.wins} 胜 / ${s.losses} 负</td>
+          <td><strong>${winRate}</strong></td>
+          <td><strong class="${pnlCls}">${s.traded > 0 ? pnlStr : '--'}</strong></td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.innerHTML = rows;
   }
 
   function renderRecentTable(records) {

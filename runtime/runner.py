@@ -49,6 +49,8 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.total_pnl = 0.0
         self.price_history = []
+        self.regime_counts = {}
+        self._last_step_time = None
         self._load_ledger_history()
 
     def _load_ledger_history(self):
@@ -84,6 +86,8 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.entries_count = 0
         self.entry_order_ids = set()
+        self.regime_counts = {}
+        self._last_step_time = None
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
             {
@@ -196,7 +200,28 @@ class PaperRunner:
         if net_stats:
             self.net_stats = net_stats
 
-        # 1. Evaluate Circuit Breaker & Bankroll
+        # 1. Dead-Man Switch & Feed Staleness Protection
+        deadman_timeout = float(config.PARAMS.get("DEADMAN_TIMEOUT_S", 3.0))
+        feed_gap = (now - self._last_step_time) if self._last_step_time is not None else 0.0
+        is_deadman_active = (self._last_step_time is not None and feed_gap > deadman_timeout) or (spot.price <= 0)
+        self._last_step_time = now
+
+        if is_deadman_active and self.working_orders:
+            for o in self.working_orders:
+                o.cancel_at = now
+            self.working_orders.clear()
+
+        # 2. Dynamic Micro-Regime Tracking for Attribution
+        from core.regime import classify_market_regime
+        ref_spot = getattr(self, "last_poly_spot", None) or spot.price
+        ref_open = getattr(self, "open_price", 0.0) or getattr(self, "binance_open_price", spot.price)
+        regime_info = classify_market_regime(
+            ref_spot, ref_open, tau, vol_bps, book_up, book_down,
+            is_toxic_shock=spot.is_toxic_shock, params=config.PARAMS, p_fair=p_fair
+        )
+        self.regime_counts[regime_info.regime] = self.regime_counts.get(regime_info.regime, 0) + 1
+
+        # 3. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
         available_cap = max(10.0, 100.0 + self.total_pnl)
         eval_params = dict(
@@ -206,12 +231,15 @@ class PaperRunner:
             CIRCUIT_BREAKER_REASON=cb_reason
         )
 
-        decision = plan_decision(
-            self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
-            circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
-            p_fair=p_fair,
-            entries_count=self.entries_count
-        )
+        if is_deadman_active:
+            decision = Decision(action="wait", reason=f"Dead-man switch active: feed gap {feed_gap:.1f}s > {deadman_timeout:.1f}s")
+        else:
+            decision = plan_decision(
+                self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
+                circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
+                p_fair=p_fair,
+                entries_count=self.entries_count
+            )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,
             "price": decision.price, "size": decision.size, "reason": decision.reason
@@ -323,6 +351,8 @@ class PaperRunner:
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
         is_traded = len(self.fills) > 0 or total_cost > 1e-4
+
+        dominant_regime = max(self.regime_counts, key=self.regime_counts.get) if self.regime_counts else "normal_oscillation"
         
         record = {
             "slug": self.current_slug,
@@ -339,6 +369,7 @@ class PaperRunner:
             "insurance_paid": round(self.insurance_paid, 4),
             "fills_count": len(self.fills),
             "traded": is_traded,
+            "regime": dominant_regime,
             "batch_id": config.BATCH_ID
         }
         

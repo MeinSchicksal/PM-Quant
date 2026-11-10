@@ -310,6 +310,24 @@ class QuantHandler(BaseHTTPRequestHandler):
                     "start": _num(w.get("start"))
                 })
 
+            # Aggregate Regime Performance Attribution
+            regime_stats = {}
+            for w in records:
+                reg = w.get("regime") or "normal_oscillation"
+                if reg not in regime_stats:
+                    regime_stats[reg] = {"rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0, "net_pnl": 0.0}
+                regime_stats[reg]["rounds"] += 1
+                if w.get("traded") or _num(w.get("fills_count")) > 0 or abs(_num(w.get("net_pnl"))) > 1e-9:
+                    regime_stats[reg]["traded"] += 1
+                    p = _num(w.get("net_pnl"))
+                    regime_stats[reg]["net_pnl"] = round(regime_stats[reg]["net_pnl"] + p, 4)
+                    if p > 1e-9:
+                        regime_stats[reg]["wins"] += 1
+                    elif p < -1e-9:
+                        regime_stats[reg]["losses"] += 1
+                    else:
+                        regime_stats[reg]["flats"] += 1
+
             latest = list(reversed(records))[:50]
             rounds = [_public_round(w, _read_detail(ledger_dir, w.get("slug", ""))) for w in latest]
             active = _read_live() if target_batch == config.BATCH_ID else None
@@ -359,6 +377,7 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "equity_curve": equity_curve,
                 "records": list(reversed(records)),
                 "rounds": rounds,
+                "regime_stats": regime_stats,
             })
         else:
             rel_path = path.lstrip("/")

@@ -52,7 +52,8 @@ PARAMS = {
     "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive Leg-1 entry
     "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
     "MAX_FAIR_PROB_ENTRY": 0.58,      # Maximum fair probability for balanced Leg-1 entry (blocks skewed directional drift)
-    "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost (basis + hedge ask + fee) for Taker Hedge
+    "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost (basis + hedge ask + fee) for Taker Hedge (disqualifies catastrophic insurance > 1.05)
+    "DEADMAN_TIMEOUT_S": 3.0,          # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
 }
 
 # Derived Filesystem Paths

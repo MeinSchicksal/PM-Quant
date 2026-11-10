@@ -123,6 +123,30 @@ class TestMarketRegimeClassifier(unittest.TestCase):
             # Must STILL be 1, NOT 2!
             self.assertEqual(runner.entries_count, 1)
 
+    def test_deadman_switch_cancels_resting_orders_on_feed_gap(self):
+        """Invariant 26: Feed drop or staleness > DEADMAN_TIMEOUT_S triggers dead-man switch and cancels resting orders."""
+        from core.types import Order
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window("test-deadman", 1000.0, 1300.0, 75000.0)
+            
+            # Place a resting order
+            o = Order(id=101, client_order_id="pm_test", side="Up", price=0.49, size=5.0, remaining=5.0, placed_at=1005.0)
+            runner.working_orders.append(o)
+            runner._last_step_time = 1005.0
+            
+            # Step at 1010.0 (5.0s gap > DEADMAN_TIMEOUT_S of 3.0s)
+            spot = SpotState(timestamp=1010.0, price=75000.0, open_price=75000.0, realized_vol_bps=15.0)
+            b_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+            b_dn = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
+            
+            runner.step(1010.0, spot, b_up, b_dn)
+            
+            # Resting order must have been cancelled by the dead-man switch
+            self.assertEqual(len(runner.working_orders), 0)
+            self.assertEqual(o.cancel_at, 1010.0)
+            self.assertIn("Dead-man switch", runner.decisions[-1]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
