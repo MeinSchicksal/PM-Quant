@@ -68,7 +68,7 @@ def plan_order_actions(
     
     if decision.action == "wait":
         reason_lower = (decision.reason or "").lower()
-        # Urgent cancel conditions: toxic spot shock, tail freeze, or max lots reached
+        # Urgent cancel conditions: toxic spot shock, tail freeze, trend regime, or watchdog locks
         is_urgent_cancel = (
             "toxic" in reason_lower
             or "freeze" in reason_lower
@@ -76,6 +76,8 @@ def plan_order_actions(
             or "drawdown" in reason_lower
             or "cooling" in reason_lower
             or "circuit breaker" in reason_lower
+            or "trend" in reason_lower
+            or "safe entry" in reason_lower
         )
         
         for o in working_orders:

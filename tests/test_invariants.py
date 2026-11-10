@@ -408,6 +408,29 @@ class TestMathematicalInvariants(unittest.TestCase):
         # Taker hedge at 0.83 must be disqualified; should unwind position or hold, NOT buy hedge @ 0.83
         self.assertNotEqual(dec.action, "taker_hedge")
 
+    def test_urgent_cancel_on_trend_regime_and_safe_entry_boundary(self):
+        """Invariant 16: When wait decision is triggered by trend regime or safe entry bounds, resting quotes are cancelled immediately."""
+        from core.execution import plan_order_actions
+        from core.types import Order, Decision
+
+        working = [
+            Order(id=1, client_order_id="pm_1", side="Up", price=0.50, size=5.0, remaining=5.0, placed_at=100.0)
+        ]
+        # Order is only 2 seconds old (well below 15.0s max_queue_wait_s)
+        now = 102.0
+
+        # Case 1: Wait with trend in reason -> urgent cancel
+        dec_trend = Decision(action="wait", reason="No edge outside uncertainty band (+/-0.02, trending_down)")
+        to_cancel, action = plan_order_actions(working, dec_trend, now=now, max_queue_wait_s=15.0)
+        self.assertEqual(len(to_cancel), 1)
+        self.assertEqual(to_cancel[0].id, 1)
+
+        # Case 2: Wait with safe entry zone violation -> urgent cancel
+        dec_safe = Decision(action="wait", reason="Up quote (0.68) outside safe entry zone [0.38, 0.62]")
+        to_cancel_2, action_2 = plan_order_actions(working, dec_safe, now=now, max_queue_wait_s=15.0)
+        self.assertEqual(len(to_cancel_2), 1)
+        self.assertEqual(to_cancel_2[0].id, 1)
+
 
 if __name__ == "__main__":
     import json

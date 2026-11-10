@@ -103,7 +103,7 @@ def evaluate_unpaired_utility(
     
     # If immediate execution provides superior utility than holding with variance:
     if best_immediate > u_hold:
-        if u_hedge >= u_sell and hedge_ask is not None:
+        if u_hedge > -990.0 and u_hedge >= u_sell and hedge_ask is not None:
             return Decision(
                 action="taker_hedge",
                 side=opp_side,
