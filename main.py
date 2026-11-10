@@ -12,6 +12,7 @@ Usage:
   python main.py status    - 查看当前系统版本身份与核心经济学参数
 """
 import sys
+import json
 import shutil
 from pathlib import Path
 
@@ -125,20 +126,42 @@ def cmd_test():
     sys.exit(0 if result.wasSuccessful() else 1)
 
 
-def cmd_reset():
-    """Reset current version experiment ledger to clean starting state."""
+def cmd_reset(auto_stop: bool = True):
+    """Reset current version experiment ledger to clean starting state with automatic backup."""
+    import time
     from runtime.pipeline import is_pid_running, PID_FILE
+
+    # 1. Stop running pipeline if active
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text(encoding="utf-8").strip())
             if is_pid_running(pid):
-                print(f"[Reset] Cannot reset while pipeline (PID {pid}) is running! Stop it first.")
-                return
+                if auto_stop:
+                    print(f"[*] 检测到交易管道正在运行 (PID: {pid})，正在平稳停止以执行数据重置...")
+                    cmd_stop()
+                    time.sleep(1.0)
+                else:
+                    print(f"[Reset] Cannot reset while pipeline (PID {pid}) is running! Stop it first.")
+                    return
         except Exception:
             pass
 
     ledger = config.CURRENT_LEDGER_DIR
+    if not ledger.exists():
+        ledger.mkdir(parents=True, exist_ok=True)
+
+    # 2. Automatically backup existing ledger to archive directory
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    backup_dir = config.LEDGERS_DIR / f"{config.VERSION}_archive_{ts}"
     count_cleared = 0
+    try:
+        if ledger.exists() and any(ledger.iterdir()):
+            shutil.copytree(ledger, backup_dir, dirs_exist_ok=True)
+            print(f"[*] 历史数据已自动完整归档至: {backup_dir.name}")
+    except Exception as e:
+        print(f"[!] 备份历史数据提醒: {e}")
+
+    # 3. Clean files in current ledger
     if ledger.exists():
         for item in list(ledger.iterdir()):
             if item.name in ("manifest.json", "code_snapshot.zip"):
@@ -152,9 +175,59 @@ def cmd_reset():
                     count_cleared += 1
 
     (ledger / "windows").mkdir(parents=True, exist_ok=True)
-    print(f"=== PM-Quant Experiment Reset ({config.VERSION}) ===")
-    print(f"Cleaned {count_cleared} ledger item(s) under: {ledger}")
-    print("Ledger is now in pristine state: Starting Capital $100.00, 0 trades, 0 loss streak.")
+
+    # 4. Initialize clean initial live.json
+    now_t = time.time()
+    clean_live = {
+        "batch_id": config.BATCH_ID,
+        "slug": f"btc-updown-5m-{int(now_t // 300) * 300}",
+        "start": float(int(now_t // 300) * 300),
+        "end": float(int(now_t // 300) * 300 + 300),
+        "now": round(now_t, 2),
+        "tau_s": max(0.0, round(int(now_t // 300) * 300 + 300 - now_t, 1)),
+        "spot": 0.0,
+        "poly_spot": None,
+        "open_px": 0.0,
+        "binance_open_px": 0.0,
+        "return_bps": 0.0,
+        "poly_return_bps": 0.0,
+        "realized_vol_bps": 15.0,
+        "regime": "normal",
+        "micro_regime": "range_bound",
+        "snr": 0.0,
+        "circuit_breaker": {
+            "status": "NORMAL",
+            "active": False,
+            "reason": "",
+            "daily_pnl": 0.0,
+            "consecutive_losses": 0,
+            "cooling_rounds_left": 0,
+            "max_daily_drawdown_usd": config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.0),
+            "loss_streak_cooling": config.PARAMS.get("LOSS_STREAK_COOLING", 3)
+        },
+        "available_capital": 100.0,
+        "total_pnl": 0.0,
+        "prob_up": 0.5,
+        "prob_down": 0.5,
+        "poly_up": 0.5,
+        "poly_down": 0.5,
+        "price_history": [],
+        "book_up": {"best_bid": None, "best_ask": None},
+        "book_down": {"best_bid": None, "best_ask": None},
+        "working_orders": [],
+        "pos_up": {"shares": 0.0, "cash": 0.0, "avg_px": 0.0},
+        "pos_down": {"shares": 0.0, "cash": 0.0, "avg_px": 0.0},
+        "fills_count": 0,
+        "actions": [],
+        "insurance_paid": 0.0,
+        "network": {},
+        "last_decision": None
+    }
+    (ledger / "live.json").write_text(json.dumps(clean_live, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"=== PM-Quant 数据与账本重置完成 ({config.VERSION}) ===")
+    print(f"[*] 清理并重置了当前账本 {count_cleared} 个记录项。")
+    print("[*] 账本初始状态已就绪: 可用本金 $100.00，风控状态 NORMAL，连亏归零。")
 
 
 def cmd_replay():
