@@ -81,6 +81,9 @@ def plan_order_actions(
             or "late window" in reason_lower
             or "max entries" in reason_lower
             or "balanced entry" in reason_lower
+            or "wide spread" in reason_lower
+            or "skewed" in reason_lower
+            or "transitional" in reason_lower
         )
         
         for o in working_orders:

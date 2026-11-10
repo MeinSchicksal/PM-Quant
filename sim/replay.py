@@ -20,20 +20,18 @@ def list_recorded_windows() -> List[Path]:
     """Return recorded raw market window files from ledgers or market books."""
     windows: List[Path] = []
     
-    # 1. Primary: Current ledger compressed session archives
-    ledger_windows = config.CURRENT_LEDGER_DIR / "windows"
-    if ledger_windows.exists():
-        windows.extend(sorted(ledger_windows.glob("*.json.gz")))
+    # 1. Primary: Current ledger and all archive windows
+    if config.LEDGERS_DIR.exists():
+        for gz in sorted(config.LEDGERS_DIR.rglob("*.json.gz")):
+            if gz not in windows:
+                windows.append(gz)
 
-    # 2. Archived ledgers
-    if not windows and config.LEDGERS_DIR.exists():
-        for arc in sorted(config.LEDGERS_DIR.glob("*_archive_*/windows")):
-            windows.extend(sorted(arc.glob("*.json.gz")))
-
-    # 3. Raw market books
+    # 2. Raw market books
     books_dir = config.MARKET_DIR / "books"
     if books_dir.exists():
-        windows.extend(sorted(books_dir.rglob("*.jsonl*")))
+        for b in sorted(books_dir.rglob("*.jsonl*")):
+            if b not in windows:
+                windows.append(b)
 
     return windows
 

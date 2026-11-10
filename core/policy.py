@@ -53,17 +53,23 @@ def evaluate_unpaired_utility(
     gamma: float = 0.15,
     p_fill_maker: float = 0.60,
     fee_rate: float = 0.07,
-    max_pair_cost: float = 1.05
+    max_pair_cost: float = 1.05,
+    tau_s: float = 200.0,
+    regime_name: str = "normal_oscillation"
 ) -> Decision:
     """Evaluate 3-way utility arbitration when holding an unhedged inventory.
     
     Compares:
     1. U_hedge: Immediate Taker hedge on opposite side (zero variance, lock-in cost).
-       STRICT GUARD: Disqualified if pair_cost > max_pair_cost ($1.05) to prevent
-       catastrophic whipsaw where trader pays $1.50+ for a $1.00 payout.
+       - STRICT GUARD: Disqualified if pair_cost > max_pair_cost ($1.05) to prevent
+         catastrophic whipsaw where trader pays $1.50+ for a $1.00 payout.
+       - ARBITRAGE LOCK: If pair_cost <= 1.00, executes immediately to lock guaranteed non-negative return.
     2. U_sell: Immediate Taker sell of held side (zero variance, cut loss if >= 5 shares).
        Dominates when hedge is exorbitant.
-    3. U_hold: Passive quoting on Maker / waiting to settle (penalized by inventory variance).
+    3. U_hold: Passive quoting on Maker / waiting to settle.
+       - Under normal oscillation / range-bound market without adverse drift, works Leg-2 Maker quote
+         at top-of-book to capture spread at 0 fee.
+       - Emergency exit (taker hedge or unwind) triggers if adverse drift > 5 ticks, regime adverse, or tau < 90s.
     """
     opp_side: Side = "Down" if held_side == "Up" else "Up"
     var = p_fair_held * (1.0 - p_fair_held)
@@ -76,6 +82,16 @@ def evaluate_unpaired_utility(
         # Payoff is 1.00 per paired set. Disqualify if pair_cost exceeds hard insurance ceiling
         if pair_cost <= max_pair_cost:
             u_hedge = held_shares * (1.00 - pair_cost)
+            # Immediate risk-free arbitrage lock (pair_cost <= 1.00)
+            if pair_cost <= 1.00:
+                return Decision(
+                    action="taker_hedge",
+                    side=opp_side,
+                    price=hedge_ask,
+                    size=held_shares,
+                    utility=round(u_hedge, 4),
+                    reason=f"U_hedge({u_hedge:.2f}) arbitrage (pair_cost={pair_cost:.3f} <= 1.00), take hedge @ {hedge_ask}"
+                )
         
     # Path 2: Immediate Taker Unwind / Sell of Held Side (only valid if >= 5 shares)
     u_sell = -999.0
@@ -84,8 +100,6 @@ def evaluate_unpaired_utility(
         u_sell = held_shares * (held_bid - taker_fee_per_share(held_bid, fee_rate) - held_basis_price)
         
     # Path 3: Passive Quoting / Holding to Expiration
-    # EV of holding = shares * (p_fair - cost)
-    # Variance penalty = gamma * shares * Var
     ev_holding = held_shares * (p_fair_held - held_basis_price)
     variance_penalty = gamma * (held_shares ** 1.2) * var
     u_hold = ev_holding - variance_penalty
@@ -98,11 +112,17 @@ def evaluate_unpaired_utility(
             u_hold += p_fill_maker * maker_gain
 
     # === ARBITRATION DECISION ===
-    # Best immediate guaranteed exit (hedge vs sell)
+    # Check if position is in distress (adverse price drift, adverse regime, or late window)
+    adverse_drift = (held_basis_price - p_fair_held) > 0.05
+    regime_adverse = (held_side == "Down" and regime_name in ("trending_up", "toxic")) or \
+                     (held_side == "Up" and regime_name in ("trending_down", "toxic"))
+    late_window = (tau_s < 90.0)
+    in_distress = adverse_drift or regime_adverse or late_window
+
     best_immediate = max(u_hedge, u_sell)
     
-    # If immediate execution provides superior utility than holding with variance:
-    if best_immediate > u_hold:
+    # If in distress and immediate exit provides utility:
+    if in_distress and best_immediate > -900.0:
         if u_hedge > -990.0 and u_hedge >= u_sell and hedge_ask is not None:
             return Decision(
                 action="taker_hedge",
@@ -122,8 +142,28 @@ def evaluate_unpaired_utility(
                 reason=f"U_sell({u_sell:.2f}) > U_hold({u_hold:.2f}), unwind position @ {held_bid}"
             )
 
-    # Otherwise, maintain optimal Maker quote on the deficit side
-    # Reservation price determines optimal bid
+    # Legacy variance arbitration fallback if in distress or adverse drift:
+    if best_immediate > u_hold and (adverse_drift or in_distress):
+        if u_hedge > -990.0 and u_hedge >= u_sell and hedge_ask is not None:
+            return Decision(
+                action="taker_hedge",
+                side=opp_side,
+                price=hedge_ask,
+                size=held_shares,
+                utility=round(u_hedge, 4),
+                reason=f"U_hedge({u_hedge:.2f}) > U_hold({u_hold:.2f}), take hedge @ {hedge_ask}"
+            )
+        elif u_sell > -990.0 and held_bid is not None:
+            return Decision(
+                action="taker_unwind",
+                side=held_side,
+                price=held_bid,
+                size=held_shares,
+                utility=round(u_sell, 4),
+                reason=f"U_sell({u_sell:.2f}) > U_hold({u_hold:.2f}), unwind position @ {held_bid}"
+            )
+
+    # Otherwise, maintain optimal Maker quote on the deficit side to complete round trip
     r_maker_price = round(min(0.98, max(0.02, 1.00 - held_basis_price)), 2)
     if opp_bid is not None and opp_bid >= 0.02:
         r_maker_price = min(r_maker_price, opp_bid)
@@ -203,19 +243,25 @@ def plan_decision(
         adaptive_k
     )
 
-    # 1b. Dynamic Market Micro-Regime Classification (Statistical Drift SNR)
+    # 1b. Dynamic Market Micro-Regime Classification (Multi-Dimensional Statistical Metrics)
+    from .regime import classify_market_regime
     ref_spot = getattr(spot, "poly_price", None) or spot.price
     ref_open = getattr(spot, "open_price", 0.0)
     if not (getattr(spot, "poly_price", None) and spot.poly_price > 0):
-        ref_open = getattr(spot, "binance_open_price", spot.open_price)
-    trend_threshold = float(params.get("SNR_TREND_THRESHOLD", 1.8))
-    range_threshold = float(params.get("SNR_RANGE_THRESHOLD", 1.2))
-    micro_regime, snr, ret_bps = classify_market_micro_regime(
+        ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
+    if not ref_open or ref_open <= 0:
+        ref_open = getattr(spot, "open_price", 0.0) or 0.0
+
+    regime_info = classify_market_regime(
         ref_spot, ref_open, tau_s, spot.realized_vol_bps,
+        book_up, book_down,
         is_toxic_shock=spot.is_toxic_shock,
-        trend_threshold=trend_threshold,
-        range_threshold=range_threshold
+        params=params,
+        p_fair=p_fair
     )
+    micro_regime = regime_info.regime
+    snr = regime_info.snr
+    ret_bps = regime_info.ret_bps
     
     # 2. Case: Balanced or Flat Inventory (|net_gap| < 1e-4)
     if abs(net_gap) < 1e-4:
@@ -252,6 +298,13 @@ def plan_decision(
         if u_shares >= max_shares - 1e-4:
             return Decision(action="wait", reason=f"Max position reached ({u_shares:.0f} shares), holding to settlement")
             
+        # Check permissions from regime classification:
+        if not regime_info.can_quote_up and not regime_info.can_quote_down:
+            return Decision(action="wait", reason=regime_info.reason)
+
+        can_quote_up = regime_info.can_quote_up
+        can_quote_down = regime_info.can_quote_down
+
         # Reservation bids for both sides using adaptive edge
         r_up, r_down = calculate_reservation_bids(
             p_fair, epsilon, adaptive_edge, q=0.0, gamma=params["RISK_AVERSION_GAMMA"]
@@ -265,24 +318,14 @@ def plan_decision(
         down_bid = book_down.best_bid or 0.0
         max_entry_px = float(params.get("MAX_MAKER_ENTRY_PRICE", 0.62))
         min_entry_px = float(params.get("MIN_MAKER_ENTRY_PRICE", 0.38))
-        min_fair_p = float(params.get("MIN_FAIR_PROB_ENTRY", 0.42))
-        max_fair_p = float(params.get("MAX_FAIR_PROB_ENTRY", 0.58))
         
-        # Dual-Regime Quoting Rules:
-        # - If trending_down: strictly forbid quoting Up (prevents catching falling knives)
-        # - If trending_up: strictly forbid quoting Down (prevents standing in front of surges)
-        # - Maker entry quotes must stay within [min_entry_px, max_entry_px] to prevent buying at the top
-        # - Fair probability must stay within balanced odds [min_fair_p, max_fair_p] (prevents entering skewed drift)
-        can_quote_up = (micro_regime != "trending_down") and (min_fair_p <= p_fair <= max_fair_p)
-        can_quote_down = (micro_regime != "trending_up") and (min_fair_p <= (1.0 - p_fair) <= max_fair_p)
-        
-        # Check fair probability bounds for clear diagnostic reason if outside balanced band
-        if p_fair > max_fair_p or p_fair < min_fair_p:
-            return Decision(action="wait", reason=f"p_fair ({p_fair:.2f}) outside balanced entry zone [{min_fair_p:.2f}, {max_fair_p:.2f}]")
-
-        # Initial Leg-1 bare risk is strictly capped at baseline 1 lot (5 shares)
-        # Prevents full 15-share exposure before opposite leg is confirmed
-        entry_size = float(min_lots * lot_size)
+        # Initial Leg-1 bare risk sizing:
+        # In confirmed 'range_bound' regime, use recommended lots (up to 2 lots = 10 shares) to capture edge
+        # Otherwise standard 1 lot (5 shares)
+        target_lots = regime_info.recommended_lots if regime_info.recommended_lots > 0 else min_lots
+        entry_size = float(target_lots * lot_size)
+        if available_cap < (entry_size * 0.50):
+            entry_size = float(min_lots * lot_size)
         if available_cap < (entry_size * 0.50):
             return Decision(action="wait", reason=f"Insufficient capital (${available_cap:.2f}) for 1 lot")
         
@@ -331,5 +374,7 @@ def plan_decision(
         book_opp=b_opp,
         gamma=params["RISK_AVERSION_GAMMA"],
         fee_rate=params.get("TAKER_FEE_RATE", 0.07),
-        max_pair_cost=float(params.get("MAX_PAIR_HEDGE_COST", 1.05))
+        max_pair_cost=float(params.get("MAX_PAIR_HEDGE_COST", 1.05)),
+        tau_s=tau_s,
+        regime_name=micro_regime
     )

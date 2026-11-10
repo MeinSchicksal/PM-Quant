@@ -8,6 +8,7 @@ import json
 import time
 import gzip
 from pathlib import Path
+from typing import Optional, Set
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -82,6 +83,7 @@ class PaperRunner:
         self.actions = []
         self.insurance_paid = 0.0
         self.entries_count = 0
+        self.entry_order_ids = set()
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
             {
@@ -116,10 +118,13 @@ class PaperRunner:
                 if pt.get("poly_price"):
                     pt["poly_return_bps"] = round(((pt["poly_price"] - poly_open) / poly_open) * 10000.0, 2)
 
-    def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str):
+    def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str, order_id: Optional[int] = None):
         """Record one executed fill and its investor-readable action event."""
         if purpose == "entry":
-            self.entries_count += 1
+            if order_id is None or order_id not in self.entry_order_ids:
+                if order_id is not None:
+                    self.entry_order_ids.add(order_id)
+                self.entries_count += 1
         fill = {
             "t": round(now, 2), "side": side, "price": price,
             "size": size, "kind": kind, "purpose": purpose
@@ -281,7 +286,7 @@ class PaperRunner:
                         else:
                             self.pos_down.shares += fill_sz
                             self.pos_down.cash += (fill_sz * o.price)
-                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose)
+                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
 
         remaining_working = []
         for o in self.working_orders:
@@ -296,7 +301,7 @@ class PaperRunner:
                 else:
                     self.pos_down.shares += fill_sz
                     self.pos_down.cash += (fill_sz * o.price)
-                self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose)
+                self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
 
             if o.remaining > 1e-6:
                 remaining_working.append(o)

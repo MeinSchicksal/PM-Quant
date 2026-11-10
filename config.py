@@ -43,7 +43,11 @@ PARAMS = {
 
     # 5. Dual-Regime & Adverse Selection Boundaries
     "SNR_TREND_THRESHOLD": 1.8,       # Signal-to-Noise Ratio threshold to classify momentum trend (p < 0.05)
-    "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify mean-reverting oscillating regime (noise band)
+    "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify normal oscillation regime
+    "SNR_RANGE_CONFIDENT": 1.0,       # High-confidence mean-reverting range threshold
+    "MAX_RANGE_DISPLACEMENT_BPS": 8.0,# Max displacement from strike to qualify for range-bound regime
+    "MAX_ORDERBOOK_SPREAD": 0.06,     # Max book spread (0.06 = 6 cents) before declaring wide-spread regime
+    "ALLOW_INCREASED_RANGE_SIZE": False, # Keep initial Leg-1 entry strictly 1 lot (5 shares) for minimal bare risk
     "MAX_MAKER_ENTRY_PRICE": 0.62,    # Maximum price allowed for passive Leg-1 entry (avoids buying the top)
     "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive Leg-1 entry
     "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
