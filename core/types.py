@@ -95,3 +95,8 @@ class Decision:
     utility: Optional[float] = None
     reason: str = ""
     timestamp: float = 0.0
+    # Structural cancel signal. A 'wait' decision with urgent_cancel=True must
+    # pull all resting quotes immediately (toxic shock, tail freeze, regime
+    # lockout, risk envelope breach). This replaces substring-matching on
+    # `reason`, which silently broke whenever a message was reworded.
+    urgent_cancel: bool = False

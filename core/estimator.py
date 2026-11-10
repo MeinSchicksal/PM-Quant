@@ -40,27 +40,38 @@ def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: fl
 
 
 def estimate_uncertainty_envelope(
-    vol_bps: float, 
-    latency_s: float = 0.30, 
+    vol_bps: float,
+    latency_s: float = 0.30,
     k_mult: float = 1.2,
-    basis_error: float = 0.008
+    basis_error: float = 0.004,
+    tau_s: float = 300.0,
+    floor: float = 0.008,
+    cap: float = 0.08,
 ) -> float:
-    """Calculate the uncertainty band epsilon_t representing estimation error and latency risk.
-    
+    """Calculate the uncertainty band epsilon_t in probability units.
+
     Epsilon incorporates:
-    1. Information latency (300ms wire delay during which spot moves).
-    2. Oracle basis error between Binance Spot and Chainlink TWAP.
-    
-    The trading system only quotes when market price deviates from p_fair by > epsilon + edge.
+    1. Price diffusion over the remaining horizon tau (bps -> probability via
+       the normal density near 0.50, max pdf ~0.40).
+    2. Extra diffusion during the wire latency window.
+    3. Residual oracle basis error between Binance spot and Chainlink TWAP.
+
+    Dimensional note: sigma is a return dispersion (vol_bps / 10000), so
+    dp ~= 0.40 * sigma. The band must therefore scale with tau: earlier
+    versions multiplied a return by 100 and effectively collapsed to the
+    clamp floor, making the "adaptive" envelope a constant.
     """
-    # 300ms spot dispersion
-    dispersion_lat = (vol_bps / 10000.0) * math.sqrt(latency_s / 300.0)
-    # Probability sensitivity near 0.50 (normal pdf max is ~0.4)
-    prob_uncertainty = 0.40 * dispersion_lat * 100.0 # converted to probability units
-    
+    vol_ret = max(0.0, vol_bps) / 10000.0
+    tau = max(0.0, tau_s)
+    sigma_tau = vol_ret * math.sqrt(tau / 300.0)
+    sigma_latency = vol_ret * (
+        math.sqrt((tau + max(0.0, latency_s)) / 300.0) - math.sqrt(tau / 300.0)
+    )
+    prob_uncertainty = 0.40 * (sigma_tau + sigma_latency)
+
     epsilon = k_mult * (prob_uncertainty + basis_error)
-    # Reasonable mathematical bounds: between 1.5 cents and 8 cents
-    return max(0.015, min(0.08, round(epsilon, 4)))
+    # Hard bounds: never quote inside 0.8 cents, never widen past 8 cents.
+    return max(floor, min(cap, round(epsilon, 4)))
 
 
 def estimate_queue_wait_time(queue_ahead: float, trade_rate_per_sec: float) -> float:
@@ -193,6 +204,11 @@ def calculate_kelly_order_size(
     kelly_fraction: float = 0.25
 ) -> float:
     """Calculate fractional Kelly order size in discrete exchange lots.
+
+    NOTE: reference implementation, not wired into v1.x Leg-1 sizing. Current
+    sizing is `regime.recommended_lots` bounded by the pre-trade loss budget in
+    `policy.risk_adjusted_entry_size`; wiring Kelly requires a calibrated
+    p_win, which the system does not yet have (see docs/CORE_STRATEGY_PHILOSOPHY.md).
     
     Args:
         available_capital: Current available balance (USD).

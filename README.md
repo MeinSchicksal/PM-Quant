@@ -1,6 +1,6 @@
 # PM-Quant (`v1.1`)
 
-面向 **Polymarket BTC 5 分钟二元预测市场**的极简、真实、可证伪的量化实验与实盘交易系统。
+面向 **Polymarket BTC 5 分钟二元预测市场**的极简、可证伪的**纸面/仿真（Paper）量化研究系统**。当前版本**没有实盘下单适配器**，不会向交易所提交任何真实订单；所有盈亏均为录制行情上的仿真结果。
 
 完整的系统设计、总体目标与四阶段演进规划请参见 **[PLAN.md](file:///D:/pm-quant/PLAN.md)**。
 交易哲学、历史亏损病根解剖与“三做三不做”军规请参见 **[docs/CORE_STRATEGY_PHILOSOPHY.md](file:///D:/pm-quant/docs/CORE_STRATEGY_PHILOSOPHY.md)**。
@@ -9,8 +9,8 @@
 
 ## 1. 核心设计原则
 
-1. **真实性优先**：拒绝用合成假行情或脱离排队深度的“触价即成交”自欺欺人。撮合与纸面验证严格基于 Polymarket 真实 WebSocket 逐笔成交流（`trades`）、300ms 物理延迟、FIFO 物理排队深度消耗以及 Chainlink TWAP / Gamma 官方结算真值。
-2. **单一事件驱动内核**：回放（Replay）、纸面（Paper）、实盘（Live）共用同一套无副作用的核心决策与执行状态机（`core/`），仅替换底层执行适配器。
+1. **真实性优先**：拒绝用合成假行情或脱离排队深度的“触价即成交”自欺欺人。撮合严格基于 Polymarket 官方 WebSocket 逐笔成交流（`trades`）：只有真实打印价格扫到我们的挂单价才消耗 FIFO 队列并成交，没有成交流时**不**凭空推进队列；进攻腿按盘口逐档吃深度并计算 VWAP 与手续费，不会按买一价无限量成交。结算优先使用 Chainlink TWAP / Gamma 官方真值。
+2. **单一事件驱动内核**：回放（Replay）与纸面（Paper）共用同一套无副作用的核心决策与执行状态机（`core/`）；实盘（Live）适配器尚未实现，接入前不会产生真实下单。
 3. **语义化版本与账本隔离**：采用 `v1.0`、`v1.1`、`v2.0` 专业语义化版本管理。每个版本对应独立账本 `data/2_ledgers/<VERSION>/`，绝不混写或污染历史成绩。
 4. **资方极简看板**：看板仅呈现核心财务结果（累计净收益、胜率、单场均利）与每一轮 5 分钟机器人的具体动作流水（挂单、对冲、成交均价、结算输赢与落袋盈亏）。
 
@@ -31,8 +31,8 @@ D:\pm-quant/
 │   ├── policy.py             # Avellaneda-Stoikov 库存保留定价与三方效用实时仲裁
 │   └── execution.py          # 离散量子化与报价滞回防抖（Hysteresis）
 ├── sim/                      # 真实微观结构模拟与历史回放
-│   ├── matcher.py            # 300ms 延迟 + FIFO 队列逐笔成交真实消耗撮合器
-│   └── replay.py             # 基于 data/1_market/ 真实录制流的历史回放器
+│   ├── matcher.py            # 300ms 延迟 + FIFO 队列消耗 + 逐档深度/VWAP 撮合器
+│   └── replay.py             # 事件驱动回放：重放录制的盘口/成交并重新调用真实决策内核
 ├── runtime/                  # 实时数据流、纸面执行与进程封存
 │   ├── trade_stream.py       # Polymarket 官方 WebSocket 逐笔成交流（RTDS）
 │   ├── market_feed.py        # 现货/预言机/盘口流与 Chainlink TWAP 结算核验
@@ -42,7 +42,7 @@ D:\pm-quant/
 ├── web/                      # 资方极简看板（零第三方重型依赖）
 │   ├── server.py             # 原生 HTTP 服务与净收益/动作流水 API
 │   └── static/               # 前端页面（index.html, style.css, app.js）
-├── tests/                    # 数学不变量与 v1.1 特性单元测试（25 项用例）
+├── tests/                    # 数学不变量、撮合、风控与回放单元测试（52 项用例）
 └── data/                     # 四层冷热分离数据目录
     ├── 1_market/             # 只读原始市场录制资产（events, oracle, settlements）
     ├── 2_ledgers/            # 按版本隔离的运行账本（如 v1.1/）
@@ -81,13 +81,14 @@ D:\pm-quant/
 # 查看当前版本状态与核心参数
 python main.py status
 
-# 运行全部数学不变量与 v1.1 单元测试（25 项用例）
+# 运行全部单元测试（52 项用例）
 python main.py test
 
-# 回放 data/1_market/ 中录制的真实历史行情
+# 事件驱动回放：读取 data/1_market/ 录制的盘口/成交/预言机数据，
+# 逐 tick 重新调用真实决策与撮合，结果写入 data/3_reports/replay_*.jsonl
 python main.py replay
 
-# 启动实时运行流水线
+# 启动实时运行流水线（纸面，不会提交真实订单）
 python main.py run
 
 # 启动资方极简监控看板（默认端口 8900）
@@ -97,26 +98,5 @@ python main.py web 8900
 python main.py seal
 ```
 
----
+> 回放只覆盖具备完整录制数据的窗口；报告同时给出“同窗口账本实际盈亏”作为对照，二者差异来自旧账本撮合缺陷，而不是回放被手工调参。
 
-## 4. 常用命令
-
-```bash
-# 查看当前版本状态与核心参数
-python main.py status
-
-# 运行全部数学不变量与看板单元测试
-python main.py test
-
-# 回放 data/1_market/ 中录制的真实历史行情
-python main.py replay
-
-# 启动实时运行流水线
-python main.py run
-
-# 启动资方极简监控看板（默认端口 8900）
-python main.py web 8900
-
-# 封存当前版本代码快照与参数清单
-python main.py seal
-```

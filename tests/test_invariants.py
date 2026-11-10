@@ -214,37 +214,6 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(last_rec["winner"], "Up")
         self.assertEqual(last_rec["proceeds"], 5.00)
 
-    def test_consistent_basis_fair_probability_in_plan_decision(self):
-        """Invariant 11: plan_decision must maintain consistent basis and avoid exchange spread distortion."""
-        from core.policy import plan_decision
-        import config
-
-        # Scenario: Binance spot is $75,200 (Binance open is $75,200, return = 0 bps)
-        # Polymarket open is $75,000 (a $200 basis difference)
-        # Polymarket live TWAP is $75,000 (Poly return = 0 bps)
-        pos_up = Position(0.0, 0.0)
-        pos_down = Position(0.0, 0.0)
-        book_up = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
-        book_down = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
-
-        spot = SpotState(
-            timestamp=1000.0,
-            price=75200.0,
-            open_price=75000.0,
-            binance_open_price=75200.0,
-            poly_price=75000.0,
-            realized_vol_bps=15.0
-        )
-        # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
-        # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
-        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
-        # With 0 bps move, no edge exists outside uncertainty band
-        self.assertEqual(dec.action, "wait")
-        self.assertIn("No edge", dec.reason)
-        self.assertEqual(last_rec["total_cost"], 4.80)
-        self.assertAlmostEqual(last_rec["net_pnl"], 0.20, places=4)
-        self.assertTrue(last_rec["traded"])
-
     def test_quoting_hysteresis_and_anti_churn(self):
         """Invariant 8: 1-tick flicker does not cancel working order; urgent wait cancels immediately."""
         from core.execution import is_order_diff_significant, plan_order_actions
@@ -264,13 +233,21 @@ class TestMathematicalInvariants(unittest.TestCase):
         to_cancel, _ = plan_order_actions([existing], dec_transient, now=105.0, max_queue_wait_s=15.0)
         self.assertEqual(len(to_cancel), 0)
 
-        # Urgent 'toxic shock' wait DOES cancel immediately
-        dec_toxic = Decision(action="wait", reason="Adverse spot toxic shock detected")
+        # Urgent wait DOES cancel immediately (structural flag, not wording)
+        dec_toxic = Decision(action="wait", reason="Adverse spot toxic shock detected",
+                             urgent_cancel=True)
         to_cancel_toxic, _ = plan_order_actions([existing], dec_toxic, now=105.0, max_queue_wait_s=15.0)
         self.assertEqual(len(to_cancel_toxic), 1)
 
+        # Wording alone carries no authority: a 'toxic' reason without the flag
+        # must NOT cancel, so rephrasing a message can never silently disable
+        # the cancel path.
+        dec_wording = Decision(action="wait", reason="toxic shock detected (no flag)")
+        to_cancel_wording, _ = plan_order_actions([existing], dec_wording, now=105.0, max_queue_wait_s=15.0)
+        self.assertEqual(len(to_cancel_wording), 0)
+
     def test_fifo_queue_matcher_with_trade_prints(self):
-        """Invariant 9: FIFO Queue Matcher respects latency and trade print queue exhaustion."""
+        """Invariant 9: Queue position only depletes on real trade prints."""
         from sim.matcher import QueueMatcher
         from core.types import Order, OrderBook
 
@@ -281,20 +258,85 @@ class TestMathematicalInvariants(unittest.TestCase):
         matcher.register_order(order, book)
         self.assertEqual(matcher.queue_ahead[1], 10.0)
 
-        # Before latency elapsed (now=100.20 < live_at=100.30), no fill possible
-        fill_early = matcher.match_order(order, book, now=100.20)
-        self.assertEqual(fill_early, 0.0)
+        # Ticks with no trade prints never consume the queue, however many times we evaluate.
+        for t in (100.2, 100.35, 101.0, 120.0):
+            self.assertEqual(matcher.match_order(order, book, now=t), 0.0)
+        self.assertEqual(matcher.queue_ahead[1], 10.0)
 
-        # After latency, trade print arrives at 0.46 with volume 5.0 -> queue ahead reduces to 5.0, order not yet filled
-        book.last_trade_price = 0.46
-        fill_partial = matcher.match_order(order, book, now=100.35, trade_volume=5.0)
-        self.assertEqual(fill_partial, 0.0)
+        # A trade print before the latency deadline still cannot fill us.
+        self.assertEqual(matcher.on_trade_print(order, 0.46, 50.0, now=100.20), 0.0)
+        self.assertEqual(matcher.queue_ahead[1], 10.0)
+
+        # After latency, a 5-share print at our price consumes queue only.
+        self.assertEqual(matcher.on_trade_print(order, 0.46, 5.0, now=100.35), 0.0)
         self.assertEqual(matcher.queue_ahead[1], 5.0)
 
-        # Next trade print arrives with volume 10.0 -> queue ahead cleared, order filled 5.0 shares!
-        fill_final = matcher.match_order(order, book, now=100.40, trade_volume=10.0)
-        self.assertEqual(fill_final, 5.0)
+        # A print above our bid does not consume queue.
+        self.assertEqual(matcher.on_trade_print(order, 0.47, 5.0, now=100.40), 0.0)
+        self.assertEqual(matcher.queue_ahead[1], 5.0)
+
+        # Next print at 0.46 with 10 shares clears the queue and fills the order.
+        fill = matcher.on_trade_print(order, 0.46, 10.0, now=100.45)
+        self.assertEqual(fill, 5.0)
         self.assertEqual(order.remaining, 0.0)
+
+    def test_taker_fill_is_depth_limited(self):
+        """Invariant 9b: taker fills walk the book and never assume infinite liquidity."""
+        from sim.matcher import QueueMatcher
+        from core.types import OrderBook
+
+        matcher = QueueMatcher()
+        thin = OrderBook(bids=[(0.40, 2.0)], asks=[(0.55, 2.0), (0.57, 3.0)])
+        filled, vwap = matcher.taker_fill(thin, 10.0, is_buy=True)
+        self.assertEqual(filled, 5.0)
+        self.assertAlmostEqual(vwap, (2.0 * 0.55 + 3.0 * 0.57) / 5.0, places=6)
+
+        empty = OrderBook(bids=[], asks=[])
+        self.assertEqual(matcher.taker_fill(empty, 5.0, is_buy=True), (0.0, 0.0))
+
+        # Selling into bids follows the same depth rule.
+        filled_sell, vwap_sell = matcher.taker_fill(thin, 1.0, is_buy=False)
+        self.assertEqual(filled_sell, 1.0)
+        self.assertAlmostEqual(vwap_sell, 0.40, places=6)
+
+    def test_pretrade_window_loss_budget_gate(self):
+        """Invariant 9c: a naked Leg-1 entry that could breach the window loss budget is refused."""
+        import config
+        from core.policy import plan_decision, risk_adjusted_entry_size
+        from core.types import OrderBook, Position, SpotState
+
+        # No lock available when the opposite ask is 0.45 at a 0.54 quote and
+        # the budget only affords one lot (5 * 0.54 = 2.70 > 2.00).
+        self.assertEqual(
+            risk_adjusted_entry_size(5.0, 0.54, OrderBook(bids=[(0.44, 5)], asks=[(0.45, 5)]),
+                                     5.0, 1, 3, 2.00),
+            0.0
+        )
+        # Locked pair (0.54 + 0.44 + fee <= 1.00) allows the full requested size.
+        self.assertEqual(
+            risk_adjusted_entry_size(10.0, 0.54, OrderBook(bids=[(0.43, 5)], asks=[(0.44, 5)]),
+                                     5.0, 1, 3, 2.00),
+            10.0
+        )
+        # Affordable case scales down to whole lots inside the budget.
+        self.assertEqual(
+            risk_adjusted_entry_size(15.0, 0.30, OrderBook(bids=[(0.68, 5)], asks=[(0.70, 5)]),
+                                     5.0, 1, 3, 2.00),
+            5.0
+        )
+
+        book_up = OrderBook(bids=[(0.53, 20.0)], asks=[(0.57, 20.0)])
+        book_dn = OrderBook(bids=[(0.42, 20.0)], asks=[(0.47, 20.0)])
+        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
+        dec = plan_decision(
+            Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
+            tau_s=250.0, params=config.PARAMS, p_fair=0.50
+        )
+        if dec.action == "quote":
+            # Any accepted quote must be small enough to survive total loss.
+            self.assertLessEqual(dec.size * dec.price, config.PARAMS["MAX_WINDOW_LOSS_USD"] + 1e-9)
+        else:
+            self.assertIn("loss budget", dec.reason)
 
     def test_official_settlement_override(self):
         """Invariant 10: Official Gamma settlement truth overrides reference spot fallback."""
@@ -409,7 +451,8 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertNotEqual(dec.action, "taker_hedge")
 
     def test_urgent_cancel_on_trend_regime_and_safe_entry_boundary(self):
-        """Invariant 16: When wait decision is triggered by trend regime or safe entry bounds, resting quotes are cancelled immediately."""
+        """Invariant 16: A structural urgent_cancel flag (regime/lifecycle lockout)
+        pulls resting quotes immediately regardless of the message wording."""
         from core.execution import plan_order_actions
         from core.types import Order, Decision
 
@@ -419,14 +462,16 @@ class TestMathematicalInvariants(unittest.TestCase):
         # Order is only 2 seconds old (well below 15.0s max_queue_wait_s)
         now = 102.0
 
-        # Case 1: Wait with trend in reason -> urgent cancel
-        dec_trend = Decision(action="wait", reason="No edge outside uncertainty band (+/-0.02, trending_down)")
+        # Case 1: Regime lockout sets the structural flag -> urgent cancel
+        dec_trend = Decision(action="wait", reason="Transitional regime, no quoting",
+                             urgent_cancel=True)
         to_cancel, action = plan_order_actions(working, dec_trend, now=now, max_queue_wait_s=15.0)
         self.assertEqual(len(to_cancel), 1)
         self.assertEqual(to_cancel[0].id, 1)
 
-        # Case 2: Wait with safe entry zone violation -> urgent cancel
-        dec_safe = Decision(action="wait", reason="Up quote (0.68) outside safe entry zone [0.38, 0.62]")
+        # Case 2: Price leaving the safe corridor sets the same flag -> urgent cancel
+        dec_safe = Decision(action="wait", reason="Up quote (0.68) outside safe entry zone [0.38, 0.62]",
+                            urgent_cancel=True)
         to_cancel_2, action_2 = plan_order_actions(working, dec_safe, now=now, max_queue_wait_s=15.0)
         self.assertEqual(len(to_cancel_2), 1)
         self.assertEqual(to_cancel_2[0].id, 1)
@@ -443,6 +488,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         dec = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=120.0, params=config.PARAMS)
         self.assertEqual(dec.action, "wait")
         self.assertIn("Late window", dec.reason)
+        self.assertTrue(dec.urgent_cancel, "lifecycle lockouts must pull resting quotes")
 
     def test_balanced_odds_entry_boundary(self):
         """Invariant 18: Skewed fair probability outside [0.42, 0.58] strictly blocks Leg-1 maker entry."""

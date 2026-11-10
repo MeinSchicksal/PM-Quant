@@ -50,6 +50,10 @@ class PaperRunner:
         self.total_pnl = 0.0
         self.price_history = []
         self.regime_counts = {}
+        self.regime_dwell = {}
+        self._last_regime = None
+        self._last_regime_t = None
+        self.entry_regime = None
         self._last_step_time = None
         self._load_ledger_history()
 
@@ -66,6 +70,16 @@ class PaperRunner:
             self.total_pnl = sum(float(r.get("net_pnl", 0.0)) for r in records if r.get("traded"))
         except Exception:
             pass
+
+    def _rebuild_accounting(self):
+        """Rebuild total PnL and circuit-breaker state from the summary journal."""
+        self.total_pnl = 0.0
+        self.circuit_breaker = CircuitBreaker(
+            max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
+            loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3))
+        )
+        self._load_ledger_history()
 
     def start_window(self, slug: str, start_t: float, end_t: float, open_px: float, binance_open_px: float = None, poly_spot: float = None):
         """Initialize fresh 5-minute session."""
@@ -87,6 +101,10 @@ class PaperRunner:
         self.entries_count = 0
         self.entry_order_ids = set()
         self.regime_counts = {}
+        self.regime_dwell = {}
+        self._last_regime = None
+        self._last_regime_t = None
+        self.entry_regime = None
         self._last_step_time = None
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
@@ -128,6 +146,10 @@ class PaperRunner:
             if order_id is None or order_id not in self.entry_order_ids:
                 if order_id is not None:
                     self.entry_order_ids.add(order_id)
+                # Attribute the round to the regime that actually allowed the
+                # first entry, not to whichever regime spent the most ticks.
+                if self.entries_count == 0 and self.entry_regime is None:
+                    self.entry_regime = self._last_regime
                 self.entries_count += 1
         fill = {
             "t": round(now, 2), "side": side, "price": price,
@@ -221,6 +243,15 @@ class PaperRunner:
         )
         self.regime_counts[regime_info.regime] = self.regime_counts.get(regime_info.regime, 0) + 1
 
+        # Time-weighted dwell keeps attribution independent of tick cadence
+        # (book updates accelerate near the close and would otherwise make
+        # tail_freeze dominate every window).
+        if self._last_regime_t is not None and self._last_regime is not None:
+            dt = max(0.0, now - self._last_regime_t)
+            self.regime_dwell[self._last_regime] = self.regime_dwell.get(self._last_regime, 0.0) + dt
+        self._last_regime_t = now
+        self._last_regime = regime_info.regime
+
         # 3. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
         available_cap = max(10.0, 100.0 + self.total_pnl)
@@ -251,30 +282,48 @@ class PaperRunner:
             if o in self.working_orders:
                 self.working_orders.remove(o)
             
-        # 1. Taker execution simulation
+        # 1. Taker execution simulation (depth-aware, never infinite liquidity)
         if action and action.action in ("taker_hedge", "taker_unwind"):
-            sz = action.size or 0.0
-            px = action.price or 0.0
-            fee = round(sz * taker_fee_per_share(px, config.PARAMS["TAKER_FEE_RATE"]), 4)
-            if action.action == "taker_hedge":
-                if action.side == "Down":
-                    self.pos_down.shares += sz
-                    self.pos_down.cash += (sz * px + fee)
+            want = float(action.size or 0.0)
+            is_buy = action.action == "taker_hedge"
+            target_book = book_down if action.side == "Down" else book_up
+            filled, vwap = self.matcher.taker_fill(target_book, want, is_buy=is_buy)
+            if filled > 1e-6:
+                px = round(vwap, 6)
+                fee = round(filled * taker_fee_per_share(px, config.PARAMS["TAKER_FEE_RATE"]), 4)
+                if is_buy:
+                    if action.side == "Down":
+                        self.pos_down.shares += filled
+                        self.pos_down.cash += (filled * px + fee)
+                    else:
+                        self.pos_up.shares += filled
+                        self.pos_up.cash += (filled * px + fee)
+                    pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
+                    if pair_cost > 1.00:
+                        self.insurance_paid += (pair_cost - 1.00) * filled
                 else:
-                    self.pos_up.shares += sz
-                    self.pos_up.cash += (sz * px + fee)
-                pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
-                if pair_cost > 1.00:
-                    self.insurance_paid += (pair_cost - 1.00) * sz
-            elif action.action == "taker_unwind":
-                if action.side == "Up":
-                    self.pos_up.shares -= sz
-                    self.pos_up.cash -= (sz * px - fee)
-                else:
-                    self.pos_down.shares -= sz
-                    self.pos_down.cash -= (sz * px - fee)
-            purpose = "unwind" if action.action == "taker_unwind" else "hedge"
-            self._record_fill(now, action.side, px, sz, "taker", purpose)
+                    if action.side == "Up":
+                        self.pos_up.shares -= filled
+                        self.pos_up.cash -= (filled * px - fee)
+                    else:
+                        self.pos_down.shares -= filled
+                        self.pos_down.cash -= (filled * px - fee)
+                purpose = "unwind" if action.action == "taker_unwind" else "hedge"
+                self._record_fill(now, action.side, px, filled, "taker", purpose)
+                if filled + 1e-6 < want:
+                    self.actions.append({
+                        "t": round(now, 2), "action": "taker_partial", "side": action.side,
+                        "requested": round(want, 4), "filled": round(filled, 4),
+                        "reason": "insufficient visible book depth"
+                    })
+            else:
+                # No executable liquidity: the order is rejected rather than
+                # filled at a fictional best price.
+                self.actions.append({
+                    "t": round(now, 2), "action": "taker_reject", "side": action.side,
+                    "requested": round(want, 4),
+                    "reason": "empty/one-sided book, no visible liquidity"
+                })
 
         # 2. Maker quote placement
         elif action and action.action == "quote":
@@ -299,14 +348,17 @@ class PaperRunner:
                 "price": action.price, "size": action.size, "purpose": purpose
             })
 
-        # 3. Queue Matcher: live trade prints deduction + crossed book evaluation
+        # 3. Queue Matcher: only real trade prints deplete queue, then crossed books
         if trade_prints:
             for tp in trade_prints:
-                tp_side = tp.get("outcome") # "Up" or "Down"
+                tp_side = tp.get("outcome")  # "Up" or "Down"
+                tp_t = float(tp.get("received_at") or tp.get("timestamp") or now)
                 for o in self.working_orders:
                     if tp_side and o.side != tp_side:
                         continue
-                    fill_sz = self.matcher.on_trade_print(o, tp["price"], tp["size"], now)
+                    fill_sz = self.matcher.on_trade_print(
+                        o, float(tp["price"]), float(tp["size"]), tp_t
+                    )
                     if fill_sz > 0:
                         if o.side == "Up":
                             self.pos_up.shares += fill_sz
@@ -319,9 +371,7 @@ class PaperRunner:
         remaining_working = []
         for o in self.working_orders:
             target_book = book_up if o.side == "Up" else book_down
-            # If trade prints were applied, match_order only checks crossed books (trade_volume=0)
-            vol = 0.0 if trade_prints else 5.0
-            fill_sz = self.matcher.match_order(o, target_book, now, trade_volume=vol)
+            fill_sz = self.matcher.match_order(o, target_book, now)
             if fill_sz > 0:
                 if o.side == "Up":
                     self.pos_up.shares += fill_sz
@@ -352,7 +402,15 @@ class PaperRunner:
         net_pnl = round(proceeds - total_cost, 4)
         is_traded = len(self.fills) > 0 or total_cost > 1e-4
 
-        dominant_regime = max(self.regime_counts, key=self.regime_counts.get) if self.regime_counts else "normal_oscillation"
+        # Attribution: the regime that permitted the first entry describes the
+        # traded setup; otherwise fall back to the time-weighted dominant regime.
+        if self.entry_regime:
+            dominant_regime = self.entry_regime
+        else:
+            if self._last_regime is not None and self._last_regime_t is not None:
+                dt = max(0.0, self.window_end - self._last_regime_t)
+                self.regime_dwell[self._last_regime] = self.regime_dwell.get(self._last_regime, 0.0) + dt
+            dominant_regime = max(self.regime_dwell, key=self.regime_dwell.get) if self.regime_dwell else "normal_oscillation"
         
         record = {
             "slug": self.current_slug,
@@ -397,7 +455,6 @@ class PaperRunner:
             return
         lines = self.summary_file.read_text(encoding="utf-8").splitlines()
         updated = []
-        pnl_delta = 0.0
         for line in lines:
             if not line.strip():
                 continue
@@ -412,18 +469,17 @@ class PaperRunner:
                     total_cost = float(r.get("total_cost", 0.0))
                     proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
                     new_pnl = round(proceeds - total_cost, 4)
-                    old_pnl = float(r.get("net_pnl", 0.0))
                     r["proceeds"] = round(proceeds, 4)
                     r["net_pnl"] = new_pnl
                     r["result"] = "win" if new_pnl > 1e-4 else ("loss" if new_pnl < -1e-4 else "flat")
-                    if r.get("traded"):
-                        pnl_delta = new_pnl - old_pnl
                 updated.append(json.dumps(r, ensure_ascii=False))
             except Exception:
                 updated.append(line)
         self.summary_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
-        if abs(pnl_delta) > 1e-6:
-            self.total_pnl += pnl_delta
+        # Summary is the single accounting source of truth: rebuild the running
+        # total and circuit-breaker state from the rewritten file instead of
+        # applying a fragile in-memory delta.
+        self._rebuild_accounting()
 
         # Also reconcile compressed detailed window archive
         gz_path = self.windows_dir / f"{slug}.json.gz"

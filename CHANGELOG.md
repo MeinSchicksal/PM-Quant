@@ -5,6 +5,79 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 
 ---
 
+## [v1.1.1] - 2026-11-10 (Audit remediation, paper-only)
+
+Patch-level release: `config.VERSION` stays `v1.1` so the running ledger is not
+silently re-based; these are correctness fixes, not a new experiment.
+
+### Fixed
+- **Replay engine rewritten (`sim/replay.py`)**: the previous "replay" only read
+  settled archives and rewrote PnL with hard-coded rules (blocked rounds -> 0,
+  `unwind` recomputation, `insurance > 0.75` clamp). It never read book events,
+  never called `plan_decision`, and never matched an order. The new engine
+  replays every recorded book snapshot and trade print, reconstructs
+  `SpotState` from the recorded oracle, re-runs the real policy and matcher
+  (latency, queue position, depth, fees), and settles against the ledger's
+  official winner. It writes `data/3_reports/replay_*.jsonl`.
+  The documented "+$30.391 net improvement" was an artifact of that rewriting
+  and has been retracted.
+- **Matching fidelity (`sim/matcher.py`, `runtime/runner.py`)**: removed the
+  synthetic `trade_volume=5.0` queue drain and the stale `last_trade_price`
+  match — a resting maker order now only fills when a recorded print actually
+  trades at or through its price, after the FIFO queue ahead is consumed and
+  after the 300 ms latency. Taker execution now walks the book level by level
+  and books VWAP (`taker_fill` / `walk_levels`); an empty or thin book yields a
+  partial fill or a `taker_reject` instead of an infinite-depth fill at the
+  best ask.
+- **Pre-trade risk envelope (`core/policy.py`)**: `risk_adjusted_entry_size`
+  now caps every new Leg-1 at `MAX_WINDOW_LOSS_USD` ($2.00) before the order is
+  placed. Previously the parameter was only a stress-test statistic; a naked
+  15-share entry at $0.60 could lose $9.88 in one window. When the opposite ask
+  makes an immediate taker hedge lock a pair below $1.00, the position is
+  risk-free at entry and the hard lot cap applies instead.
+- **Structural cancel signal (`core/types.py`, `core/execution.py`,
+  `core/policy.py`)**: added `Decision.urgent_cancel`. Urgency is now declared
+  by the policy (toxic shock, tail freeze, regime lockout, lifecycle caps,
+  risk-budget breach) instead of being inferred from substrings of
+  `decision.reason`; rewording a message can no longer silently disable or
+  trigger a cancel. Soft waits ("no edge", "insufficient capital") keep resting
+  quotes and their queue position.
+- **Uncertainty envelope dimensional bug (`core/estimator.py`)**: the old
+  formula multiplied a per-second dispersion by 100 without dividing by
+  $\sigma_\tau$, so $\epsilon$ was pinned to its 0.015 floor for every regime.
+  It now scales with $\sigma_\tau = \sigma \sqrt{\tau/300}$ plus the
+  latency-induced increment, and adapts inside $[0.008, 0.08]$.
+- **Regime attribution (`runtime/runner.py`)**: attribution used the tick-count
+  mode, which is structurally biased to `tail_freeze` (the last 60 s is always
+  ~20% of ticks). It now records the regime that permitted the first entry
+  (`entry_regime`), falling back to time-weighted dwell (`regime_dwell`).
+- **Reconciliation (`runtime/runner.py`)**: after rewriting a reconciled
+  record, `_rebuild_accounting()` reloads the ledger and rebuilds
+  `total_pnl` and the circuit breaker, so `daily_pnl` and cooling state no
+  longer drift from the persisted summary.
+- **Tests**: added an end-to-end replay test (synthetic recording -> exact
+  locked-pair PnL), depth-limited taker tests, the pre-trade loss-budget gate
+  test, and the `urgent_cancel` contract; removed a dead duplicate test that
+  referenced an undefined name. Suite is now 52 tests, all passing.
+
+### Documentation
+- `README.md`: corrected "live trading system" (there is no live order
+  adapter yet), described matching honestly, fixed the duplicate "常用命令"
+  section and the stale test count, documented the replay command.
+- `docs/CORE_STRATEGY_PHILOSOPHY.md`: replaced the fabricated performance table
+  (`avg_win +$0.830`, `avg_loss -$0.589`, ratio 1.41, 212 rounds +$14.754,
+  "+$30.391 improvement", "87% of losses from overpriced hedges") with the
+  ledger truth: 170 traded windows, **-$31.7998**, mean -$0.1871 (t=-1.63);
+  loss structure 49.5% hedged / 39.5% naked / 11% other; and the new replay
+  result over 77 fully recorded windows: 24 traded, **-$1.785**,
+  mean -$0.0232 (t=-1.02), worst window -$1.2946.
+- Noted that `calculate_kelly_order_size` is a reference implementation and is
+  **not** wired into Leg-1 sizing (v1.1 sizing comes from
+  `regime.recommended_lots`); the earlier claim of "Fractional Kelly dynamic
+  sizing" overstated the implementation.
+
+---
+
 ## [v1.1] - 2026-11-09
 
 ### Added & Upgraded
@@ -25,6 +98,7 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 - **Fractional Kelly Dynamic Position Sizing (`core/estimator.py`, `core/policy.py`)**:
   - Implemented Quarter-Kelly ($0.25 f^*$) allocation model scaling discrete order sizes across {5.0, 10.0, 15.0} shares (1 to 3 lots) based on available account capital and model win probability edge.
   - Preserved strict paired inventory conservation by dynamically sizing Leg-2 hedges to match held lots.
+  - *Correction (see v1.1.1)*: this model is a reference implementation only; v1.1 Leg-1 sizing is driven by `regime.recommended_lots`.
 - **Dual-Track Real-Time Interactive Canvas & Multi-Source Oracle Display (`web/`, `runtime/runner.py`)**:
   - Replaced text decision box with a high-DPI HTML5 Canvas rendering dual synchronous tracks:
     - *Track 1 (Price & Benchmark)*: Overlays Binance real-time BTC spot price with Polymarket official Chainlink BTC/USD TWAP curve against the $S_0$ baseline, featuring dynamic vertical anti-collision tag pills and a real-time Basis spread indicator.

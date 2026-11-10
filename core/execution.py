@@ -67,24 +67,10 @@ def plan_order_actions(
     to_cancel: List[Order] = []
     
     if decision.action == "wait":
-        reason_lower = (decision.reason or "").lower()
-        # Urgent cancel conditions: toxic spot shock, tail freeze, trend regime, or watchdog locks
-        is_urgent_cancel = (
-            "toxic" in reason_lower
-            or "freeze" in reason_lower
-            or "max position" in reason_lower
-            or "drawdown" in reason_lower
-            or "cooling" in reason_lower
-            or "circuit breaker" in reason_lower
-            or "trend" in reason_lower
-            or "safe entry" in reason_lower
-            or "late window" in reason_lower
-            or "max entries" in reason_lower
-            or "balanced entry" in reason_lower
-            or "wide spread" in reason_lower
-            or "skewed" in reason_lower
-            or "transitional" in reason_lower
-        )
+        # Structural cancel signal comes from the policy, not from the wording
+        # of `reason`. Policy sets urgent_cancel=True for toxic shocks, tail
+        # freeze, regime lockouts, lifecycle caps and risk-budget breaches.
+        is_urgent_cancel = bool(getattr(decision, "urgent_cancel", False))
         
         for o in working_orders:
             if o.cancel_at is None and o.remaining > 1e-6:
