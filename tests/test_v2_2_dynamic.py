@@ -104,6 +104,24 @@ class TestV22DynamicFeatures(unittest.TestCase):
         self.assertEqual(len(to_cancel), 1)
         self.assertIn("排队超时撤单", to_cancel[0].cancel_reason)
 
+    def test_post_large_move_prioritizes_higher_priced_side(self):
+        """Invariant 6: After large move (prev_move >= 40), be alert to momentum stall; buy higher-priced side (<= 0.65)."""
+        pos = Position(0.0, 0.0)
+        # Previous round moved $80.0. Market prices Down at 0.60, Up at 0.40.
+        post_shock_params = dict(self.params, PREV_ROUND_ABS_MOVE=80.0, POST_SHOCK_MIN_MOVE=40.0)
+        book_up = OrderBook(bids=[(0.38, 20.0)], asks=[(0.40, 20.0)])
+        book_dn = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)])
+        spot = SpotState(timestamp=1100.0, price=75010.0, open_price=75000.0)
+
+        # In mid-window (tau = 180s):
+        # Even though Up is cheap at 0.40 (<= 0.45), policy MUST NOT buy the underdog.
+        # It must prioritize the higher-priced market favored side: Down @ 0.60!
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=180.0, params=post_shock_params, p_fair=0.45)
+        self.assertEqual(dec.action, "taker_buy")
+        self.assertEqual(dec.side, "Down", "Must buy the higher-priced side (Down @ 0.60), not the cheap underdog (Up @ 0.40)!")
+        self.assertAlmostEqual(dec.price, 0.60)
+        self.assertIn("Post-Shock Consensus", dec.reason)
+
     def test_dynamic_price_re_quote_on_market_movement(self):
         """Invariant 5: When market price changes by >= 2 ticks, plan_order_actions re-quotes at new price."""
         now = 1005.0

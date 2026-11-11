@@ -396,7 +396,66 @@ def plan_decision_lwaa(
     p_down = 1.0 - p_fair
 
     if mwde_enabled and mwde_min_tau < tau_s <= mwde_max_tau:
-        # 顺势低吸侧选择: 同步看当前距离开盘价的涨跌大小，结合胜率优先选边
+        # 大涨/大跌警惕机制:
+        # 用户原则: "大涨/跌之后要警惕，可能不会继续涨/跌，可以先买价格高的一侧"
+        prev_move = float(params.get("PREV_ROUND_ABS_MOVE", 0.0))
+        post_shock_min_move = float(params.get("POST_SHOCK_MIN_MOVE", 40.0))
+        max_entry_px = float(params.get("LWAA_MAX_ENTRY_PRICE", 0.65))
+        hard_chase_ceiling = float(params.get("LWAA_HARD_CHASE_CEILING", 0.70))
+
+        if prev_move >= post_shock_min_move:
+            # 识别盘口高价侧 (胜率更高、市场共识侧)
+            up_ask = book_up.best_ask or 0.50
+            dn_ask = book_down.best_ask or 0.50
+            up_bid = book_up.best_bid or 0.50
+            dn_bid = book_down.best_bid or 0.50
+            up_ref = (up_ask + up_bid) / 2.0
+            dn_ref = (dn_ask + dn_bid) / 2.0
+
+            if dn_ref > up_ref:
+                favored_side: Side = "Down"
+                favored_p = p_down
+                favored_book = book_down
+            else:
+                favored_side: Side = "Up"
+                favored_p = p_up
+                favored_book = book_up
+
+            favored_ask = favored_book.best_ask
+            favored_bid = favored_book.best_bid
+
+            # 1. 高价侧如果在安全成本内 (<= 0.65)，优先吃单高价侧
+            if favored_ask is not None and 0.45 <= favored_ask <= max_entry_px:
+                fee = taker_fee_per_share(favored_ask, fee_rate)
+                return Decision(
+                    action="taker_buy",
+                    side=favored_side,
+                    price=favored_ask,
+                    size=size,
+                    utility=round(favored_p - (favored_ask + fee), 4),
+                    reason=f"Post-Shock Consensus: 大涨大跌后警惕延续(前盘${prev_move:.1f})，优先吃单高价侧 {favored_side} ask={favored_ask:.2f} <= ${max_entry_px:.2f}"
+                )
+
+            # 2. 如果高价侧超过 0.70，坚决不追高
+            if favored_ask is not None and favored_ask > hard_chase_ceiling:
+                return _wait(f"v2.2: 大涨大跌后高价侧 {favored_side} ask={favored_ask:.2f} 超过 ${hard_chase_ceiling:.2f}，坚决不追高防守", urgent=True)
+
+            # 3. 如果高价侧买一价合适，挂单高价侧
+            max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
+            if quote_attempts < max_quote_attempts and favored_bid is not None and 0.45 <= favored_bid <= max_entry_px:
+                maker_px = round(min(max_entry_px, favored_bid), 2)
+                return Decision(
+                    action="quote",
+                    side=favored_side,
+                    price=maker_px,
+                    size=size,
+                    utility=round(favored_p - maker_px, 4),
+                    reason=f"Post-Shock Consensus: 大涨大跌后警惕延续(前盘${prev_move:.1f})，挂单高价侧 {favored_side} bid={maker_px:.2f}"
+                )
+
+            return _wait(f"v2.2: 大涨大跌后警惕(前盘${prev_move:.1f})，高价侧 {favored_side} 盘口无安全成本，防守等待")
+
+        # 正常波动区间: 顺势低吸侧选择 (同步看当前距离开盘价的涨跌大小，结合胜率优先选边)
         if delta_s > 0 or p_up >= 0.50:
             pref_side: Side = "Up"
             pref_p = p_up

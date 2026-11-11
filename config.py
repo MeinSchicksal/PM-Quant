@@ -32,6 +32,7 @@ PARAMS = {
     "MWDE_MAX_TAU_S": 240.0,           # Active scanning starts after first 60s observation
     "MWDE_MAX_ENTRY_PRICE": 0.45,      # Maximum buying price for dip entry (放宽到 $0.45)
     "MWDE_HEDGE_LOCK_COST": 0.85,      # Leg 2 lock: only buy opposite side if combined cost <= $0.85
+    "POST_SHOCK_MIN_MOVE": 40.0,       # 大涨/大跌门槛 ($40.0): 超过此幅度后警惕单边延续，优先买入高价侧
 
     # Stage 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption, 180s ~ 285s)
     "LWAA_MAX_TAU_S": 120.0,           # Seamless handoff from Stage 1 (tau <= 120s)
