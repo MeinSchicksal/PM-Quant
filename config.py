@@ -6,7 +6,7 @@ No version logic or branching should exist in downstream modules.
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.1"
+VERSION = "v2.2"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 # Core Mathematical & Economic Parameters
 PARAMS = {
     # 0. Active Strategy Engine
-    "STRATEGY_MODE": "LWAA",          # Active Strategy: "LWAA" v2.1 Dual-Stage (MWDE + LWAA)
+    "STRATEGY_MODE": "LWAA",          # Active Strategy: "LWAA" v2.2 Continuous Dynamic Absorption
 
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
@@ -25,29 +25,26 @@ PARAMS = {
     "LATENCY_S": 0.30,                # Estimated round-trip wire + engine order insertion delay
     "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: fee = shares * rate * p * (1-p); makers pay zero
 
-    # 2. Dual-Stage Core Strategy: MWDE (Mid-Window Discount Entry) + LWAA (Late-Window Asymmetric Absorption)
-    # Stage 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry, 60s ~ 150s)
+    # 2. Continuous Dynamic Dual Absorption (消除时间断层，动态市价调价)
+    # Stage 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry, 60s ~ 180s)
     "MWDE_ENABLE": True,               # Enable Stage 1: Mid-window trend-biased dip-buying
-    "MWDE_MIN_TAU_S": 150.0,           # Stage 1 horizon cutoff (tau in [150s, 240s], elapsed 60s ~ 150s)
-    "MWDE_MAX_TAU_S": 240.0,
-    "MWDE_MAX_ENTRY_PRICE": 0.45,      # Maximum buying price for dip entry (用户要求: 放宽到 $0.45)
-    "MWDE_PREV_ROUND_MIN_MOVE": 20.0,  # Filter: previous round move >= $20 (前一盘刚刚跌/涨过比较多的价格)
-    "MWDE_FIRST_60S_MAX_RANGE": 15.0,  # Filter: first 60s range <= $15 (60秒只涨/跌几美金，涨跌幅度没有之前那么大)
-    "MWDE_MID_PROB_LOW": 0.38,         # Filter: probability in middle consolidation corridor [0.38, 0.62]
-    "MWDE_MID_PROB_HIGH": 0.62,
-    "MWDE_HEDGE_LOCK_COST": 0.85,      # Leg 2 lock: only buy opposite side if combined cost <= $0.85 (不着急买入另一侧止损)
+    "MWDE_MIN_TAU_S": 120.0,           # Seamless handoff at tau=120s (zero gap!)
+    "MWDE_MAX_TAU_S": 240.0,           # Active scanning starts after first 60s observation
+    "MWDE_MAX_ENTRY_PRICE": 0.45,      # Maximum buying price for dip entry (放宽到 $0.45)
+    "MWDE_HEDGE_LOCK_COST": 0.85,      # Leg 2 lock: only buy opposite side if combined cost <= $0.85
 
-    # Stage 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption, 120s ~ 15s)
-    "LWAA_MAX_TAU_S": 120.0,           # Scan in late window (tau <= 120s, 2 minutes)
+    # Stage 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption, 180s ~ 285s)
+    "LWAA_MAX_TAU_S": 120.0,           # Seamless handoff from Stage 1 (tau <= 120s)
     "LWAA_MIN_TAU_S": 15.0,            # Tail freeze cutoff (tau < 15s)
-    "LWAA_MIN_PROB": 0.80,             # High-conviction threshold: 80% (robust against 50/50 chop)
-    "LWAA_MIN_EDGE": 0.02,             # Minimum net profit edge demanded over ask + taker fee (2.0 ticks)
-    "LWAA_MAX_ENTRY_PRICE": 0.65,      # Maximum acceptable entry price (用户要求: 买入最高限价设为 $0.65)
+    "LWAA_MIN_PROB": 0.80,             # High-conviction threshold: 80%
+    "LWAA_MIN_EDGE": 0.02,             # Minimum net profit edge demanded (2.0 ticks)
+    "LWAA_MAX_ENTRY_PRICE": 0.65,      # Maximum acceptable entry price (最高限价 $0.65)
     "LWAA_HARD_CHASE_CEILING": 0.70,   # Hard chase ceiling (超过 $0.70 绝不追高)
     "LWAA_MIN_ENTRY_PRICE": 0.35,      # Minimum entry price for high-prob outcome
-    "LWAA_MAX_QUOTE_ATTEMPTS": 1,      # Maximum maker quote attempts per window (挂不上不再重挂，等待到期)
-    "LWAA_ENABLE_ARBITRAGE_HEDGE": True, # Always lock both sides when opp ask drops (pair_cost <= 1.00) for risk-free profit
+    "LWAA_MAX_QUOTE_ATTEMPTS": 1,      # Maximum maker quote attempts per window
+    "LWAA_ENABLE_ARBITRAGE_HEDGE": True, # Always lock both sides when opp ask drops (pair_cost <= 1.00)
     "ALLOW_TAKER_UNWIND": False,       # Strictly forbid panic unwinds / selling (死扛到期，不要卖出)
+    "MAX_QUEUE_WAIT_S": 20.0,          # Passive queue waiting timeout (20s) to fill before canceling
 
     # 3. Lifecycle & Account-Level Watchdog Boundaries
     "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window

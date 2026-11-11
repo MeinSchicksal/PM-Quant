@@ -380,78 +380,74 @@ def plan_decision_lwaa(
 
     min_tau = float(params.get("LWAA_MIN_TAU_S", 15.0))
     if tau_s < min_tau:
-        return _wait(f"v2.1: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
+        return _wait(f"v2.2: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
 
     # -------------------------------------------------------------
     # STAGE 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry)
-    # Window: tau in [150s, 240s] (elapsed 60s ~ 150s)
+    # Window: tau in [120s, 240s] (elapsed 60s ~ 180s)
     # -------------------------------------------------------------
-    mwde_min_tau = float(params.get("MWDE_MIN_TAU_S", 150.0))
+    mwde_min_tau = float(params.get("MWDE_MIN_TAU_S", 120.0))
     mwde_max_tau = float(params.get("MWDE_MAX_TAU_S", 240.0))
     mwde_enabled = bool(params.get("MWDE_ENABLE", True))
 
-    if mwde_enabled and mwde_min_tau <= tau_s <= mwde_max_tau:
-        prev_move = float(params.get("PREV_ROUND_ABS_MOVE", 30.0))
-        min_prev_move = float(params.get("MWDE_PREV_ROUND_MIN_MOVE", 20.0))
-        range_60s = float(params.get("FIRST_60S_RANGE", 5.0))
-        max_range_60s = float(params.get("MWDE_FIRST_60S_MAX_RANGE", 15.0))
+    ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
+    delta_s = spot.price - ref_open if ref_open > 0 else 0.0
+    p_up = p_fair
+    p_down = 1.0 - p_fair
 
-        # Check consolidation corridor and probability around middle
-        is_consolidation = (prev_move >= min_prev_move) and (range_60s <= max_range_60s)
-        p_in_mid = float(params.get("MWDE_MID_PROB_LOW", 0.38)) <= p_fair <= float(params.get("MWDE_MID_PROB_HIGH", 0.62))
+    if mwde_enabled and mwde_min_tau < tau_s <= mwde_max_tau:
+        # 顺势低吸侧选择: 同步看当前距离开盘价的涨跌大小，结合胜率优先选边
+        if delta_s > 0 or p_up >= 0.50:
+            pref_side: Side = "Up"
+            pref_p = p_up
+            target_book = book_up
+        else:
+            pref_side: Side = "Down"
+            pref_p = p_down
+            target_book = book_down
 
-        if is_consolidation and p_in_mid:
-            # 优先选边: 同步看当前距离开盘价的涨跌大小，结合胜率优先选边
-            ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
-            delta_s = spot.price - ref_open if ref_open > 0 else 0.0
+        mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
+        if available_cap < size * mwde_max_px:
+            return _wait(f"v2.2: Insufficient capital (${available_cap:.2f}) for MWDE entry (${size * mwde_max_px:.2f})")
 
-            if delta_s > 0 or p_fair >= 0.50:
-                pref_side: Side = "Up"
-                pref_p = p_fair
-                target_book = book_up
-            else:
-                pref_side: Side = "Down"
-                pref_p = 1.0 - p_fair
-                target_book = book_down
+        best_ask = target_book.best_ask
+        best_bid = target_book.best_bid
 
-            mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
-            if available_cap < size * mwde_max_px:
-                return _wait(f"v2.1: Insufficient capital (${available_cap:.2f}) for MWDE entry (${size * mwde_max_px:.2f})")
-            best_ask = target_book.best_ask
-            best_bid = target_book.best_bid
+        # 1. Taker Absorption on Preferred Side if ask <= $0.45
+        if best_ask is not None and 0.10 <= best_ask <= mwde_max_px:
+            fee = taker_fee_per_share(best_ask, fee_rate)
+            if pref_p - (best_ask + fee) >= 0.01:
+                return Decision(
+                    action="taker_buy",
+                    side=pref_side,
+                    price=best_ask,
+                    size=size,
+                    utility=round(pref_p - (best_ask + fee), 4),
+                    reason=f"MWDE Taker Absorption: 顺势低吸 {pref_side} ask={best_ask:.2f} <= ${mwde_max_px:.2f} (ΔS={delta_s:+.1f}, P*={pref_p:.2f})"
+                )
 
-            # 1. Taker Absorption on Preferred Side if ask <= $0.45
-            if best_ask is not None and best_ask <= mwde_max_px and best_ask >= 0.10:
-                fee = taker_fee_per_share(best_ask, fee_rate)
-                if pref_p - (best_ask + fee) >= 0.01:
-                    return Decision(
-                        action="taker_buy",
-                        side=pref_side,
-                        price=best_ask,
-                        size=size,
-                        utility=round(pref_p - (best_ask + fee), 4),
-                        reason=f"MWDE Taker Absorption: 顺势低吸 {pref_side} ask={best_ask:.2f} <= ${mwde_max_px:.2f} (ΔS={delta_s:+.1f}, P*={pref_p:.2f})"
-                    )
+        # 2. Dynamic Maker Absorption on Preferred Side if bid <= $0.45
+        max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
+        if quote_attempts < max_quote_attempts and best_bid is not None and 0.05 <= best_bid <= mwde_max_px:
+            # Dynamic pricing: join best_bid or improve inside spread, bounded by $0.45
+            maker_px = round(min(mwde_max_px, best_bid), 2)
+            if best_ask is not None and best_bid + 0.01 < best_ask and best_bid + 0.01 <= mwde_max_px:
+                maker_px = round(best_bid + 0.01, 2)
+            if 0.10 <= maker_px <= mwde_max_px:
+                return Decision(
+                    action="quote",
+                    side=pref_side,
+                    price=maker_px,
+                    size=size,
+                    utility=round(pref_p - maker_px, 4),
+                    reason=f"MWDE Maker Absorption: 顺势低吸挂单 {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
+                )
 
-            # 2. Maker Absorption on Preferred Side if bid <= $0.45
-            max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
-            if quote_attempts < max_quote_attempts and best_bid is not None and best_bid >= 0.05:
-                maker_px = round(min(mwde_max_px, best_bid), 2)
-                if best_ask is not None:
-                    maker_px = min(maker_px, round(best_ask - 0.01, 2))
-                if 0.10 <= maker_px <= mwde_max_px:
-                    return Decision(
-                        action="quote",
-                        side=pref_side,
-                        price=maker_px,
-                        size=size,
-                        utility=round(pref_p - maker_px, 4),
-                        reason=f"MWDE Maker Absorption: 顺势低吸挂单 {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
-                    )
+        return _wait(f"v2.2: Standby in early/mid window (tau {tau_s:.0f}s), waiting for MWDE discount dip <= ${mwde_max_px:.2f} or LWAA late window")
 
     # -------------------------------------------------------------
     # STAGE 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption)
-    # Window: tau in [15s, 120s]
+    # Window: tau in [15s, 120s] (elapsed 180s ~ 285s)
     # -------------------------------------------------------------
     lwaa_max_tau = float(params.get("LWAA_MAX_TAU_S", 120.0))
     if tau_s <= lwaa_max_tau:
@@ -461,9 +457,6 @@ def plan_decision_lwaa(
         hard_chase_ceiling = float(params.get("LWAA_HARD_CHASE_CEILING", 0.70))
         min_entry_px = float(params.get("LWAA_MIN_ENTRY_PRICE", 0.35))
         max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
-
-        p_up = p_fair
-        p_down = 1.0 - p_fair
 
         target_side: Optional[Side] = None
         if p_up >= min_prob:
@@ -475,7 +468,8 @@ def plan_decision_lwaa(
             target_p = p_up if target_side == "Up" else p_down
             target_book = book_up if target_side == "Up" else book_down
             if available_cap < size * max_entry_px:
-                return _wait(f"v2.1: Insufficient capital (${available_cap:.2f}) for LWAA entry (${size * max_entry_px:.2f})")
+                return _wait(f"v2.2: Insufficient capital (${available_cap:.2f}) for LWAA entry (${size * max_entry_px:.2f})")
+
             best_ask = target_book.best_ask
             best_bid = target_book.best_bid
 
@@ -494,14 +488,18 @@ def plan_decision_lwaa(
                         reason=f"LWAA Taker Absorption: {target_side} ask={best_ask:.2f}, fee={fee:.4f}, p_fair={target_p:.2f}, edge={taker_edge:.4f}"
                     )
 
-            # Path B: Maker Absorption (Passive Queue on Bid with Zero Fee)
+            # Path B: Dynamic Maker Absorption (Passive Queue on Bid with Zero Fee)
+            # If quote attempts exceeded, wait with urgent=False so resting quote remains active in queue
             if quote_attempts >= max_quote_attempts:
-                return _wait(f"v2.1: 已达最大挂单次数 ({quote_attempts}/{max_quote_attempts})，挂不上不再追挂，死扛等待到期", urgent=True)
+                return _wait(f"v2.2: 已达最大挂单次数 ({quote_attempts}/{max_quote_attempts})，挂不上不再追挂，死扛等待到期", urgent=False)
 
             if best_bid is not None and best_bid >= 0.02:
-                maker_px = round(min(max_entry_px, max(min_entry_px, min(target_p - min_edge, best_bid))), 2)
-                if best_ask is not None:
-                    maker_px = min(maker_px, round(best_ask - 0.01, 2))
+                # Dynamic pricing: join best_bid or improve inside spread, strictly capped at max_entry_px
+                maker_px = round(min(max_entry_px, best_bid), 2)
+                # If best_bid is sparse or ridiculously low below ask, anchor dynamically near ask
+                if best_ask is not None and maker_px < 0.25 and best_ask >= 0.50:
+                    maker_px = round(min(max_entry_px, max(min_entry_px, best_ask - 0.02)), 2)
+
                 maker_px = min(maker_px, max_entry_px)
                 if min_entry_px <= maker_px <= hard_chase_ceiling:
                     maker_edge = target_p - maker_px
@@ -512,18 +510,31 @@ def plan_decision_lwaa(
                             price=maker_px,
                             size=size,
                             utility=round(maker_edge, 4),
-                            reason=f"LWAA Maker Absorption: {target_side} bid={maker_px:.2f}, p_fair={target_p:.2f}, edge={maker_edge:.4f}"
+                            reason=f"LWAA Maker Absorption: 结合市价挂单 {target_side} bid={maker_px:.2f}, p_fair={target_p:.2f}, edge={maker_edge:.4f}"
                         )
+            elif best_ask is not None:
+                # Empty bid book: anchor dynamically near market ask, bounded by max_entry_px
+                maker_px = round(min(max_entry_px, max(min_entry_px, best_ask - 0.02)), 2)
+                maker_edge = target_p - maker_px
+                if maker_edge >= min_edge:
+                    return Decision(
+                        action="quote",
+                        side=target_side,
+                        price=maker_px,
+                        size=size,
+                        utility=round(maker_edge, 4),
+                        reason=f"LWAA Maker Absorption: 结合市价挂单 {target_side} bid={maker_px:.2f}, p_fair={target_p:.2f}, edge={maker_edge:.4f}"
+                    )
 
             if best_ask is not None and (best_ask > max_entry_px or best_ask > hard_chase_ceiling):
-                return _wait(f"v2.1: {target_side} 卖盘 ask={best_ask:.2f} 高于限价 ${max_entry_px:.2f} (超过${hard_chase_ceiling:.2f}绝不追高)")
+                return _wait(f"v2.2: {target_side} 卖盘 ask={best_ask:.2f} 高于限价 ${max_entry_px:.2f} (超过${hard_chase_ceiling:.2f}绝不追高)")
 
-            return _wait(f"v2.1: {target_side} p_fair={target_p:.2f} but book asks/bids offer no executable edge (>={min_edge:.2f})")
+            return _wait(f"v2.2: {target_side} p_fair={target_p:.2f} but book asks/bids offer no executable edge (>={min_edge:.2f})")
 
-        return _wait(f"v2.1: Outcome uncertain (Up={p_up:.2f}, Down={p_down:.2f} < {min_prob:.2f}), no high-probability edge")
+        return _wait(f"v2.2: Outcome uncertain (Up={p_up:.2f}, Down={p_down:.2f} < {min_prob:.2f}), no high-probability edge")
 
-    # Early/mid standby when outside Stage 1 and Stage 2 windows
-    return _wait(f"v2.1: Standby in early/mid window (tau {tau_s:.0f}s), waiting for MWDE discount dip or LWAA late window")
+    # Early standby during first 60s (tau > 240s)
+    return _wait(f"v2.2: Standby in early/mid window (tau {tau_s:.0f}s), waiting for MWDE discount dip or LWAA late window")
 
 
 def plan_decision(
