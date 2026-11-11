@@ -258,6 +258,274 @@ def evaluate_unpaired_utility(
     )
 
 
+def plan_decision_lwaa(
+    pos_up: Position,
+    pos_down: Position,
+    book_up: OrderBook,
+    book_down: OrderBook,
+    spot: SpotState,
+    tau_s: float,
+    params: Dict[str, float],
+    circuit_breaker_active: bool = False,
+    circuit_breaker_reason: str = "",
+    p_fair: Optional[float] = None,
+    entries_count: int = 0,
+    regime_info=None,
+    quote_attempts: int = 0
+) -> Decision:
+    """Master decision cycle for LWAA (Late-Window Asymmetric Absorption).
+    
+    1. Early/Mid Window (tau > LWAA_MAX_TAU_S, e.g. 60s):
+       - Standby. Random-walk noise carries adverse selection; quoting is disabled.
+    2. Late Window Horizon (LWAA_MIN_TAU_S <= tau <= LWAA_MAX_TAU_S, [15s, 60s]):
+       - High-certainty window. Evaluate p_fair.
+       - If p_fair(Up) >= LWAA_MIN_PROB (e.g. 0.88):
+         Evaluate Taker absorption on Up asks (p_fair - ask - fee >= LWAA_MIN_EDGE).
+         If taker edge exists: execute taker_buy Up!
+         Else evaluate Maker bid on Up.
+       - Symmetrically for Down if p_fair(Down) >= LWAA_MIN_PROB.
+    3. Position Handling:
+       - Single-leg position is held to settlement (1.00 payout).
+       - Taker unwinds (selling at 0.10) are STRICTLY FORBIDDEN.
+       - Taker hedge is only permitted if pair_cost <= 1.00 (risk-free arbitrage lock).
+    4. Tail Freeze (tau < LWAA_MIN_TAU_S, e.g. 15s):
+       - Freeze all new entries, pull resting maker quotes, hold inventory to settlement.
+    """
+    from .estimator import estimate_p_fair
+
+    u_shares = pos_up.shares
+    d_shares = pos_down.shares
+    net_gap = round(u_shares - d_shares, 4)
+
+    # Watchdog 1: Circuit breaker check
+    cb_active = circuit_breaker_active or bool(params.get("CIRCUIT_BREAKER_ACTIVE", False))
+    if cb_active:
+        cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
+        return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
+
+    # 1. Evaluate Probability
+    if p_fair is None:
+        p_fair = estimate_p_fair(
+            spot,
+            getattr(spot, "open_price", 0.0),
+            tau_s,
+            getattr(spot, "realized_vol_bps", 15.0),
+            poly_price=getattr(spot, "poly_price", None),
+        )
+
+    # 2. Check Inventory State: Unpaired / Holding
+    if abs(net_gap) >= 1e-4:
+        held_side: Side = "Up" if net_gap > 0 else "Down"
+        held_shares = abs(net_gap)
+        held_basis = pos_up.avg_price if held_side == "Up" else pos_down.avg_price
+        opp_side: Side = "Down" if held_side == "Up" else "Up"
+        opp_book = book_down if held_side == "Up" else book_up
+        p_fair_held = p_fair if held_side == "Up" else (1.0 - p_fair)
+        fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
+
+        # Check for arbitrage hedge:
+        # User constraint: "不着急买入另外一侧止损，就死扛到期"
+        # Only take hedge if opposite side is cheap enough to lock guaranteed profit (pair_cost <= max_lock_cost)
+        max_pair_cost = float(params.get("MWDE_HEDGE_LOCK_COST", 0.85))
+        if bool(params.get("LWAA_ENABLE_ARBITRAGE_HEDGE", True)):
+            max_pair_cost = max(max_pair_cost, 1.00)
+        hedge_ask = opp_book.best_ask
+        if hedge_ask is not None:
+            fee = taker_fee_per_share(hedge_ask, fee_rate)
+            pair_cost = held_basis + hedge_ask + fee
+            if pair_cost <= max_pair_cost:
+                u_hedge = held_shares * (1.00 - pair_cost)
+                return Decision(
+                    action="taker_hedge",
+                    side=opp_side,
+                    price=hedge_ask,
+                    size=held_shares,
+                    utility=round(u_hedge, 4),
+                    reason=f"Arbitrage lock: pair_cost={pair_cost:.3f} <= {max_pair_cost:.2f}, take hedge @ {hedge_ask}"
+                )
+
+        # High-conviction directional mode: NEVER UNWIND!
+        # "不着急买入另外一侧止损，死扛让子弹飞至到期结算"
+        return _wait(
+            f"v2.1: Holding {held_shares:.0f} {held_side} @ {held_basis:.2f} to settlement (死扛让子弹飞，不急止损, p_fair={p_fair_held:.2f})",
+            urgent=True
+        )
+
+    # 2b. Fully Hedged Arbitrage Pair (Both sides held and balanced)
+    if u_shares > 1e-4 and d_shares > 1e-4 and abs(net_gap) < 1e-4:
+        return _wait(
+            f"v2.1: Max position reached & fully hedged arbitrage pair (UP {u_shares:.0f} / DN {d_shares:.0f}), holding to settlement for guaranteed $1.00 payout",
+            urgent=True
+        )
+
+    # 3. Flat Inventory: Sizing, Horizon, and Entry Gate
+    # Max entries per window check
+    max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
+    if entries_count >= max_entries:
+        return _wait(f"Max entries per window reached ({entries_count}/{max_entries}), waiting for next window", urgent=True)
+
+    # Max position reached check
+    max_lots = int(params.get("MAX_LOTS", 2))
+    lot_size = float(params.get("LOT_SIZE", 5.0))
+    size = float(lot_size)
+    available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
+    fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
+    max_shares = lot_size * max_lots
+    if u_shares >= max_shares - 1e-4 or d_shares >= max_shares - 1e-4:
+        return _wait(f"Max position reached ({max(u_shares, d_shares):.0f} shares), holding to settlement", urgent=True)
+
+    # Check Micro-Regime Toxicity
+    if getattr(spot, "is_toxic_shock", False):
+        return _wait("Adverse spot toxic shock detected", urgent=True)
+
+    min_tau = float(params.get("LWAA_MIN_TAU_S", 15.0))
+    if tau_s < min_tau:
+        return _wait(f"v2.1: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
+
+    # -------------------------------------------------------------
+    # STAGE 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry)
+    # Window: tau in [150s, 240s] (elapsed 60s ~ 150s)
+    # -------------------------------------------------------------
+    mwde_min_tau = float(params.get("MWDE_MIN_TAU_S", 150.0))
+    mwde_max_tau = float(params.get("MWDE_MAX_TAU_S", 240.0))
+    mwde_enabled = bool(params.get("MWDE_ENABLE", True))
+
+    if mwde_enabled and mwde_min_tau <= tau_s <= mwde_max_tau:
+        prev_move = float(params.get("PREV_ROUND_ABS_MOVE", 30.0))
+        min_prev_move = float(params.get("MWDE_PREV_ROUND_MIN_MOVE", 20.0))
+        range_60s = float(params.get("FIRST_60S_RANGE", 5.0))
+        max_range_60s = float(params.get("MWDE_FIRST_60S_MAX_RANGE", 15.0))
+
+        # Check consolidation corridor and probability around middle
+        is_consolidation = (prev_move >= min_prev_move) and (range_60s <= max_range_60s)
+        p_in_mid = float(params.get("MWDE_MID_PROB_LOW", 0.38)) <= p_fair <= float(params.get("MWDE_MID_PROB_HIGH", 0.62))
+
+        if is_consolidation and p_in_mid:
+            # 优先选边: 同步看当前距离开盘价的涨跌大小，结合胜率优先选边
+            ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
+            delta_s = spot.price - ref_open if ref_open > 0 else 0.0
+
+            if delta_s > 0 or p_fair >= 0.50:
+                pref_side: Side = "Up"
+                pref_p = p_fair
+                target_book = book_up
+            else:
+                pref_side: Side = "Down"
+                pref_p = 1.0 - p_fair
+                target_book = book_down
+
+            mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
+            if available_cap < size * mwde_max_px:
+                return _wait(f"v2.1: Insufficient capital (${available_cap:.2f}) for MWDE entry (${size * mwde_max_px:.2f})")
+            best_ask = target_book.best_ask
+            best_bid = target_book.best_bid
+
+            # 1. Taker Absorption on Preferred Side if ask <= $0.45
+            if best_ask is not None and best_ask <= mwde_max_px and best_ask >= 0.10:
+                fee = taker_fee_per_share(best_ask, fee_rate)
+                if pref_p - (best_ask + fee) >= 0.01:
+                    return Decision(
+                        action="taker_buy",
+                        side=pref_side,
+                        price=best_ask,
+                        size=size,
+                        utility=round(pref_p - (best_ask + fee), 4),
+                        reason=f"MWDE Taker Absorption: 顺势低吸 {pref_side} ask={best_ask:.2f} <= ${mwde_max_px:.2f} (ΔS={delta_s:+.1f}, P*={pref_p:.2f})"
+                    )
+
+            # 2. Maker Absorption on Preferred Side if bid <= $0.45
+            max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
+            if quote_attempts < max_quote_attempts and best_bid is not None and best_bid >= 0.05:
+                maker_px = round(min(mwde_max_px, best_bid), 2)
+                if best_ask is not None:
+                    maker_px = min(maker_px, round(best_ask - 0.01, 2))
+                if 0.10 <= maker_px <= mwde_max_px:
+                    return Decision(
+                        action="quote",
+                        side=pref_side,
+                        price=maker_px,
+                        size=size,
+                        utility=round(pref_p - maker_px, 4),
+                        reason=f"MWDE Maker Absorption: 顺势低吸挂单 {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
+                    )
+
+    # -------------------------------------------------------------
+    # STAGE 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption)
+    # Window: tau in [15s, 120s]
+    # -------------------------------------------------------------
+    lwaa_max_tau = float(params.get("LWAA_MAX_TAU_S", 120.0))
+    if tau_s <= lwaa_max_tau:
+        min_prob = float(params.get("LWAA_MIN_PROB", 0.80))
+        min_edge = float(params.get("LWAA_MIN_EDGE", 0.02))
+        max_entry_px = float(params.get("LWAA_MAX_ENTRY_PRICE", 0.65))
+        hard_chase_ceiling = float(params.get("LWAA_HARD_CHASE_CEILING", 0.70))
+        min_entry_px = float(params.get("LWAA_MIN_ENTRY_PRICE", 0.35))
+        max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
+
+        p_up = p_fair
+        p_down = 1.0 - p_fair
+
+        target_side: Optional[Side] = None
+        if p_up >= min_prob:
+            target_side = "Up"
+        elif p_down >= min_prob:
+            target_side = "Down"
+
+        if target_side is not None:
+            target_p = p_up if target_side == "Up" else p_down
+            target_book = book_up if target_side == "Up" else book_down
+            if available_cap < size * max_entry_px:
+                return _wait(f"v2.1: Insufficient capital (${available_cap:.2f}) for LWAA entry (${size * max_entry_px:.2f})")
+            best_ask = target_book.best_ask
+            best_bid = target_book.best_bid
+
+            # Path A: Taker Absorption (Immediate Edge Capture, strictly capped at max_entry_px and hard_chase_ceiling)
+            if best_ask is not None and min_entry_px <= best_ask <= max_entry_px and best_ask <= hard_chase_ceiling:
+                fee = taker_fee_per_share(best_ask, fee_rate)
+                effective_cost = best_ask + fee
+                taker_edge = target_p - effective_cost
+                if taker_edge >= min_edge:
+                    return Decision(
+                        action="taker_buy",
+                        side=target_side,
+                        price=best_ask,
+                        size=size,
+                        utility=round(taker_edge, 4),
+                        reason=f"LWAA Taker Absorption: {target_side} ask={best_ask:.2f}, fee={fee:.4f}, p_fair={target_p:.2f}, edge={taker_edge:.4f}"
+                    )
+
+            # Path B: Maker Absorption (Passive Queue on Bid with Zero Fee)
+            if quote_attempts >= max_quote_attempts:
+                return _wait(f"v2.1: 已达最大挂单次数 ({quote_attempts}/{max_quote_attempts})，挂不上不再追挂，死扛等待到期", urgent=True)
+
+            if best_bid is not None and best_bid >= 0.02:
+                maker_px = round(min(max_entry_px, max(min_entry_px, min(target_p - min_edge, best_bid))), 2)
+                if best_ask is not None:
+                    maker_px = min(maker_px, round(best_ask - 0.01, 2))
+                maker_px = min(maker_px, max_entry_px)
+                if min_entry_px <= maker_px <= hard_chase_ceiling:
+                    maker_edge = target_p - maker_px
+                    if maker_edge >= min_edge:
+                        return Decision(
+                            action="quote",
+                            side=target_side,
+                            price=maker_px,
+                            size=size,
+                            utility=round(maker_edge, 4),
+                            reason=f"LWAA Maker Absorption: {target_side} bid={maker_px:.2f}, p_fair={target_p:.2f}, edge={maker_edge:.4f}"
+                        )
+
+            if best_ask is not None and (best_ask > max_entry_px or best_ask > hard_chase_ceiling):
+                return _wait(f"v2.1: {target_side} 卖盘 ask={best_ask:.2f} 高于限价 ${max_entry_px:.2f} (超过${hard_chase_ceiling:.2f}绝不追高)")
+
+            return _wait(f"v2.1: {target_side} p_fair={target_p:.2f} but book asks/bids offer no executable edge (>={min_edge:.2f})")
+
+        return _wait(f"v2.1: Outcome uncertain (Up={p_up:.2f}, Down={p_down:.2f} < {min_prob:.2f}), no high-probability edge")
+
+    # Early/mid standby when outside Stage 1 and Stage 2 windows
+    return _wait(f"v2.1: Standby in early/mid window (tau {tau_s:.0f}s), waiting for MWDE discount dip or LWAA late window")
+
+
 def plan_decision(
     pos_up: Position,
     pos_down: Position,
@@ -270,9 +538,59 @@ def plan_decision(
     circuit_breaker_reason: str = "",
     p_fair: Optional[float] = None,
     entries_count: int = 0,
-    regime_info=None
+    regime_info=None,
+    quote_attempts: int = 0
 ) -> Decision:
-    """Master decision cycle called every tick/event.
+    """Master decision dispatcher routing to active strategy engine."""
+    mode = params.get("STRATEGY_MODE", "LWAA")
+    if mode == "LWAA":
+        return plan_decision_lwaa(
+            pos_up=pos_up,
+            pos_down=pos_down,
+            book_up=book_up,
+            book_down=book_down,
+            spot=spot,
+            tau_s=tau_s,
+            params=params,
+            circuit_breaker_active=circuit_breaker_active,
+            circuit_breaker_reason=circuit_breaker_reason,
+            p_fair=p_fair,
+            entries_count=entries_count,
+            regime_info=regime_info,
+            quote_attempts=quote_attempts
+        )
+    return plan_decision_legacy(
+        pos_up=pos_up,
+        pos_down=pos_down,
+        book_up=book_up,
+        book_down=book_down,
+        spot=spot,
+        tau_s=tau_s,
+        params=params,
+        circuit_breaker_active=circuit_breaker_active,
+        circuit_breaker_reason=circuit_breaker_reason,
+        p_fair=p_fair,
+        entries_count=entries_count,
+        regime_info=regime_info
+    )
+
+
+def plan_decision_legacy(
+    pos_up: Position,
+    pos_down: Position,
+    book_up: OrderBook,
+    book_down: OrderBook,
+    spot: SpotState,
+    tau_s: float,
+    params: Dict[str, float],
+    circuit_breaker_active: bool = False,
+    circuit_breaker_reason: str = "",
+    p_fair: Optional[float] = None,
+    entries_count: int = 0,
+    regime_info=None,
+    quote_attempts: int = 0
+) -> Decision:
+    """Legacy v1.1 Master decision cycle (Avellaneda-Stoikov + Dual Regime).
     
     Evaluates current inventory, circuit breaker state, volatility regime,
     and outputs the singular best action.

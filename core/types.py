@@ -8,7 +8,7 @@ from typing import Literal, Optional, List, Tuple
 Side = Literal["Up", "Down"]
 OrderKind = Literal["maker", "taker"]
 OrderPurpose = Literal["entry", "hedge", "unwind"]
-ActionType = Literal["quote", "taker_hedge", "taker_unwind", "cancel", "wait"]
+ActionType = Literal["quote", "taker_buy", "taker_hedge", "taker_unwind", "cancel", "wait"]
 
 
 @dataclass(frozen=True)

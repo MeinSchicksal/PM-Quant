@@ -261,6 +261,7 @@ def replay_window(
 # Regimes the policy refuses to quote in. Turning them off answers a question
 # the attribution matrix cannot: "would the gates have saved money?".
 GATE_OFF_OVERRIDES = {
+    "STRATEGY_MODE": "legacy_mm",
     "TAIL_FREEZE_S": 0.0,            # allow quoting until expiry
     "MIN_ENTRY_TAU_S": 0.0,          # allow late entries
     "MAX_ENTRIES_PER_WINDOW": 10_000,

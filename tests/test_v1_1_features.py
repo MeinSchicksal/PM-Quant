@@ -127,7 +127,7 @@ class TestCircuitBreakerWatchdog(unittest.TestCase):
         cb.is_tripped = True
         cb.trip_reason = "Daily drawdown limit hit"
 
-        params = dict(config.PARAMS, CIRCUIT_BREAKER_ACTIVE=True, CIRCUIT_BREAKER_REASON=cb.trip_reason)
+        params = dict(config.PARAMS, CIRCUIT_BREAKER_ACTIVE=True, CIRCUIT_BREAKER_REASON=cb.trip_reason, STRATEGY_MODE="legacy_mm")
 
         # Case 1: Flat inventory (|gap| = 0) -> policy must WAIT and forbid new Leg-1
         pos_flat = Position(0.0, 0.0)
@@ -243,7 +243,7 @@ class TestFractionalKellyDynamicSizing(unittest.TestCase):
         book_up = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         book_dn = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         spot = SpotState(timestamp=1000.0, price=75010.0, open_price=75000.0) # Balanced Up edge within [0.42, 0.58]
-        params_tiny = dict(config.PARAMS, AVAILABLE_CAPITAL=capital_tiny)
+        params_tiny = dict(config.PARAMS, AVAILABLE_CAPITAL=capital_tiny, STRATEGY_MODE="legacy_mm")
 
         dec = plan_decision(pos_flat, pos_flat, book_up, book_dn, spot, tau_s=180.0, params=params_tiny)
         self.assertEqual(dec.action, "wait")

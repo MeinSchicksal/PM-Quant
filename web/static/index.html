@@ -15,7 +15,7 @@
         <span class="brand-badge">P</span>
         <span class="brand-copy">
           <span class="brand-name">PM-QUANT</span>
-          <span class="brand-version" id="page-version">v1.1</span>
+          <span class="brand-version" id="page-version">v2.1</span>
         </span>
       </a>
 
@@ -153,20 +153,20 @@
           </div>
           <div class="hero-composition-row">
             <div class="comp-box">
-              <span class="comp-label">投入资金 (本金)</span>
-              <strong class="comp-val" id="hero-initial-cap">$100.00</strong>
+              <span class="comp-label" title="已结算轮次中实际用于买入份额的总支出成本">实际下注资金</span>
+              <strong class="comp-val" id="hero-turnover">$0.00</strong>
             </div>
             <div class="comp-box">
-              <span class="comp-label" title="净收益 ÷ 周转总流水">流水收益率</span>
+              <span class="comp-label" title="累计净收益 ÷ 实际下注资金">下注回报率 (ROI)</span>
               <strong class="comp-val" id="hero-roi">+0.00%</strong>
             </div>
             <div class="comp-box">
-              <span class="comp-label">动态可用交易</span>
+              <span class="comp-label" title="账户初始本金 + 累计净收益">账户当前资产</span>
               <strong class="comp-val up" id="hero-free-cap">$100.00</strong>
             </div>
             <div class="comp-box">
-              <span class="comp-label">周转总流水</span>
-              <strong class="comp-val" id="hero-turnover">$0.00</strong>
+              <span class="comp-label" title="纸面模拟账户起始底仓总额">账户初始本金</span>
+              <strong class="comp-val" id="hero-initial-cap">$100.00</strong>
             </div>
           </div>
         </section>
@@ -453,6 +453,16 @@
           <h2>本轮挂单与撮合流水</h2>
           <span class="order-count-pill" id="live-action-count">0 笔动作</span>
         </div>
+
+        <!-- Live Active Working Orders Queue Dashboard -->
+        <div id="live-working-orders-box" class="working-orders-box">
+          <div class="queue-status-card idle">
+            <span class="queue-status-dot"></span>
+            <span class="queue-status-title">当前无在途排队挂单</span>
+            <span class="queue-status-desc">等待策略判定或持仓中</span>
+          </div>
+        </div>
+
         <ol class="action-feed" id="live-action-feed">
           <li class="action-empty">等待撮合引擎输出...</li>
         </ol>
@@ -490,6 +500,25 @@
       </section>
     </section>
   </main>
+
+  <!-- Round Detail Review Modal Dialog -->
+  <div id="round-detail-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="modal-round-title">5 分钟轮次复盘详情</h2>
+          <span class="badge-pill" id="modal-round-slug">--</span>
+          <span class="winner-pill" id="modal-round-winner">--</span>
+        </div>
+        <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)">✕</button>
+      </div>
+      <div class="modal-body" id="modal-round-body">
+        <div style="text-align:center; padding:36px; color:#6b7280;">
+          ⏳ 正在加载 5 分钟微观行情与交易复盘数据...
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

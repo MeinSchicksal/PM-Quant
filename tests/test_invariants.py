@@ -122,12 +122,12 @@ class TestMathematicalInvariants(unittest.TestCase):
             runner.start_window("test_fee", 1000.0, 1300.0, open_px=75000.0)
             runner.pos_up = Position(shares=10.0, cash=3.80)
             book_up = OrderBook(bids=[(0.20, 50.0)], asks=[(0.23, 50.0)])
-            book_down = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
-            spot = SpotState(timestamp=1150.0, price=74700.0, open_price=75000.0, realized_vol_bps=15.0)
-            runner.step(1150.0, spot, book_up, book_down, poly_spot=74700.0)
-            expected_fee = round(10.0 * rate * 0.63 * 0.37, 4)
+            book_down = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)])
+            spot = SpotState(timestamp=1260.0, price=74700.0, open_price=75000.0, realized_vol_bps=15.0)
+            runner.step(1260.0, spot, book_up, book_down, poly_spot=74700.0)
+            expected_fee = round(10.0 * rate * 0.60 * 0.40, 4)
             self.assertEqual(runner.pos_down.shares, 10.0)
-            self.assertAlmostEqual(runner.pos_down.cash, 10.0 * 0.63 + expected_fee, places=4)
+            self.assertAlmostEqual(runner.pos_down.cash, 10.0 * 0.60 + expected_fee, places=4)
 
     def test_max_lots_boundary(self):
         """Invariant 4: Once position reaches MAX_LOTS, policy must output WAIT."""
@@ -318,7 +318,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
         dec = plan_decision(
             Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
-            tau_s=250.0, params=config.PARAMS, p_fair=0.50
+            tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50
         )
         self.assertEqual(dec.action, "quote", dec.reason)
         self.assertGreaterEqual(dec.price, config.PARAMS["MIN_MAKER_ENTRY_PRICE"])
@@ -365,7 +365,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
         dec = plan_decision(
             Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
-            tau_s=250.0, params=config.PARAMS, p_fair=0.50
+            tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50
         )
         if dec.action == "quote":
             # Any accepted quote must be small enough to survive total loss.
@@ -415,7 +415,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         )
         # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
         # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
-        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
+        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"))
         # With 0 bps move, no edge exists outside uncertainty band
         self.assertEqual(dec.action, "wait")
         self.assertIn("No edge", dec.reason)
@@ -531,7 +531,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75010.0, open_price=75000.0)
         
         # tau = 120s (less than MIN_ENTRY_TAU_S = 180s)
-        dec = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=120.0, params=config.PARAMS)
+        dec = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=120.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"))
         self.assertEqual(dec.action, "wait")
         self.assertIn("Late window", dec.reason)
         self.assertTrue(dec.urgent_cancel, "lifecycle lockouts must pull resting quotes")
@@ -545,7 +545,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
         
         # Pass skewed p_fair = 0.81 (like in round 1794289800)
-        dec_skewed = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.81)
+        dec_skewed = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.81)
         self.assertEqual(dec_skewed.action, "wait")
         self.assertIn("balanced entry zone", dec_skewed.reason)
 
@@ -558,7 +558,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
         
         # entries_count = 1 (position was already unwound this round)
-        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.50, entries_count=1)
+        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50, entries_count=1)
         self.assertEqual(dec_locked.action, "wait")
         self.assertIn("Max entries per window reached", dec_locked.reason)
 

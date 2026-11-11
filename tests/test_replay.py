@@ -76,7 +76,7 @@ class TestEventDrivenReplay(unittest.TestCase):
                                     "price": 75008.0}) + "\n")
 
         # Settlement truth: the ledger says the round was traded and won on Up.
-        ledger = self.tmp / "2_ledgers" / "v1.1"
+        ledger = self.tmp / "2_ledgers" / config.VERSION
         ledger.mkdir(parents=True)
         with open(ledger / "summary.jsonl", "w", encoding="utf-8") as f:
             f.write(json.dumps({
@@ -97,7 +97,7 @@ class TestEventDrivenReplay(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        results = run_replay(limit=1)
+        results = run_replay(limit=1, overrides={"STRATEGY_MODE": "legacy_mm"})
         self.assertEqual(len(results), 1)
         r = results[0]
         self.assertTrue(r["replayed"])

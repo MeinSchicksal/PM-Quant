@@ -103,6 +103,7 @@ class PaperRunner:
         self.actions = []
         self.insurance_paid = 0.0
         self.entries_count = 0
+        self.quote_attempts = 0
         self.entry_order_ids = set()
         self.regime_counts = {}
         self.regime_dwell = {}
@@ -126,6 +127,9 @@ class PaperRunner:
         self.last_prob_up = 0.5
         self.last_poly_up = 0.5
         self.last_poly_down = 0.5
+        self.first_60s_high = self.binance_open_price
+        self.first_60s_low = self.binance_open_price
+        self.first_60s_range = 0.0
 
     def update_open_price(self, poly_open: float):
         """Update provisional open price once Polymarket official TWAP finishes computing."""
@@ -157,7 +161,12 @@ class PaperRunner:
                 self.entries_count += 1
         fill = {
             "t": round(now, 2), "side": side, "price": price,
-            "size": size, "kind": kind, "purpose": purpose
+            "size": size, "kind": kind, "purpose": purpose,
+            "poly_up": getattr(self, "last_poly_up", None),
+            "poly_down": getattr(self, "last_poly_down", None),
+            "prob_up": getattr(self, "last_prob_up", None),
+            "spot_price": getattr(self, "last_spot_price", None),
+            "tau_s": round(max(0.0, getattr(self, "window_end", 0.0) - now), 1)
         }
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
@@ -206,6 +215,10 @@ class PaperRunner:
             poly_bps = ((self.last_poly_spot - open_px) / open_px) * 10000.0
 
         if spot.price > 0:
+            if now - self.window_start <= 60.0:
+                self.first_60s_high = max(getattr(self, "first_60s_high", spot.price), spot.price)
+                self.first_60s_low = min(getattr(self, "first_60s_low", spot.price), spot.price)
+                self.first_60s_range = round(self.first_60s_high - self.first_60s_low, 2)
             self.price_history.append({
                 "t": round(now, 1),
                 "price": round(spot.price, 2),
@@ -244,6 +257,12 @@ class PaperRunner:
         if is_deadman_active and self.working_orders:
             for o in self.working_orders:
                 o.cancel_at = now
+                o.cancel_reason = f"行情延迟保护撤单 ({deadman_reason})"
+                self.actions.append({
+                    "t": round(now, 2), "action": "cancel", "side": o.side,
+                    "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                    "reason": o.cancel_reason, "order_id": o.id
+                })
             self.working_orders.clear()
 
         # 2. Dynamic Micro-Regime Tracking for Attribution
@@ -276,7 +295,9 @@ class PaperRunner:
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
             CIRCUIT_BREAKER_ACTIVE=cb_active,
-            CIRCUIT_BREAKER_REASON=cb_reason
+            CIRCUIT_BREAKER_REASON=cb_reason,
+            PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
+            FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0)
         )
 
         if is_deadman_active:
@@ -287,7 +308,8 @@ class PaperRunner:
                 circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
                 p_fair=p_fair,
                 entries_count=self.entries_count,
-                regime_info=regime_info
+                regime_info=regime_info,
+                quote_attempts=getattr(self, "quote_attempts", 0)
             )
         self.decisions.append({
             "t": round(now, 2), "action": decision.action, "side": decision.side,
@@ -302,11 +324,16 @@ class PaperRunner:
             o.cancel_at = now
             if o in self.working_orders:
                 self.working_orders.remove(o)
+            self.actions.append({
+                "t": round(now, 2), "action": "cancel", "side": o.side,
+                "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                "reason": o.cancel_reason or "策略撤单", "order_id": o.id
+            })
             
         # 1. Taker execution simulation (depth-aware, never infinite liquidity)
-        if action and action.action in ("taker_hedge", "taker_unwind"):
+        if action and action.action in ("taker_buy", "taker_hedge", "taker_unwind"):
             want = float(action.size or 0.0)
-            is_buy = action.action == "taker_hedge"
+            is_buy = action.action in ("taker_buy", "taker_hedge")
             target_book = book_down if action.side == "Down" else book_up
             filled, vwap = self.matcher.taker_fill(target_book, want, is_buy=is_buy)
             if filled > 1e-6:
@@ -329,7 +356,12 @@ class PaperRunner:
                     else:
                         self.pos_down.shares -= filled
                         self.pos_down.cash -= (filled * px - fee)
-                purpose = "unwind" if action.action == "taker_unwind" else "hedge"
+                if action.action == "taker_unwind":
+                    purpose = "unwind"
+                elif action.action == "taker_buy":
+                    purpose = "entry"
+                else:
+                    purpose = "hedge"
                 self._record_fill(now, action.side, px, filled, "taker", purpose)
                 if filled + 1e-6 < want:
                     self.actions.append({
@@ -364,9 +396,12 @@ class PaperRunner:
             target_book = book_up if action.side == "Up" else book_down
             self.matcher.register_order(new_order, target_book)
             self.working_orders.append(new_order)
+            self.quote_attempts = getattr(self, "quote_attempts", 0) + 1
+            ahead_sz = self.matcher.queue_ahead.get(new_order.id, 0.0)
             self.actions.append({
                 "t": round(now, 2), "action": "quote", "side": action.side,
-                "price": action.price, "size": action.size, "purpose": purpose
+                "price": action.price, "size": action.size, "purpose": purpose,
+                "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
             })
 
         # 3. Queue Matcher: only real trade prints deplete queue, then crossed books
@@ -426,6 +461,13 @@ class PaperRunner:
             # or the feed settled it twice). Appending a second row would
             # double-count PnL and the circuit breaker, so settle exactly once.
             print(f"[Runner] Window {self.current_slug} already settled; duplicate close ignored")
+            for o in self.working_orders:
+                o.cancel_at = self.window_end
+                self.actions.append({
+                    "t": round(self.window_end, 2), "action": "cancel", "side": o.side,
+                    "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                    "reason": "本轮到期自动撤单", "order_id": o.id
+                })
             self.working_orders = []
             return
         # 1. Resolve winner (prefer official UMA/Gamma settlement truth if available)
@@ -438,6 +480,7 @@ class PaperRunner:
         proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
+        self.last_round_abs_move = round(abs(close_px - self.open_price), 2)
         is_traded = len(self.fills) > 0 or total_cost > 1e-4
 
         # Attribution: the regime that permitted the first entry describes the
@@ -484,7 +527,13 @@ class PaperRunner:
             self.total_pnl += net_pnl
 
         # 2. Archive compressed detailed window log
-        detail = dict(record, fills=self.fills, actions=self.actions, decisions=self.decisions)
+        detail = dict(
+            record,
+            fills=self.fills,
+            actions=self.actions,
+            decisions=self.decisions,
+            price_history=self.price_history
+        )
         out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
         with gzip.open(out_gz, "wt", encoding="utf-8") as gz:
             json.dump(detail, gz, ensure_ascii=False)
@@ -582,7 +631,16 @@ class PaperRunner:
             "book_up": {"best_bid": book_up.best_bid, "best_ask": book_up.best_ask},
             "book_down": {"best_bid": book_down.best_bid, "best_ask": book_down.best_ask},
             "working_orders": [
-                {"side": o.side, "price": o.price, "size": o.remaining}
+                {
+                    "id": o.id,
+                    "side": o.side,
+                    "price": o.price,
+                    "size": o.remaining,
+                    "purpose": o.purpose,
+                    "placed_at": o.placed_at,
+                    "queue_ahead": round(self.matcher.queue_ahead.get(o.id, 0.0), 1),
+                    "wait_s": round(max(0.0, now - (o.placed_at or now)), 1),
+                }
                 for o in self.working_orders if o.remaining > 1e-6
             ],
             "pos_up": {"shares": self.pos_up.shares, "cash": round(self.pos_up.cash, 4), "avg_px": round(self.pos_up.avg_price, 4)},

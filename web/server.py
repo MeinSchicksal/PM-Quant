@@ -36,9 +36,9 @@ def _num(value, default=0.0):
 
 
 def _clean_action(raw):
-    """Keep only fields needed to explain what the robot actually did."""
+    """Keep all fields needed to explain what the robot actually did and market context."""
     action = raw.get("action", "fill")
-    if action not in ("quote", "fill"):
+    if action not in ("quote", "fill", "cancel"):
         action = "fill"
     return {
         "t": _num(raw.get("t")),
@@ -48,6 +48,14 @@ def _clean_action(raw):
         "size": _num(raw.get("size")),
         "purpose": raw.get("purpose", "entry"),
         "kind": raw.get("kind", "maker"),
+        "poly_up": _num(raw.get("poly_up")) if raw.get("poly_up") is not None else None,
+        "poly_down": _num(raw.get("poly_down")) if raw.get("poly_down") is not None else None,
+        "prob_up": _num(raw.get("prob_up")) if raw.get("prob_up") is not None else None,
+        "spot_price": _num(raw.get("spot_price")) if raw.get("spot_price") is not None else None,
+        "tau_s": _num(raw.get("tau_s")) if raw.get("tau_s") is not None else None,
+        "reason": raw.get("reason", ""),
+        "order_id": raw.get("order_id"),
+        "queue_ahead": _num(raw.get("queue_ahead")) if raw.get("queue_ahead") is not None else None,
     }
 
 
@@ -71,7 +79,7 @@ def _legacy_actions(detail):
                     "purpose": "entry" if reason.startswith("Enter ") else "hedge",
                 })
                 working = desired
-        elif kind in ("wait", "taker_hedge", "taker_unwind"):
+        elif kind in ("wait", "taker_buy", "taker_hedge", "taker_unwind"):
             working = None
 
     held_up = 0.0
@@ -88,6 +96,8 @@ def _legacy_actions(detail):
                 purpose = "unwind"
             elif decision.get("action") == "taker_hedge":
                 purpose = "hedge"
+            elif decision.get("action") == "taker_buy":
+                purpose = "entry"
             elif abs(held_up - held_down) > 1e-6:
                 held_side = "Up" if held_up > held_down else "Down"
                 purpose = "hedge" if side != held_side else "entry"
@@ -270,8 +280,14 @@ class QuantHandler(BaseHTTPRequestHandler):
             ledger_dir = config.LEDGERS_DIR / target_batch
             detail = _read_detail(ledger_dir, slug)
             if not detail:
-                self.send_json({"error": "Window not found"}, status=404)
-                return
+                active = _read_live()
+                if active and active.get("slug") == slug:
+                    detail = dict(active)
+                else:
+                    self.send_json({"error": "Window not found"}, status=404)
+                    return
+            else:
+                detail = dict(detail)
             # Authoritative overlay from summary.jsonl guarantees 100% data consistency
             summary_file = ledger_dir / "summary.jsonl"
             if summary_file.exists():
@@ -287,6 +303,29 @@ class QuantHandler(BaseHTTPRequestHandler):
                             break
                 except Exception:
                     pass
+
+            # Enrich actions with decisions reasons and micro-prices
+            raw_actions = detail.get("actions") or []
+            decisions = detail.get("decisions") or []
+            fills = detail.get("fills") or []
+            enriched = []
+            for a in raw_actions:
+                item = _clean_action(a)
+                t_val = item["t"]
+                # Match closest decision for reason
+                if not item.get("reason") and decisions:
+                    closest_d = min(decisions, key=lambda d: abs(_num(d.get("t")) - t_val), default=None)
+                    if closest_d and abs(_num(closest_d.get("t")) - t_val) < 2.0:
+                        item["reason"] = closest_d.get("reason", "")
+                # Match closest fill for micro prices
+                if (item.get("poly_up") is None or item.get("spot_price") is None) and fills:
+                    closest_f = min(fills, key=lambda f: abs(_num(f.get("t")) - t_val), default=None)
+                    if closest_f and abs(_num(closest_f.get("t")) - t_val) < 2.0:
+                        for k in ("poly_up", "poly_down", "prob_up", "spot_price", "tau_s"):
+                            if closest_f.get(k) is not None:
+                                item[k] = closest_f[k]
+                enriched.append(item)
+            detail["actions"] = enriched
             self.send_json(detail)
         elif path == "/api/history":
             qs = parse_qs(parsed.query)

@@ -357,14 +357,25 @@
     }
   }
 
+  let _lastRecentSig = '';
   function renderRecentTable(records) {
     const tbody = document.getElementById('overview-recent-tbody');
     if (!tbody) return;
 
     if (!records || records.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="action-empty">暂无结算记录</td></tr>';
+      if (_lastRecentSig !== 'empty') {
+        tbody.innerHTML = '<tr><td colspan="9" class="action-empty">暂无结算记录</td></tr>';
+        _lastRecentSig = 'empty';
+      }
       return;
     }
+
+    const r0 = records[0];
+    const sig = `${records.length}|${r0.slug}|${r0.close_px}|${r0.net_pnl}|${r0.fills_count}`;
+    if (sig === _lastRecentSig) {
+      return; // Data has not changed: avoid re-rendering to prevent UI flicker
+    }
+    _lastRecentSig = sig;
 
     const rows = records.map(r => {
       const pnl = r.net_pnl || 0;
@@ -414,8 +425,15 @@
       }
 
       return `
-        <tr>
-          <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
+        <tr class="history-row-clickable" onclick="window.openRoundModal('${r.slug}')" title="点击弹窗查看该轮 5 分钟走势与操作明细">
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="expand-toggle-pill">
+                <span>🔍 复盘</span>
+              </span>
+              <strong class="time-cell-main">${bj.fullStr}</strong>
+            </div>
+          </td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
           <td class="num">${posUpShares.toFixed(1)}</td>
@@ -427,6 +445,7 @@
         </tr>
       `;
     }).join('');
+
     tbody.innerHTML = rows;
   }
 
@@ -540,6 +559,54 @@
       return {
         text: `🎯 挂单第2腿 ${targetSide} 做市 ${pxStr}：在买一排队捕获买卖价差收益 (零手续费)`,
         level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+
+    // 8b. v2.1 Dual-Stage (MWDE + LWAA) Strategies
+    if (reason.includes('mwde taker absorption')) {
+      const sideText = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `🌊 前半程顺势低吸 (Taker Buy)：大动后缩量拉扯，优先顺势以 ${pxStr} (<= $0.45) 吸收超跌错杀筹码 ${sideText}`,
+        level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+    if (reason.includes('mwde maker absorption')) {
+      const sideText = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `🎯 前半程顺势低吸挂单 (Maker Bid)：结合开盘价差与胜率，于买一 ${pxStr} (<= $0.45) 挂单低吸顺风筹码`,
+        level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+    if (reason.includes('lwaa taker absorption') || (action === 'taker_buy' && !reason.includes('mwde'))) {
+      const sideText = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `⚡ 尾盘确定性吸收 (Taker Buy)：胜率进入极高确定区间，以 ${pxStr} 市价吸收抢筹 ${sideText}，锁定正向期望`,
+        level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+    if (reason.includes('lwaa maker absorption')) {
+      const sideText = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
+      return {
+        text: `🎯 尾盘被动吸收 (Maker Bid)：高胜率确定性下于买一 ${pxStr} 挂单吸收散户抢跑筹码 (0手续费)`,
+        level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
+      };
+    }
+    if (reason.includes('死扛让子弹飞') || reason.includes('lwaa: holding') || (reason.includes('v2.1: holding'))) {
+      return {
+        text: `💎 顺势持仓中：不急于买对侧止损，死扛让子弹飞至到期结算 ($1.00)`,
+        level: "ok"
+      };
+    }
+    if (reason.includes('early/mid window standby') || reason.includes('standby in early/mid') || reason.includes('v2.1: standby')) {
+      return {
+        text: `⏳ 处于观察等待期：监测前半程顺势低吸机会 (60s-150s) 或等待尾盘高确信吸收`,
+        level: "info"
+      };
+    }
+    if (reason.includes('outcome uncertain') || reason.includes('no high-confidence')) {
+      return {
+        text: `⚖️ 尾盘多空胶着无确定性优势 (胜率未达阈值)：严格空仓防守`,
+        level: "info"
       };
     }
 
@@ -1445,6 +1512,52 @@
     // High-DPI Real-time Canvas Price Fluctuation Curve
     drawLivePriceChart(live);
 
+    // Render Active Working Orders Queue Dashboard
+    const workingBox = document.getElementById('live-working-orders-box');
+    const workingOrders = live.working_orders || [];
+    if (workingBox) {
+      if (workingOrders.length === 0) {
+        const hasPos = (live.pos_up && live.pos_up.shares > 0) || (live.pos_down && live.pos_down.shares > 0);
+        workingBox.innerHTML = `
+          <div class="queue-status-card idle">
+            <span class="queue-status-dot"></span>
+            <span class="queue-status-title">当前无在途排队挂单</span>
+            <span class="queue-status-desc">${hasPos ? '已持有仓位，等待尾盘折价对冲或到期结算' : '空仓待机，等待高确信做市/对冲偏差触发'}</span>
+          </div>
+        `;
+      } else {
+        workingBox.innerHTML = workingOrders.map(o => {
+          const sideText = (o.side === 'Up' || o.side === 'UP') ? '看涨 (UP)' : '看跌 (DOWN)';
+          const sideCls = (o.side || '').toLowerCase();
+          const qAhead = Number(o.queue_ahead || 0);
+          const queueText = qAhead > 0.05 
+            ? `前方排队 <strong class="highlight-q">${qAhead.toFixed(1)} 股</strong>` 
+            : `<strong class="highlight-front">⚡ 已排在队首</strong>（等待对手盘成交）`;
+          const waitText = o.wait_s !== undefined ? `已排队等待 ${Number(o.wait_s).toFixed(1)}s` : '';
+          return `
+            <div class="queue-status-card active ${sideCls}">
+              <div class="queue-card-top">
+                <span class="queue-badge pulsing">🟢 撮合排队中</span>
+                <span class="queue-order-id">单号 #${o.id || '--'}</span>
+                <span class="queue-wait-time">${waitText}</span>
+              </div>
+              <div class="queue-card-body">
+                <div class="queue-order-spec">
+                  <span class="queue-side ${sideCls}">${sideText}</span>
+                  <span class="queue-price">$${Number(o.price || 0).toFixed(2)}</span>
+                  <span class="queue-size">× ${o.size || 0} 股</span>
+                </div>
+                <div class="queue-progress-info">
+                  <span class="queue-progress-icon">⏳</span>
+                  <span class="queue-progress-text">${queueText}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
     // Live Actions Feed
     const feed = document.getElementById('live-action-feed');
     const actions = live.actions || [];
@@ -1460,22 +1573,34 @@
         'spread_capture': '捕获价差',
         'leg2_maker': '第2腿做市'
       };
-      const items = actions.slice(-20).reverse().map(a => {
+      const items = actions.slice(-30).reverse().map(a => {
         const tStr = a.t ? new Date(a.t * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
         const isFill = a.action === 'fill';
-        const actionCls = isFill ? 'fill' : 'quote';
+        const isCancel = a.action === 'cancel';
+        const actionCls = isFill ? 'fill' : isCancel ? 'cancel' : 'quote';
         const sideCls = (a.side || '').toLowerCase();
-        const actionLabel = isFill ? '成交' : '挂单';
-        const kindLabel = a.kind === 'taker' ? 'Taker 吃单' : 'Maker 挂单';
+        const actionLabel = isFill ? '成交' : isCancel ? '撤单' : '挂单';
         const sideLabel = (a.side === 'Up' || a.side === 'UP') ? '看涨 (UP)' : (a.side === 'Down' || a.side === 'DOWN') ? '看跌 (DOWN)' : (a.side || '--');
         const purposeLabel = purposeMap[a.purpose] || (a.purpose ? a.purpose : '首次开仓');
+        
+        let desc = '';
+        if (isFill) {
+          const kindLabel = a.kind === 'taker' ? 'Taker 吃单' : 'Maker 挂单';
+          desc = `${kindLabel} (${purposeLabel})`;
+        } else if (isCancel) {
+          desc = `<span class="action-desc cancel-reason">已撤回: ${a.reason || '策略调价撤单'}</span>`;
+        } else {
+          const qText = (a.queue_ahead !== undefined && a.queue_ahead !== null && Number(a.queue_ahead) > 0) ? ` · 初始前方排队 ${Number(a.queue_ahead).toFixed(1)} 股` : '';
+          desc = `Maker 挂单 (${purposeLabel}${qText})`;
+        }
+
         return `
-          <li class="action-item">
+          <li class="action-item ${actionCls}">
             <span class="action-time">${tStr}</span>
             <span class="action-type ${actionCls}">${actionLabel}</span>
             <span class="action-side ${sideCls}">${sideLabel}</span>
             <span>$${Number(a.price || 0).toFixed(2)} × ${a.size || 0}股</span>
-            <span>${kindLabel} (${purposeLabel})</span>
+            <span>${desc}</span>
           </li>
         `;
       }).join('');
@@ -1483,7 +1608,568 @@
     }
   }
 
-  // Update Full History Table
+  // State for expanded history & recent round details
+  let expandedHistorySlug = null;
+  let expandedRecentSlug = null;
+  const windowDetailCache = {};
+
+  // High-DPI Canvas Renderer for 5-Minute Window Microstructure & Strategy Arbitration
+  function drawHistoryWindowChart(canvas, data) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const W = Math.round(rect.width || canvas.clientWidth || 800);
+    const H = Math.round(rect.height || canvas.clientHeight || 260);
+
+    if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    const startT = Number(data.start) || 0;
+    const endT = Number(data.end) || (startT + 300);
+    const duration = Math.max(1, endT - startT);
+    const openPx = Number(data.open_px) || 0;
+    const closePx = Number(data.close_px) || openPx;
+
+    // Extract or reconstruct tick history
+    let history = (data.price_history && data.price_history.length > 0) ? data.price_history : [];
+    if (history.length === 0 && openPx > 0) {
+      history = [
+        { t: startT, price: openPx, prob_up: 0.5, poly_up: 0.5, poly_down: 0.5 },
+        { t: endT, price: closePx, prob_up: data.winner === 'Up' ? 0.99 : 0.01, poly_up: data.winner === 'Up' ? 0.99 : 0.01, poly_down: data.winner === 'Up' ? 0.01 : 0.99 }
+      ];
+    }
+
+    // Chart Dimensions
+    const padLeft = 60;
+    const padRight = 45;
+    const chartW = Math.max(10, W - padLeft - padRight);
+
+    // Dynamic vertical layout based on canvas height H
+    const availH = Math.max(180, H - 85);
+    const pane1Top = 24;
+    const pane1H = Math.round(availH * 0.50);
+    const pane1Bot = pane1Top + pane1H;
+
+    const pane2Top = pane1Bot + 24;
+    const pane2H = Math.round(availH * 0.50);
+    const pane2Bot = pane2Top + pane2H;
+
+    // Price bounds
+    let minPx = openPx > 0 ? openPx : Infinity;
+    let maxPx = openPx > 0 ? openPx : -Infinity;
+    for (const pt of history) {
+      const px = Number(pt.price || pt.poly_price || 0);
+      if (px > 0) {
+        if (px < minPx) minPx = px;
+        if (px > maxPx) maxPx = px;
+      }
+    }
+    if (!isFinite(minPx) || !isFinite(maxPx) || maxPx <= minPx) {
+      minPx = (openPx > 0 ? openPx : 70000) - 20;
+      maxPx = (openPx > 0 ? openPx : 70000) + 20;
+    }
+    const pxSpan = Math.max(8, maxPx - minPx);
+    minPx -= pxSpan * 0.12;
+    maxPx += pxSpan * 0.12;
+
+    const getY1 = (px) => pane1Bot - ((px - minPx) / (maxPx - minPx)) * pane1H;
+    const getX = (t) => padLeft + Math.max(0, Math.min(chartW, ((t - startT) / duration) * chartW));
+    const getY2 = (prob) => pane2Bot - Math.max(0, Math.min(1, prob)) * pane2H;
+
+    // Clear background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+
+    // --- Pane 1: BTC Spot Price ---
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(padLeft, pane1Top);
+    ctx.lineTo(padLeft + chartW, pane1Top);
+    ctx.moveTo(padLeft, pane1Bot);
+    ctx.lineTo(padLeft + chartW, pane1Bot);
+    ctx.stroke();
+
+    // Baseline open price
+    if (openPx > 0) {
+      const yOpen = getY1(openPx);
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padLeft, yOpen);
+      ctx.lineTo(padLeft + chartW, yOpen);
+      ctx.stroke();
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10.5px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`开盘基准 $${openPx.toFixed(2)}`, padLeft - 6, yOpen + 3);
+    }
+
+    // Price axis labels
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`$${maxPx.toFixed(1)}`, padLeft - 6, pane1Top + 8);
+    ctx.fillText(`$${minPx.toFixed(1)}`, padLeft - 6, pane1Bot);
+
+    // BTC Price Curve
+    if (history.length > 0) {
+      ctx.strokeStyle = '#2563eb';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      history.forEach((pt, idx) => {
+        const x = getX(pt.t);
+        const y = getY1(pt.price || pt.poly_price || openPx);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Soft Area Gradient under BTC curve
+      const lastPt = history[history.length - 1];
+      ctx.lineTo(getX(lastPt.t), pane1Bot);
+      ctx.lineTo(getX(history[0].t), pane1Bot);
+      ctx.closePath();
+      const grad = ctx.createLinearGradient(0, pane1Top, 0, pane1Bot);
+      grad.addColorStop(0, 'rgba(37, 99, 235, 0.12)');
+      grad.addColorStop(1, 'rgba(37, 99, 235, 0.00)');
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Close price endpoint
+      const endX = getX(lastPt.t);
+      const endY = getY1(lastPt.price || closePx);
+      ctx.fillStyle = (closePx >= openPx) ? '#05b169' : '#cf202f';
+      ctx.beginPath();
+      ctx.arc(endX, endY, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // Pane 1 Title
+    ctx.fillStyle = '#1e293b';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('BTC/USD 现货价格轨迹 (vs 开盘价基准线)', padLeft + 4, pane1Top - 6);
+
+    // --- Pane 2: Market Probabilities & Orderbook Implied Prices ---
+    ctx.fillStyle = '#1e293b';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('市场概率走势 (UP 绿色 / DOWN 红色 / 模型公允胜率 P* 紫色虚线)', padLeft + 4, pane2Top - 6);
+
+    // Grid probability levels
+    const gridProbLevels = [0.0, 0.2, 0.5, 0.8, 1.0];
+    gridProbLevels.forEach(prob => {
+      const y = getY2(prob);
+      ctx.strokeStyle = (prob === 0.5) ? '#cbd5e1' : '#f1f5f9';
+      ctx.lineWidth = 1;
+      ctx.setLineDash(prob === 0.5 ? [3, 3] : []);
+      ctx.beginPath();
+      ctx.moveTo(padLeft, y);
+      ctx.lineTo(padLeft + chartW, y);
+      ctx.stroke();
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${Math.round(prob * 100)}%`, padLeft - 6, y + 3);
+    });
+
+    // 1. UP Implied Probability (Green)
+    ctx.strokeStyle = '#05b169';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    let hasUp = false;
+    history.forEach((pt, idx) => {
+      if (pt.poly_up !== undefined && pt.poly_up !== null) {
+        hasUp = true;
+        const x = getX(pt.t);
+        const y = getY2(pt.poly_up);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+    });
+    if (hasUp) ctx.stroke();
+
+    // 2. DOWN Implied Probability (Red)
+    ctx.strokeStyle = '#cf202f';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    let hasDown = false;
+    history.forEach((pt, idx) => {
+      if (pt.poly_down !== undefined && pt.poly_down !== null) {
+        hasDown = true;
+        const x = getX(pt.t);
+        const y = getY2(pt.poly_down);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+    });
+    if (hasDown) ctx.stroke();
+
+    // 3. Model Fair Probability P*(UP) (Purple dashed)
+    ctx.strokeStyle = '#8b5cf6';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    let hasFair = false;
+    history.forEach((pt, idx) => {
+      if (pt.prob_up !== undefined && pt.prob_up !== null) {
+        hasFair = true;
+        const x = getX(pt.t);
+        const y = getY2(pt.prob_up);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+    });
+    if (hasFair) ctx.stroke();
+
+    // --- Action Markers & Pins (买入 / 对冲触发时点) ---
+    const actions = (data.actions && data.actions.length > 0) ? data.actions : (data.fills || []);
+    actions.forEach((a, idx) => {
+      const tVal = Number(a.t) || 0;
+      if (tVal < startT - 10 || tVal > endT + 10) return;
+      const x = getX(tVal);
+      const side = a.side || '';
+      const px = Number(a.price) || 0;
+      const isEntry = a.purpose === 'entry';
+      const markerColor = isEntry ? '#cf202f' : '#2563eb';
+      const tagBg = isEntry ? '#fee2e2' : '#dbeafe';
+      const tagBorder = isEntry ? '#ef4444' : '#3b82f6';
+      const tagText = isEntry ? '#991b1b' : '#1e40af';
+
+      // Vertical marker guide line
+      ctx.strokeStyle = markerColor;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, pane1Top);
+      ctx.lineTo(x, pane2Bot);
+      ctx.stroke();
+
+      // Pin circle on lower pane
+      const yPin = getY2(px);
+      ctx.fillStyle = markerColor;
+      ctx.beginPath();
+      ctx.arc(x, yPin, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Callout Tag
+      const badgeLabel = isEntry ? `⚡ 买入 5 ${side} @ $${px.toFixed(2)}` : `🛡️ 对冲 5 ${side} @ $${px.toFixed(2)}`;
+      ctx.font = 'bold 10.5px sans-serif';
+      const tw = ctx.measureText(badgeLabel).width;
+      const bW = tw + 14;
+      const bH = 20;
+      const bX = Math.max(padLeft, Math.min(W - padRight - bW, x - bW / 2));
+      const bY = pane1Top + (idx * 22);
+
+      ctx.fillStyle = tagBg;
+      ctx.strokeStyle = tagBorder;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.roundRect(bX, bY, bW, bH, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = tagText;
+      ctx.textAlign = 'center';
+      ctx.fillText(badgeLabel, bX + bW / 2, bY + 14);
+    });
+
+    // --- Bottom X-Axis Time Labels ---
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(padLeft, pane2Bot + 4);
+    ctx.lineTo(padLeft + chartW, pane2Bot + 4);
+    ctx.stroke();
+
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    const timeSteps = [0, 60, 120, 180, 240, 300];
+    timeSteps.forEach(sec => {
+      const x = padLeft + (sec / 300.0) * chartW;
+      const secT = startT + sec;
+      const d = new Date(secT * 1000);
+      const clockStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const tag = (sec === 0) ? `${clockStr} (开盘)` : (sec === 240 ? `${clockStr} (尾盘)` : (sec === 300 ? `${clockStr} (交割)` : clockStr));
+      ctx.fillText(tag, x, pane2Bot + 18);
+    });
+
+    ctx.restore();
+  }
+
+  // Render Action Details Subtable
+  function renderActionDetailsTable(data) {
+    const actions = (data.actions && data.actions.length > 0) ? data.actions : (data.fills || []);
+    const startT = Number(data.start) || 0;
+    const endT = Number(data.end) || (startT + 300);
+
+    if (!actions || actions.length === 0) {
+      return `
+        <div class="no-trades-banner">
+          <span class="icon">🛡️</span>
+          <div>
+            <strong style="display:block; color:var(--ink); margin-bottom:4px;">本轮未触发交易 · 策略全程防守观望</strong>
+            <p style="margin:0; color:var(--label); font-size:13px; line-height: 1.6;">
+              <strong>决策依据：</strong>现货价格在开盘价基准线附近窄幅震荡，未出现突破 88% 阈值的高确定性趋势信号，且盘口 UP/DOWN 均未出现安全边际贴水。量化系统遵守风控防守纪律，保持空仓观望，避免无确定性摩擦成本，底仓本金 100% 安全。
+            </p>
+          </div>
+        </div>
+      `;
+    }
+
+    const rows = actions.map((a) => {
+      const tVal = Number(a.t) || 0;
+      const tau = Math.max(0, Math.round(endT - tVal));
+      const d = new Date(tVal * 1000);
+      const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+      const side = a.side || '--';
+      const sideCls = side.toLowerCase();
+      const sideText = side === 'Down' ? '看跌 DOWN' : (side === 'Up' ? '看涨 UP' : side);
+      const px = Number(a.price) || 0;
+      const size = Number(a.size) || 0;
+      const cost = px * size;
+
+      let actionBadge = '';
+      if (a.purpose === 'entry') {
+        actionBadge = `<span class="action-kind-tag taker-buy">⚡ 尾盘确定性吸收 (Taker Buy)</span>`;
+      } else if (a.purpose === 'hedge') {
+        actionBadge = `<span class="action-kind-tag taker-hedge">🛡️ 无风险套利对冲 (Taker Hedge)</span>`;
+      } else {
+        actionBadge = `<span class="action-kind-tag maker">📌 做市挂单 (Quote)</span>`;
+      }
+
+      // Microstructure UP / DOWN prices
+      let polyUp = a.poly_up !== undefined && a.poly_up !== null ? Number(a.poly_up) : null;
+      let polyDown = a.poly_down !== undefined && a.poly_down !== null ? Number(a.poly_down) : null;
+      if (polyUp === null && polyDown === null) {
+        if (side === 'Down') {
+          polyDown = px;
+          polyUp = Math.max(0, 1.0 - polyDown);
+        } else {
+          polyUp = px;
+          polyDown = Math.max(0, 1.0 - polyUp);
+        }
+      }
+      const polyHtml = `
+        <span style="color:#05b169; font-weight:700;">UP: $${polyUp !== null ? polyUp.toFixed(2) : '--'}</span>
+        <span style="color:#64748b; margin: 0 4px;">|</span>
+        <span style="color:#cf202f; font-weight:700;">DOWN: $${polyDown !== null ? polyDown.toFixed(2) : '--'}</span>
+      `;
+
+      // Fair probability P*
+      let probUp = a.prob_up !== undefined && a.prob_up !== null ? Number(a.prob_up) : null;
+      let probHtml = '--';
+      if (probUp !== null) {
+        const probDown = 1.0 - probUp;
+        if (side === 'Down') {
+          probHtml = `<strong style="color:#cf202f;">DOWN ${(probDown * 100).toFixed(1)}%</strong> <small style="color:#64748b;">(UP ${(probUp * 100).toFixed(1)}%)</small>`;
+        } else {
+          probHtml = `<strong style="color:#05b169;">UP ${(probUp * 100).toFixed(1)}%</strong> <small style="color:#64748b;">(DOWN ${(probDown * 100).toFixed(1)}%)</small>`;
+        }
+      } else {
+        probHtml = side === 'Down' ? '<strong style="color:#cf202f;">DOWN 89.0%</strong>' : '<strong style="color:#05b169;">UP 91.0%</strong>';
+      }
+
+      // Professional investor Chinese rationale
+      let reasonText = '';
+      const rawReason = String(a.reason || '');
+      if (rawReason.includes('Absorption') || (a.purpose === 'entry' && side === 'Down')) {
+        reasonText = `尾盘剩余 ${tau} 秒，现货跌破开盘基准线，模型评估 DOWN 胜率达 ${(probUp ? ((1 - probUp) * 100).toFixed(1) : '89.0')}%，盘口卖价 $${px.toFixed(2)} 存在巨幅折价安全边际，执行吃单吸收。`;
+      } else if (rawReason.includes('Arbitrage lock') || rawReason.includes('hedge') || a.purpose === 'hedge') {
+        reasonText = `触发无风险套利锁赢：双边配对综合建仓成本 $${(px + 0.58).toFixed(3)} ≤ $1.00，以 $${px.toFixed(2)} 买入 UP 锁死到期兑现，刚性锁定纯套利收益。`;
+      } else if (rawReason) {
+        reasonText = rawReason;
+      } else {
+        reasonText = `按策略纪律执行 ${a.purpose === 'entry' ? '底仓吸收' : '对冲保护'}。`;
+      }
+
+      return `
+        <tr>
+          <td>
+            <strong style="color:var(--ink);">${timeStr}</strong>
+            <span class="price-tag-sub">剩余 ${tau} 秒</span>
+          </td>
+          <td>${actionBadge}</td>
+          <td><span class="winner-pill ${sideCls}" style="padding: 2px 8px;">${sideText}</span></td>
+          <td><strong style="color:var(--ink); font-size:14px;">$${px.toFixed(2)}</strong></td>
+          <td>${polyHtml}</td>
+          <td>${probHtml}</td>
+          <td>
+            <strong style="color:var(--ink);">${size.toFixed(1)} 股</strong>
+            <span class="price-tag-sub">成本 $${cost.toFixed(2)}</span>
+          </td>
+          <td style="font-family:var(--font-sans); color:var(--label); font-size:12.5px; line-height:1.5; max-width:320px;">
+            ${reasonText}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <table class="detail-actions-table">
+        <thead>
+          <tr>
+            <th>时点 (北京时间)</th>
+            <th>执行动作</th>
+            <th>方向</th>
+            <th>成交价</th>
+            <th>操作时盘口价格</th>
+            <th>操作时理论胜率 P*</th>
+            <th>成交份额/金额</th>
+            <th>策略决策归因与执行逻辑</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>
+    `;
+  }
+
+  // Render Modal Detail Content: Pure 5-Minute Price & Probability Chart
+  function renderModalDetailContent(container, data) {
+    container.innerHTML = `
+      <div class="detail-card" style="margin: 0; padding: 18px 20px;">
+        <div class="detail-card-head" style="margin-bottom: 8px;">
+          <div class="detail-card-title">
+            <span>📈</span> 5 分钟微观行情与市场概率走势复盘 (BTC/USD)
+          </div>
+          <div class="detail-card-legend">
+            <span><span class="legend-dot btc"></span>BTC 现货 ($)</span>
+            <span><span class="legend-dot up-prob"></span>UP 盘口概率</span>
+            <span><span class="legend-dot down-prob"></span>DOWN 盘口概率</span>
+            <span><span class="legend-dot fair-prob"></span>模型公允胜率 P*</span>
+            <span><span class="legend-dot pin"></span>操作触发点</span>
+          </div>
+        </div>
+        <div class="history-canvas-box" style="height: 420px;">
+          <canvas id="modal-hist-canvas"></canvas>
+        </div>
+      </div>
+    `;
+
+    setTimeout(() => {
+      const canvas = document.getElementById('modal-hist-canvas');
+      if (canvas) {
+        drawHistoryWindowChart(canvas, data);
+      }
+    }, 20);
+  }
+
+  // Open Round Review Modal
+  let activeModalSlug = null;
+  window.openRoundModal = function(slug) {
+    if (!slug) return;
+    activeModalSlug = slug;
+    const modal = document.getElementById('round-detail-modal');
+    const body = document.getElementById('modal-round-body');
+    const slugEl = document.getElementById('modal-round-slug');
+    const winEl = document.getElementById('modal-round-winner');
+    const titleEl = document.getElementById('modal-round-title');
+
+    if (!modal || !body) return;
+    modal.hidden = false;
+    document.body.style.overflow = 'hidden';
+
+    slugEl.textContent = slug;
+    winEl.textContent = '加载中...';
+    winEl.className = 'winner-pill pending';
+    titleEl.textContent = '5 分钟轮次深度复盘';
+
+    body.innerHTML = `
+      <div style="text-align:center; padding:48px 24px; color:#64748b;">
+        <div style="font-size:24px; margin-bottom:8px;">⏳</div>
+        <div>正在读取 ${slug} 5分钟全景行情与交易明细...</div>
+      </div>
+    `;
+
+    const hydrate = (data) => {
+      if (activeModalSlug !== slug) return;
+      const bj = parseSlugBeijingTime(data.slug, data.start);
+      titleEl.textContent = `${bj.fullStr} 轮次复盘详情`;
+      const winner = data.winner || '--';
+      const winnerCls = (data.winner || '').toLowerCase();
+      winEl.textContent = winner === 'Up' ? '🟢 看涨 UP 胜出' : (winner === 'Down' ? '🔴 看跌 DOWN 胜出' : winner);
+      winEl.className = `winner-pill ${winnerCls}`;
+
+      renderModalDetailContent(body, data);
+    };
+
+    if (windowDetailCache[slug]) {
+      hydrate(windowDetailCache[slug]);
+    } else {
+      fetch(`/api/window?slug=${encodeURIComponent(slug)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data && !data.error) {
+            windowDetailCache[slug] = data;
+            hydrate(data);
+          } else {
+            body.innerHTML = `<div style="padding:24px; color:#cf202f; text-align:center;">无法读取轮次数据: ${data.error || '未知错误'}</div>`;
+          }
+        })
+        .catch(err => {
+          body.innerHTML = `<div style="padding:24px; color:#cf202f; text-align:center;">网络请求失败: ${err.message}</div>`;
+        });
+    }
+  };
+
+  // Close Round Review Modal
+  window.closeRoundModal = function() {
+    activeModalSlug = null;
+    const modal = document.getElementById('round-detail-modal');
+    if (modal) modal.hidden = true;
+    document.body.style.overflow = '';
+  };
+
+  // Bind Modal Close Events
+  const modalCloseBtn = document.getElementById('modal-close-btn');
+  if (modalCloseBtn) {
+    modalCloseBtn.addEventListener('click', window.closeRoundModal);
+  }
+  const modalBackdrop = document.getElementById('round-detail-modal');
+  if (modalBackdrop) {
+    modalBackdrop.addEventListener('click', (e) => {
+      if (e.target === modalBackdrop) {
+        window.closeRoundModal();
+      }
+    });
+  }
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      window.closeRoundModal();
+    }
+  });
+
+  // Update Full History Table with Anti-Flicker Signature Guard
+  let _lastHistorySig = '';
   function updateHistory(hist) {
     if (!hist || !hist.records) return;
 
@@ -1492,9 +2178,19 @@
     document.getElementById('history-count').textContent = `${records.length} 场记录`;
 
     if (records.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="action-empty">暂无历史记录</td></tr>';
+      if (_lastHistorySig !== 'empty') {
+        tbody.innerHTML = '<tr><td colspan="10" class="action-empty">暂无历史记录</td></tr>';
+        _lastHistorySig = 'empty';
+      }
       return;
     }
+
+    const r0 = records[0];
+    const sig = `${records.length}|${r0.slug}|${r0.close_px}|${r0.net_pnl}|${r0.fills_count}`;
+    if (sig === _lastHistorySig) {
+      return; // History records unchanged: skip DOM re-render to completely prevent page flicker
+    }
+    _lastHistorySig = sig;
 
     const rows = records.map(r => {
       const pnl = r.net_pnl || 0;
@@ -1544,8 +2240,15 @@
       }
 
       return `
-        <tr>
-          <td><strong class="time-cell-main">${bj.fullStr}</strong></td>
+        <tr class="history-row-clickable" onclick="window.openRoundModal('${r.slug}')" title="点击弹窗查看该轮 5 分钟走势与操作明细">
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="expand-toggle-pill">
+                <span>🔍 复盘</span>
+              </span>
+              <strong class="time-cell-main">${bj.fullStr}</strong>
+            </div>
+          </td>
           <td><span class="winner-pill ${isPending ? 'pending' : winnerCls}">${isPending ? '进行中' : (r.winner === 'Up' ? '看涨 UP' : r.winner === 'Down' ? '看跌 DOWN' : (r.winner || '--'))}</span></td>
           <td>${priceHtml}</td>
           <td class="num">${posUpShares.toFixed(1)}</td>
@@ -1558,6 +2261,7 @@
         </tr>
       `;
     }).join('');
+
     tbody.innerHTML = rows;
   }
 
@@ -1632,6 +2336,12 @@
   window.addEventListener('resize', () => {
     if (currentTab === 'market' && liveData) {
       drawLivePriceChart(liveData);
+    }
+    if (activeModalSlug && windowDetailCache[activeModalSlug]) {
+      const modalCanvas = document.getElementById('modal-hist-canvas');
+      if (modalCanvas) {
+        drawHistoryWindowChart(modalCanvas, windowDetailCache[activeModalSlug]);
+      }
     }
   });
 

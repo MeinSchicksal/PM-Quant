@@ -1,7 +1,26 @@
 # Changelog
 
 All notable changes to the **PM-Quant** system are documented in this file.
-Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0`, `v1.1`, `v2.0`), with each version isolated under `data/2_ledgers/<VERSION>/`.
+Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0`, `v1.1`, `v2.0`, `v2.1`), with each version isolated under `data/2_ledgers/<VERSION>/`.
+
+---
+
+## [v2.1] - 2026-11-11
+### 双阶段复合做市与吸收引擎 (MWDE + LWAA)
+
+#### 核心新增与量化口径
+1. **阶段 1：前半程顺势低吸模块 (MWDE, 60s ~ 150s / $\tau \in [150s, 240s]$)**
+   - **大动后缩量滤网**：前一盘振幅 $\ge \$20.0$，本盘前 60s 价格振幅 $\le \$15.0$，确认市场处于大动后的缩量均值回归通道。
+   - **中轴胜率与现货偏离选边**：以实时现货偏离 $\Delta S = S_t - S_0$ 与模型概率 $P^*$ 判定强势侧（$\Delta S > 0$ 且 $P^* \ge 0.50$ 优先选 UP，反之选 DOWN）。
+   - **买入限价放宽至 $\le \$0.45$**：仅在强势侧被市场恐慌假摔错杀至 $\le \$0.45$ 时，以极高赔率（>1:1.22）低吸吃入（Taker/Maker）。
+   - **不急于对冲止损**：建仓后严禁追高买入对侧割肉或主动平仓（`taker_unwind` 彻底禁用）；若后续两边合并成本 $\le \$0.85$ 则双吃锁盈，否则坚定死扛单边至到期兑现 \$1.00。
+2. **阶段 2：后半程尾盘高确信吸收模块 (LWAA, 120s ~ 15s / $\tau \in [15s, 120s]$)**
+   - 若前半程未吃到单，进入尾盘大单边确认期（$P^* \ge 80\%$）。
+   - 买入最高限价设为 **\$0.65**，硬性天花板 **\$0.70**（超过 \$0.70 绝不追高）。
+   - 每轮挂单尝试上限设为 1 次，挂不上不再反复追挂重单。
+3. **独立账本与环境隔离**：
+   - 启用全新独立账本目录 `data/2_ledgers/v2.1/`，初始本金干净重置为 \$100.00。
+   - 全套 74 项微观结构与数学不变量单元测试 100% 通过。
 
 ---
 

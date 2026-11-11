@@ -76,14 +76,19 @@ def plan_order_actions(
             if o.cancel_at is None and o.remaining > 1e-6:
                 # Cancel immediately if urgent, or if order has rested past max queue wait time
                 order_age = now - (o.placed_at or now)
-                if is_urgent_cancel or order_age >= max_queue_wait_s:
+                if is_urgent_cancel:
+                    o.cancel_reason = "急剧变盘/紧急避险撤单"
+                    to_cancel.append(o)
+                elif order_age >= max_queue_wait_s:
+                    o.cancel_reason = f"排队超时撤单(已排队{order_age:.1f}s)"
                     to_cancel.append(o)
         return to_cancel, None
 
-    if decision.action in ("taker_hedge", "taker_unwind"):
+    if decision.action in ("taker_buy", "taker_hedge", "taker_unwind"):
         # Immediate aggressive order: cancel any working makers first
         for o in working_orders:
             if o.cancel_at is None and o.remaining > 1e-6:
+                o.cancel_reason = "转为Taker吃单撤回未成挂单"
                 to_cancel.append(o)
         return to_cancel, decision
 
@@ -99,6 +104,7 @@ def plan_order_actions(
                 if not is_order_diff_significant(o, target_side, target_px, target_sz):
                     reusable_order = o
                 else:
+                    o.cancel_reason = f"盘口调价重挂 (${o.price:.2f} → ${target_px:.2f})"
                     to_cancel.append(o)
                     
         if reusable_order is not None:
