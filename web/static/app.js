@@ -10,6 +10,8 @@
   let historyData = null;
   let liveData = null;
   let chartMode = 'dual'; // 'dual' | 'price' | 'prob'
+  let liveChartHover = null;
+  let liveChartGeom = null;
 
   // DOM Elements
   const timeEl = document.getElementById('current-time');
@@ -160,6 +162,8 @@
       if (liveData) drawLivePriceChart(liveData);
     });
   });
+
+  bindLiveChartHover();
 
   // Formatting Helpers
   function fmtPct(val) {
@@ -717,28 +721,31 @@
   function drawLivePriceChart(live) {
     const canvas = document.getElementById('live-price-canvas');
     if (!canvas) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Adapt to Retina / High-DPI
-    const dpr = window.devicePixelRatio || 1;
+    const MONO = '"Geist Mono","JetBrains Mono","SF Mono","Cascadia Mono","Segoe UI Mono",monospace';
+    const SANS = '"Inter","PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif';
+    const C = {
+      poly: '#0ea5e9', polyDeep: '#0284c7',
+      up: '#05b169', down: '#cf202f',
+      model: '#f59e0b', modelDeep: '#b45309',
+      ink: '#0f172a', label: '#475569', axis: '#64748b', faint: '#94a3b8',
+      grid: '#e8eef5', gridSoft: '#f2f6fa',
+      mask: 'rgba(224, 242, 254, 0.5)', nowLine: '#0284c7',
+      basePoly: '#0284c7', baseBin: '#94a3b8', baseProb: '#cbd5e1'
+    };
+
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
-    const displayWidth = Math.round(rect.width || canvas.clientWidth || 800);
-    const displayHeight = Math.round(rect.height || canvas.clientHeight || 290);
-
-    if (canvas.width !== Math.round(displayWidth * dpr) || canvas.height !== Math.round(displayHeight * dpr)) {
-      canvas.width = Math.round(displayWidth * dpr);
-      canvas.height = Math.round(displayHeight * dpr);
+    const W = Math.round(rect.width || canvas.clientWidth || 900);
+    const H = Math.round(rect.height || canvas.clientHeight || 400);
+    if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
     }
-
     ctx.save();
     ctx.scale(dpr, dpr);
-
-    const W = displayWidth;
-    const H = displayHeight;
-
-    // Clear background
     ctx.clearRect(0, 0, W, H);
 
     const openPx = live.open_px || 0;
@@ -748,637 +755,338 @@
     const nowT = live.now || (Date.now() / 1000);
     const elapsed = Math.max(0, Math.min(300, Math.round(nowT - startT)));
 
-    // Update elapsed badge
     const elapsedBadge = document.getElementById('chart-elapsed-badge');
-    if (elapsedBadge) {
-      elapsedBadge.textContent = `第 ${elapsed} 秒 / 300 秒`;
-    }
+    if (elapsedBadge) elapsedBadge.textContent = `第 ${elapsed} 秒 / 300 秒`;
 
-    // Color definitions: UP is Green, DOWN is Red
-    const COLOR_UP = '#05b169';    // 绿色 (UP 买涨 / 在开盘价上方)
-    const COLOR_DOWN = '#cf202f';  // 红色 (DOWN 买跌 / 跌到下方)
-    const FILL_UP_TOP = 'rgba(5, 177, 105, 0.16)';
-    const FILL_UP_BOT = 'rgba(5, 177, 105, 0.01)';
-    const FILL_DOWN_TOP = 'rgba(207, 32, 47, 0.16)';
-    const FILL_DOWN_BOT = 'rgba(207, 32, 47, 0.01)';
-
-    // Calculate High, Low, Range across both series and baselines
     let highPx = openPx > 0 ? openPx : (live.spot || 0);
-    let lowPx = openPx > 0 ? openPx : (live.spot || 0);
-    if (binanceOpenPx > 0) {
-      if (binanceOpenPx > highPx) highPx = binanceOpenPx;
-      if (binanceOpenPx < lowPx) lowPx = binanceOpenPx;
-    }
+    let lowPx = highPx;
+    if (binanceOpenPx > 0) { highPx = Math.max(highPx, binanceOpenPx); lowPx = Math.min(lowPx, binanceOpenPx); }
     for (const pt of history) {
       if (pt.price > highPx) highPx = pt.price;
       if (pt.price < lowPx) lowPx = pt.price;
-      if (pt.poly_price && pt.poly_price > 0) {
-        if (pt.poly_price > highPx) highPx = pt.poly_price;
-        if (pt.poly_price < lowPx) lowPx = pt.poly_price;
-      }
+      if (pt.poly_price && pt.poly_price > 0) { highPx = Math.max(highPx, pt.poly_price); lowPx = Math.min(lowPx, pt.poly_price); }
     }
-    if (live.spot) {
-      if (live.spot > highPx) highPx = live.spot;
-      if (live.spot < lowPx) lowPx = live.spot;
-    }
-    if (live.poly_spot && live.poly_spot > 0) {
-      if (live.poly_spot > highPx) highPx = live.poly_spot;
-      if (live.poly_spot < lowPx) lowPx = live.poly_spot;
-    }
+    if (live.spot) { highPx = Math.max(highPx, live.spot); lowPx = Math.min(lowPx, live.spot); }
+    if (live.poly_spot && live.poly_spot > 0) { highPx = Math.max(highPx, live.poly_spot); lowPx = Math.min(lowPx, live.poly_spot); }
+    const rangeBps = openPx > 0 ? (((highPx - lowPx) / openPx) * 10000).toFixed(1) : '0.0';
 
-    const rangeDiff = highPx - lowPx;
-    const rangeBps = openPx > 0 ? ((rangeDiff / openPx) * 10000).toFixed(1) : '0.0';
-
-    const statOpen = document.getElementById('chart-stat-open');
-    if (statOpen) statOpen.textContent = openPx > 0 ? `$${openPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
-    const statBinanceOpen = document.getElementById('chart-stat-binance-open');
-    if (statBinanceOpen) statBinanceOpen.textContent = binanceOpenPx > 0 ? `$${binanceOpenPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
-    const statHigh = document.getElementById('chart-stat-high');
-    if (statHigh) statHigh.textContent = highPx > 0 ? `$${highPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
-    const statLow = document.getElementById('chart-stat-low');
-    if (statLow) statLow.textContent = lowPx > 0 ? `$${lowPx.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '--';
-    const statRange = document.getElementById('chart-stat-range');
-    if (statRange) statRange.textContent = `${rangeBps} bps`;
+    const fmtUsd = (v) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const setStat = (id, txt, color) => { const el = document.getElementById(id); if (el) { el.textContent = txt; if (color) el.style.color = color; } };
+    setStat('chart-stat-open', openPx > 0 ? fmtUsd(openPx) : '--');
+    setStat('chart-stat-binance-open', binanceOpenPx > 0 ? fmtUsd(binanceOpenPx) : '--');
+    setStat('chart-stat-high', highPx > 0 ? fmtUsd(highPx) : '--');
+    setStat('chart-stat-low', lowPx > 0 ? fmtUsd(lowPx) : '--');
+    setStat('chart-stat-range', `${rangeBps} bps`);
 
     const lastHistoryPt = history[history.length - 1];
     const curPolySpot = live.poly_spot || (lastHistoryPt ? lastHistoryPt.poly_price : null);
     const curBinanceSpot = (lastHistoryPt ? lastHistoryPt.price : live.spot) || openPx;
-
-    const statPolySpot = document.getElementById('chart-stat-poly-spot');
-    if (statPolySpot) {
-      statPolySpot.textContent = curPolySpot ? `$${curPolySpot.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '--';
-      statPolySpot.style.color = '#2563eb';
-    }
-
-    const statBasis = document.getElementById('chart-stat-basis');
-    if (statBasis) {
+    setStat('chart-stat-poly-spot', curPolySpot ? fmtUsd(curPolySpot) : '--', C.polyDeep);
+    const basisEl = document.getElementById('chart-stat-basis');
+    if (basisEl) {
       if (curPolySpot && curBinanceSpot) {
-        const basisDiff = curBinanceSpot - curPolySpot;
-        const sign = basisDiff >= 0 ? '+' : '';
-        statBasis.textContent = `${sign}$${basisDiff.toFixed(2)}`;
-        statBasis.style.color = Math.abs(basisDiff) > 15.0 ? '#f59e0b' : '#64748b';
-      } else {
-        statBasis.textContent = '--';
-      }
+        const d = curBinanceSpot - curPolySpot;
+        basisEl.textContent = `${d >= 0 ? '+' : ''}$${d.toFixed(2)}`;
+        basisEl.style.color = Math.abs(d) > 15.0 ? C.modelDeep : C.axis;
+      } else basisEl.textContent = '--';
     }
 
-    // Polymarket live orderbook mid price (Implied Probability) vs Model Theoretical Probability
     const bUp = live.book_up || {};
-    const bDn = live.book_down || {};
-
     let livePolyUp = 0.5;
-    if (bUp.best_bid !== null && bUp.best_bid !== undefined && bUp.best_ask !== null && bUp.best_ask !== undefined) {
-      livePolyUp = (Number(bUp.best_bid) + Number(bUp.best_ask)) / 2.0;
-    } else if (live.poly_up !== undefined) {
-      livePolyUp = live.poly_up;
-    } else if (lastHistoryPt && lastHistoryPt.poly_up !== undefined) {
-      livePolyUp = lastHistoryPt.poly_up;
-    }
-
+    if (bUp.best_bid != null && bUp.best_ask != null) livePolyUp = (Number(bUp.best_bid) + Number(bUp.best_ask)) / 2.0;
+    else if (live.poly_up !== undefined) livePolyUp = live.poly_up;
+    else if (lastHistoryPt && lastHistoryPt.poly_up !== undefined) livePolyUp = lastHistoryPt.poly_up;
     const curModelUp = (live.prob_up !== undefined) ? live.prob_up : (lastHistoryPt && lastHistoryPt.prob_up !== undefined ? lastHistoryPt.prob_up : 0.5);
     const edgeVal = (curModelUp - livePolyUp) * 100.0;
-
-    const statProbUp = document.getElementById('chart-stat-prob-up');
-    const statProbModel = document.getElementById('chart-stat-prob-model');
-    const statEdge = document.getElementById('chart-stat-edge');
-
-    if (statProbUp) {
-      statProbUp.textContent = `看涨 ${(livePolyUp * 100).toFixed(1)}% ($${livePolyUp.toFixed(2)})`;
-      statProbUp.style.color = COLOR_UP; // 绿色
-    }
-    if (statProbModel) {
-      statProbModel.textContent = `${(curModelUp * 100).toFixed(1)}%`;
-      statProbModel.style.color = '#8b5cf6'; // 紫色
-    }
-    if (statEdge) {
-      const edgeSign = edgeVal > 0 ? '+' : '';
-      statEdge.textContent = `${edgeSign}${edgeVal.toFixed(1)}%`;
-      if (edgeVal > 1.0) {
-        statEdge.style.color = COLOR_UP; // 绿色 (做多 UP 优势)
-      } else if (edgeVal < -1.0) {
-        statEdge.style.color = COLOR_DOWN; // 红色 (做多 DOWN 优势)
-      } else {
-        statEdge.style.color = '#6b7280';
-      }
+    setStat('chart-stat-prob-up', `看涨 ${(livePolyUp * 100).toFixed(1)}% ($${livePolyUp.toFixed(2)})`, C.polyDeep);
+    setStat('chart-stat-prob-model', `${(curModelUp * 100).toFixed(1)}%`, C.modelDeep);
+    const edgeEl = document.getElementById('chart-stat-edge');
+    if (edgeEl) {
+      edgeEl.textContent = `${edgeVal > 0 ? '+' : ''}${edgeVal.toFixed(1)}%`;
+      edgeEl.style.color = edgeVal > 1.0 ? C.up : edgeVal < -1.0 ? C.down : C.axis;
     }
 
-    // Coordinates setup
-    const padLeft = 54;
-    const padRight = 132;
-    const padBottom = 26;
-    const plotW = Math.max(10, W - padLeft - padRight);
-
-    const timeToX = (t) => {
-      const dt = Math.max(0, Math.min(300, t - startT));
-      return padLeft + (dt / 300.0) * plotW;
-    };
-
-    // If history points < 2, draw friendly placeholder
-    if (history.length < 2) {
-      ctx.fillStyle = '#9ca3af';
-      ctx.textAlign = 'center';
-      ctx.font = '13px sans-serif';
-      ctx.fillText('新一轮刚刚启动，正在收集秒级高频价格点位与盘口走势...', padLeft + plotW / 2, H / 2);
-      ctx.restore();
-      return;
-    }
-
-    const currentPrice = (lastHistoryPt ? lastHistoryPt.price : live.spot) || openPx;
-    const isAboveOpen = currentPrice >= openPx;
-    const priceColor = isAboveOpen ? COLOR_UP : COLOR_DOWN;
-    const priceFillTop = isAboveOpen ? FILL_UP_TOP : FILL_DOWN_TOP;
-    const priceFillBot = isAboveOpen ? FILL_UP_BOT : FILL_DOWN_BOT;
-
-    // Track heights
     const mode = chartMode || 'dual';
-    let t1Top = 20;
-    let t1H = 120;
-    let t2Top = 168;
-    let t2H = 80;
+    const narrow = W < 640;
+    const padLeft = narrow ? 46 : 64, padRight = narrow ? 108 : 150, padBottom = 30;
+    const plotW = Math.max(10, W - padLeft - padRight);
+    const plotRight = padLeft + plotW;
+    const timeToX = (t) => padLeft + (Math.max(0, Math.min(300, t - startT)) / 300.0) * plotW;
 
-    if (mode === 'price') {
-      t1Top = 20;
-      t1H = H - t1Top - padBottom;
-    } else if (mode === 'prob') {
-      t2Top = 20;
-      t2H = H - t2Top - padBottom;
-    } else {
-      // dual mode
-      t1Top = 20;
-      t1H = Math.round((H - padBottom - 35) * 0.58);
-      t2Top = t1Top + t1H + 24;
-      t2H = H - padBottom - t2Top - 4;
-    }
+    let t1Top = 26, t1H = 0, t2Top = 0, t2H = 0;
+    if (mode === 'price') { t1H = H - t1Top - padBottom; }
+    else if (mode === 'prob') { t2Top = 26; t2H = H - t2Top - padBottom; }
+    else { t1H = Math.round((H - padBottom - 44) * 0.60); t2Top = t1Top + t1H + 36; t2H = H - padBottom - t2Top; }
 
-    // 1. Draw Time Axis and Grid Lines (00:00 to 05:00)
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = '#f1f3f5';
-    ctx.fillStyle = '#9ca3af';
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'center';
-
-    const timeTicks = [0, 60, 120, 180, 240, 300];
-    const timeLabels = ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00'];
+    const legendPoly = document.getElementById('legend-poly');
+    const legendBin = document.getElementById('legend-binance');
+    const legendModel = document.getElementById('legend-model');
+    if (legendPoly) legendPoly.style.display = '';
+    if (legendBin) legendBin.style.display = (mode === 'prob') ? 'none' : '';
+    if (legendModel) legendModel.style.display = (mode === 'price') ? 'none' : '';
 
     const gridTop = mode === 'prob' ? t2Top : t1Top;
     const gridBottom = mode === 'price' ? (t1Top + t1H) : (t2Top + t2H);
 
-    timeTicks.forEach((sec, idx) => {
-      const x = padLeft + (sec / 300.0) * plotW;
-      ctx.beginPath();
-      ctx.moveTo(x, gridTop);
-      ctx.lineTo(x, gridBottom);
-      ctx.stroke();
+    if (history.length < 2) {
+      ctx.fillStyle = C.mask;
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(padLeft, gridTop, plotW, gridBottom - gridTop, 10); ctx.fill(); }
+      else ctx.fillRect(padLeft, gridTop, plotW, gridBottom - gridTop);
+      ctx.fillStyle = C.axis; ctx.textAlign = 'center'; ctx.font = `13px ${SANS}`;
+      ctx.fillText('新一轮刚刚启动，正在收集秒级价格与盘口点位…', padLeft + plotW / 2, (gridTop + gridBottom) / 2);
+      ctx.restore();
+      liveChartGeom = null;
+      return;
+    }
 
-      ctx.fillText(timeLabels[idx], x, H - 8);
+    // Time grid + axis
+    ctx.lineWidth = 1; ctx.font = `11px ${MONO}`; ctx.textAlign = 'center';
+    const timeTicks = narrow ? [0, 150, 300] : [0, 60, 120, 180, 240, 300];
+    const timeLabels = narrow ? ['00:00', '02:30', '05:00'] : ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00'];
+    timeTicks.forEach((sec, i) => {
+      const x = padLeft + (sec / 300.0) * plotW;
+      ctx.strokeStyle = C.gridSoft;
+      ctx.beginPath(); ctx.moveTo(x, gridTop); ctx.lineTo(x, gridBottom); ctx.stroke();
+      ctx.fillStyle = C.axis; ctx.fillText(timeLabels[i], x, H - 10);
     });
 
-    // 1b. The right-hand part of the window has not happened yet: shade it so
-    //     "flat line stops here" reads as "we are only 111s in", not as a bug.
-    const nowX = padLeft + (Math.min(300, elapsed) / 300.0) * plotW;
-    const plotRight = padLeft + plotW;
+    // Future mask + now line
+    const nowX = timeToX(startT + elapsed);
     if (elapsed < 300) {
-      ctx.fillStyle = 'rgba(241, 245, 249, 0.62)';
+      ctx.fillStyle = C.mask;
       ctx.fillRect(nowX, gridTop, plotRight - nowX, gridBottom - gridTop);
       ctx.save();
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(nowX, gridTop);
-      ctx.lineTo(nowX, gridBottom);
-      ctx.stroke();
+      ctx.setLineDash([5, 4]); ctx.strokeStyle = C.nowLine; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(nowX, gridTop); ctx.lineTo(nowX, gridBottom); ctx.stroke();
       ctx.restore();
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'right';
-      ctx.fillText(`剩余 ${300 - elapsed}s`, plotRight - 8, gridTop + 12);
+      ctx.fillStyle = C.polyDeep; ctx.font = `600 11px ${MONO}`; ctx.textAlign = 'right';
+      ctx.fillText(`剩余 ${300 - elapsed}s · 未发生`, plotRight - 8, gridTop + 14);
     }
 
-    // 2. Render Price Track: Binance Spot vs Polymarket Official Chainlink Oracle
+    let priceToY = null, probToY = null;
+
     if (mode === 'dual' || mode === 'price') {
-      // Track Title Label
-      ctx.fillStyle = '#64748b';
-      ctx.font = '600 11px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText('BTC 走势: 币安现货 (绿/红) vs Polymarket 官方 (蓝)', padLeft + 6, 12);
+      ctx.fillStyle = C.label; ctx.font = `600 12px ${SANS}`; ctx.textAlign = 'left';
+      ctx.fillText('BTC 价格 · USD', padLeft, 14);
 
-      // Price bounds
       const minBuffer = openPx > 0 ? Math.max(2.0, openPx * 0.0003) : 2.0;
-      let minY = Math.min(lowPx, openPx - minBuffer);
-      let maxY = Math.max(highPx, openPx + minBuffer);
+      const minY = Math.min(lowPx, openPx - minBuffer);
+      const maxY = Math.max(highPx, openPx + minBuffer);
       const ySpan = Math.max(0.1, maxY - minY);
-      const paddedMinY = minY - ySpan * 0.08;
-      const paddedMaxY = maxY + ySpan * 0.08;
-      const paddedSpan = paddedMaxY - paddedMinY;
+      const pMin = minY - ySpan * 0.10, pMax = maxY + ySpan * 0.10, pSpan = pMax - pMin;
+      priceToY = (px) => t1Top + t1H - ((px - pMin) / pSpan) * t1H;
 
-      const priceToY = (px) => t1Top + t1H - ((px - paddedMinY) / paddedSpan) * t1H;
-
-      // Left axis: three price levels, otherwise the curve has no readable scale
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'right';
-      [paddedMaxY, (paddedMaxY + paddedMinY) / 2, paddedMinY].forEach(px => {
+      ctx.font = `10.5px ${MONO}`; ctx.textAlign = 'right';
+      for (let i = 0; i <= 4; i++) {
+        const px = pMin + (pSpan * i) / 4;
         const y = priceToY(px);
+        ctx.save(); ctx.setLineDash([2, 5]); ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(plotRight, y); ctx.stroke(); ctx.restore();
+        ctx.fillStyle = C.axis;
+        ctx.fillText(px.toLocaleString('en-US', { maximumFractionDigits: 0 }), padLeft - 8, y + 3);
+      }
+
+      if (openPx > 0) {
+        const y = priceToY(openPx);
+        ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = C.basePoly; ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(plotRight, y); ctx.stroke(); ctx.restore();
+        ctx.fillStyle = C.polyDeep; ctx.font = `600 10.5px ${MONO}`; ctx.textAlign = 'left';
+        ctx.fillText(`Poly 基准 ${openPx.toLocaleString('en-US', { maximumFractionDigits: 0 })}`, padLeft + 6, y - 5);
+      }
+      if (binanceOpenPx > 0 && Math.abs(binanceOpenPx - openPx) > 0.5) {
+        const y = priceToY(binanceOpenPx);
+        ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = C.baseBin; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(plotRight, y); ctx.stroke(); ctx.restore();
+        ctx.fillStyle = C.faint; ctx.font = `600 10.5px ${MONO}`; ctx.textAlign = 'left';
+        ctx.fillText(`币安开盘 ${binanceOpenPx.toLocaleString('en-US', { maximumFractionDigits: 0 })}`, padLeft + 6, y + 12);
+      }
+
+      const pts = history.map(pt => ({ x: timeToX(pt.t), y: priceToY(pt.price), price: pt.price, t: pt.t }));
+      const polyPts = history.filter(pt => pt.poly_price && pt.poly_price > 0)
+        .map(pt => ({ x: timeToX(pt.t), y: priceToY(pt.poly_price), price: pt.poly_price, t: pt.t }));
+      const lastP = pts[pts.length - 1];
+      const lastPolyP = polyPts.length ? polyPts[polyPts.length - 1] : null;
+      const above = lastP.price >= binanceOpenPx;
+      const dirColor = above ? C.up : C.down;
+
+      const g = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
+      g.addColorStop(0, above ? 'rgba(5,177,105,0.14)' : 'rgba(207,32,47,0.14)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.lineTo(lastP.x, t1Top + t1H); ctx.lineTo(pts[0].x, t1Top + t1H); ctx.closePath();
+      ctx.fillStyle = g; ctx.fill();
+
+      if (polyPts.length >= 2) {
+        ctx.beginPath(); ctx.moveTo(polyPts[0].x, polyPts[0].y);
+        for (let i = 1; i < polyPts.length; i++) ctx.lineTo(polyPts[i].x, polyPts[i].y);
+        ctx.strokeStyle = C.poly; ctx.lineWidth = 2.4; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+      }
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.strokeStyle = dirColor; ctx.lineWidth = 2.0; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+
+      let maxPt = pts[0], minPt = pts[0];
+      for (const p of pts) { if (p.price > maxPt.price) maxPt = p; if (p.price < minPt.price) minPt = p; }
+      if (maxPt.x !== lastP.x && maxPt.price > binanceOpenPx) { ctx.fillStyle = C.up; ctx.beginPath(); ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2); ctx.fill(); }
+      if (minPt.x !== lastP.x && minPt.price < binanceOpenPx) { ctx.fillStyle = C.down; ctx.beginPath(); ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2); ctx.fill(); }
+
+      const pulse = (x, y, color) => {
+        ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.globalAlpha = 0.22; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.arc(x, y, 3.4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, 3.4, 0, Math.PI * 2); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2; ctx.stroke();
+      };
+      if (lastPolyP) pulse(lastPolyP.x, lastPolyP.y, C.poly);
+      pulse(lastP.x, lastP.y, dirColor);
+
+      const rail = [];
+      const binBps = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
+      rail.push({ y: lastP.y, h: 21, color: dirColor, text: narrow ? `币安 $${lastP.price.toFixed(2)}` : `币安 $${lastP.price.toFixed(2)} (${binBps >= 0 ? '+' : ''}${binBps.toFixed(1)})` });
+      if (lastPolyP) {
+        const pb = openPx > 0 ? ((lastPolyP.price - openPx) / openPx * 10000) : 0;
+        rail.push({ y: lastPolyP.y, h: 21, color: C.poly, text: narrow ? `Poly $${lastPolyP.price.toFixed(2)}` : `Poly $${lastPolyP.price.toFixed(2)} (${pb >= 0 ? '+' : ''}${pb.toFixed(1)})` });
+      }
+      const rTop = t1Top, rBot = t1Top + t1H;
+      rail.forEach(it => { it.top = Math.max(rTop, Math.min(rBot - it.h, it.y - it.h / 2)); });
+      rail.sort((a, b) => a.top - b.top);
+      for (let i = 1; i < rail.length; i++) rail[i].top = Math.max(rail[i].top, rail[i - 1].top + rail[i - 1].h + 4);
+      if (rail.length) {
+        const over = rail[rail.length - 1].top + rail[rail.length - 1].h - rBot;
+        if (over > 0) { rail[rail.length - 1].top -= over; for (let i = rail.length - 2; i >= 0; i--) rail[i].top = Math.min(rail[i].top, rail[i + 1].top - rail[i].h - 4); }
+      }
+      const tagW = narrow ? 100 : 138, tagX = plotRight + 8;
+      ctx.font = `600 ${narrow ? 9.5 : 10.5}px ${MONO}`; ctx.textAlign = 'center';
+      for (const it of rail) {
+        ctx.fillStyle = it.color;
+        if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(tagX, it.top, tagW, it.h, 5); ctx.fill(); }
+        else ctx.fillRect(tagX, it.top, tagW, it.h);
+        ctx.fillStyle = '#ffffff'; ctx.fillText(it.text, tagX + tagW / 2, it.top + 14.5);
+      }
+    }
+
+    if (mode === 'dual' || mode === 'prob') {
+      probToY = (p) => t2Top + t2H - Math.max(0, Math.min(1, p)) * t2H;
+      ctx.fillStyle = C.label; ctx.font = `600 12px ${SANS}`; ctx.textAlign = 'left';
+      ctx.fillText('UP 胜率 · %', padLeft, t2Top - 10);
+
+      ctx.font = `10.5px ${MONO}`; ctx.textAlign = 'right';
+      [0, 0.25, 0.5, 0.75, 1].forEach(p => {
+        const y = probToY(p);
         ctx.save();
-        ctx.setLineDash([2, 6]);
-        ctx.strokeStyle = '#f1f5f9';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(padLeft, y);
-        ctx.lineTo(Math.min(plotRight, Math.max(nowX, padLeft + 1)), y);
-        ctx.stroke();
-        ctx.restore();
-        ctx.fillStyle = '#a3aebd';
-        ctx.fillText(px.toLocaleString('en-US', { maximumFractionDigits: 0 }), padLeft - 6, y + 3);
+        ctx.setLineDash(p === 0.5 ? [5, 4] : [2, 5]);
+        ctx.strokeStyle = p === 0.5 ? C.baseProb : C.grid;
+        ctx.lineWidth = p === 0.5 ? 1.2 : 1;
+        ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(plotRight, y); ctx.stroke(); ctx.restore();
+        ctx.fillStyle = C.axis; ctx.fillText(`${p * 100}%`, padLeft - 8, y + 3);
       });
 
-      // 1. Polymarket Official Strike Baseline (S_0, poly) - Blue Dashed
-      let baselinePolyY = null;
-      let baselineBinY = null;
-      if (openPx > 0) {
-        baselinePolyY = priceToY(openPx);
-        ctx.save();
-        ctx.setLineDash([4, 4]);
-        ctx.strokeStyle = '#2563eb';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(padLeft, baselinePolyY);
-        ctx.lineTo(padLeft + plotW, baselinePolyY);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // 2. Binance Spot Open Baseline (S_0, binance) - Gray Dashed
-      if (binanceOpenPx > 0 && Math.abs(binanceOpenPx - openPx) > 0.5) {
-        baselineBinY = priceToY(binanceOpenPx);
-        ctx.save();
-        ctx.setLineDash([4, 4]);
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(padLeft, baselineBinY);
-        ctx.lineTo(padLeft + plotW, baselineBinY);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Build points for Binance Spot Price
-      const pts = history.map(pt => ({
-        x: timeToX(pt.t),
-        y: priceToY(pt.price),
-        price: pt.price,
-        bps: pt.return_bps,
-        t: pt.t
-      }));
-
-      // Build points for Polymarket Official Price
-      const polyPts = history
-        .filter(pt => pt.poly_price && pt.poly_price > 0)
-        .map(pt => ({
-          x: timeToX(pt.t),
-          y: priceToY(pt.poly_price),
-          price: pt.poly_price,
-          bps: pt.poly_return_bps !== undefined ? pt.poly_return_bps : (openPx > 0 ? ((pt.poly_price - openPx)/openPx*10000) : 0),
-          t: pt.t
-        }));
-
-      const lastP = pts[pts.length - 1];
-      const lastPolyP = polyPts.length > 0 ? polyPts[polyPts.length - 1] : null;
-
-      const isBinanceAbove = lastP.price >= binanceOpenPx;
-      const binancePriceColor = isBinanceAbove ? COLOR_UP : COLOR_DOWN;
-      const binanceFillTop = isBinanceAbove ? FILL_UP_TOP : FILL_DOWN_TOP;
-      const binanceFillBot = isBinanceAbove ? FILL_UP_BOT : FILL_DOWN_BOT;
-
-      // Fill underneath Binance price curve
-      const pGrad = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
-      pGrad.addColorStop(0, binanceFillTop);
-      pGrad.addColorStop(1, binanceFillBot);
-
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) {
-        ctx.lineTo(pts[i].x, pts[i].y);
-      }
-      ctx.lineTo(lastP.x, t1Top + t1H);
-      ctx.lineTo(pts[0].x, t1Top + t1H);
-      ctx.closePath();
-      ctx.fillStyle = pGrad;
-      ctx.fill();
-
-      // Stroke Curve 1: Polymarket Official Price Curve (Deep Blue)
-      if (polyPts.length >= 2) {
-        ctx.beginPath();
-        ctx.moveTo(polyPts[0].x, polyPts[0].y);
-        for (let i = 1; i < polyPts.length; i++) {
-          ctx.lineTo(polyPts[i].x, polyPts[i].y);
-        }
-        ctx.strokeStyle = '#2563eb';
-        ctx.lineWidth = 2.2;
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        // Pulse dot on latest Polymarket official price
-        if (lastPolyP) {
-          ctx.beginPath();
-          ctx.arc(lastPolyP.x, lastPolyP.y, 6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(37, 99, 235, 0.22)';
-          ctx.fill();
-
-          ctx.beginPath();
-          ctx.arc(lastPolyP.x, lastPolyP.y, 3.5, 0, Math.PI * 2);
-          ctx.fillStyle = '#2563eb';
-          ctx.fill();
-        }
-      }
-
-      // Stroke Curve 2: Binance Spot Price Curve: 币安开盘价上方用绿，跌到下方用红
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) {
-        ctx.lineTo(pts[i].x, pts[i].y);
-      }
-      ctx.strokeStyle = binancePriceColor;
-      ctx.lineWidth = 2.0;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.stroke();
-
-      // High point dot (绿色) / Low point dot (红色)
-      let maxPt = pts[0];
-      let minPt = pts[0];
-      for (const p of pts) {
-        if (p.price > maxPt.price) maxPt = p;
-        if (p.price < minPt.price) minPt = p;
-      }
-      if (maxPt.x !== lastP.x && maxPt.price > binanceOpenPx) {
-        ctx.fillStyle = COLOR_UP; // 绿色
-        ctx.beginPath();
-        ctx.arc(maxPt.x, maxPt.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      if (minPt.x !== lastP.x && minPt.price < binanceOpenPx) {
-        ctx.fillStyle = COLOR_DOWN; // 红色
-        ctx.beginPath();
-        ctx.arc(minPt.x, minPt.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Live Pulse Dot on latest Binance spot price
-      ctx.beginPath();
-      ctx.arc(lastP.x, lastP.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = isBinanceAbove ? 'rgba(5, 177, 105, 0.25)' : 'rgba(207, 32, 47, 0.25)';
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(lastP.x, lastP.y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = binancePriceColor;
-      ctx.fill();
-
-      // Right rail: baseline labels + live pills laid out together so nothing overlaps
-      const railItems = [];
-      const binBpsVal = binanceOpenPx > 0 ? ((lastP.price - binanceOpenPx) / binanceOpenPx * 10000) : 0;
-      const binBpsSign = binBpsVal >= 0 ? '+' : '';
-      railItems.push({ pill: true, y: lastP.y, h: 20, color: binancePriceColor, text: `币安 $${lastP.price.toFixed(2)} (${binBpsSign}${binBpsVal.toFixed(1)})` });
-      if (lastPolyP) {
-        const polyBpsVal = openPx > 0 ? ((lastPolyP.price - openPx) / openPx * 10000) : 0;
-        const polyBpsSign = polyBpsVal >= 0 ? '+' : '';
-        railItems.push({ pill: true, y: lastPolyP.y, h: 20, color: '#2563eb', text: `Poly $${lastPolyP.price.toFixed(2)} (${polyBpsSign}${polyBpsVal.toFixed(1)})` });
-      }
-
-      const railTop = t1Top;
-      const railBottom = t1Top + t1H;
-      railItems.forEach(it => { it.top = Math.max(railTop, Math.min(railBottom - it.h, it.y - it.h / 2)); });
-      railItems.sort((a, b) => a.top - b.top);
-      for (let i = 1; i < railItems.length; i++) {
-        railItems[i].top = Math.max(railItems[i].top, railItems[i - 1].top + railItems[i - 1].h + 3);
-      }
-      if (railItems.length > 0) {
-        const lastItem = railItems[railItems.length - 1];
-        const overflow = lastItem.top + lastItem.h - railBottom;
-        if (overflow > 0) {
-          lastItem.top -= overflow;
-          for (let i = railItems.length - 2; i >= 0; i--) {
-            railItems[i].top = Math.min(railItems[i].top, railItems[i + 1].top - railItems[i].h - 3);
-          }
-        }
-      }
-
-      const tagW = 126;
-      const tagX = padLeft + plotW + 8;
-      for (const it of railItems) {
-        if (it.pill) {
-          ctx.fillStyle = it.color;
-          if (ctx.roundRect) {
-            ctx.beginPath();
-            ctx.roundRect(tagX, it.top, tagW, it.h, 4);
-            ctx.fill();
-          } else {
-            ctx.fillRect(tagX, it.top, tagW, it.h);
-          }
-          ctx.fillStyle = '#ffffff';
-          ctx.font = '600 10.5px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(it.text, tagX + tagW / 2, it.top + 14);
-        } else {
-          ctx.fillStyle = it.color;
-          ctx.font = '600 10.5px monospace';
-          ctx.textAlign = 'left';
-          ctx.fillText(it.text, tagX, it.top + 10);
-        }
-      }
-    }
-
-    // 3. Render Dual Probability Track: Market Implied Probability vs Model Theoretical Probability
-    if (mode === 'dual' || mode === 'prob') {
-      const probToY = (p) => t2Top + t2H - Math.max(0.0, Math.min(1.0, p)) * t2H;
-
-      // 50% Baseline (Dashed)
-      const baseProbY = probToY(0.5);
-      ctx.save();
-      ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1.0;
-      ctx.beginPath();
-      ctx.moveTo(padLeft, baseProbY);
-      ctx.lineTo(padLeft + plotW, baseProbY);
-      ctx.stroke();
-      ctx.restore();
-
-      // Left axis labels (right rail is reserved for the live probability pills)
-      ctx.fillStyle = '#94a3b8';
-      ctx.textAlign = 'right';
-      ctx.font = '10px monospace';
-      ctx.fillText('50%', padLeft - 6, baseProbY + 3);
-      ctx.fillText('100%', padLeft - 6, t2Top + 8);
-      ctx.fillText('0%', padLeft - 6, t2Top + t2H);
-
-      const y75 = probToY(0.75);
-      const y25 = probToY(0.25);
-      {
-        ctx.save();
-        ctx.setLineDash([2, 4]);
-        ctx.strokeStyle = '#e2e8f0';
-        ctx.beginPath();
-        ctx.moveTo(padLeft, y75); ctx.lineTo(padLeft + plotW, y75);
-        ctx.moveTo(padLeft, y25); ctx.lineTo(padLeft + plotW, y25);
-        ctx.stroke();
-        ctx.restore();
-        ctx.fillStyle = '#94a3b8';
-        ctx.textAlign = 'right';
-        ctx.font = '10px monospace';
-        ctx.fillText('75%', padLeft - 6, y75 + 3);
-        ctx.fillText('25%', padLeft - 6, y25 + 3);
-      }
-
-      // Track Title & Interactive Legend in top-left
-      const COLOR_MARKET = COLOR_UP; // 绿色 (#05b169)
-      const COLOR_MODEL = '#8b5cf6';  // 紫色 (#8b5cf6)
-
-      ctx.font = '600 11px sans-serif';
-      ctx.textAlign = 'left';
-
-      // Track title & legend live in the gap above the plot so curves never strike through them
-      const legendY = t2Top - 8;
-      ctx.fillStyle = '#4b5563';
-      ctx.fillText('胜率与定价走势对比:', padLeft + 6, legendY);
-
-      // Legend 1: 市场盘口
-      ctx.fillStyle = COLOR_MARKET;
-      ctx.fillRect(padLeft + 120, legendY - 5, 10, 3);
-      ctx.fillText('市场盘口概率 (Polymarket)', padLeft + 134, legendY);
-
-      // Legend 2: 模型理论
-      ctx.fillStyle = COLOR_MODEL;
-      ctx.fillRect(padLeft + 280, legendY - 5, 10, 3);
-      ctx.fillText('模型理论公允胜率', padLeft + 294, legendY);
-
-      // Extract points
       const pts = history.map(pt => {
         const pMarket = pt.poly_up !== undefined ? pt.poly_up : (pt.price >= openPx ? 0.6 : 0.4);
         const pModel = pt.prob_up !== undefined ? pt.prob_up : 0.5;
-        const x = timeToX(pt.t);
-        return {
-          x,
-          yMarket: probToY(pMarket),
-          yModel: probToY(pModel),
-          pMarket,
-          pModel,
-          t: pt.t
-        };
+        return { x: timeToX(pt.t), yM: probToY(pMarket), yMo: probToY(pModel), pMarket, pModel, t: pt.t };
       });
-
       if (pts.length > 1) {
-        // 1. Shading the Edge / Arbitrage Spread between Model and Market curves
         ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].yModel);
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(pts[i].x, pts[i].yModel);
-        }
-        for (let i = pts.length - 1; i >= 0; i--) {
-          ctx.lineTo(pts[i].x, pts[i].yMarket);
-        }
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].yMo);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].yMo);
+        for (let i = pts.length - 1; i >= 0; i--) ctx.lineTo(pts[i].x, pts[i].yM);
         ctx.closePath();
-        ctx.fillStyle = curModelUp >= livePolyUp ? 'rgba(5, 177, 105, 0.12)' : 'rgba(139, 92, 246, 0.12)';
-        ctx.fill();
-        ctx.restore();
+        ctx.fillStyle = curModelUp >= livePolyUp ? 'rgba(14,165,233,0.12)' : 'rgba(245,158,11,0.12)';
+        ctx.fill(); ctx.restore();
 
-        // 2. Stroke Curve 1: 市场盘口概率 (绿色实线)
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].yMarket);
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(pts[i].x, pts[i].yMarket);
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].yM);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].yM);
+        ctx.strokeStyle = C.poly; ctx.lineWidth = 2.2; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].yMo);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].yMo);
+        ctx.strokeStyle = C.model; ctx.lineWidth = 2.0; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+
+        const lp = pts[pts.length - 1];
+        const dot = (x, y, color) => {
+          ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.globalAlpha = 0.22; ctx.fill(); ctx.globalAlpha = 1;
+          ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+          ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.1; ctx.stroke();
+        };
+        dot(lp.x, lp.yM, C.poly); dot(lp.x, lp.yMo, C.model);
+
+        const tw = narrow ? 84 : 104, th = 19, tx = plotRight + 8;
+        const minT = t2Top, maxT = t2Top + t2H - th;
+        let yM = Math.max(minT, Math.min(maxT, lp.yM - th / 2));
+        let yMo = Math.max(minT, Math.min(maxT, lp.yMo - th / 2));
+        if (Math.abs(yM - yMo) < th + 4) {
+          const mid = (yM + yMo) / 2;
+          let a = mid - (th + 4) / 2, b = mid + (th + 4) / 2;
+          if (a < minT) { a = minT; b = a + th + 4; }
+          if (b > maxT) { b = maxT; a = b - th - 4; }
+          if (lp.yM <= lp.yMo) { yM = a; yMo = b; } else { yMo = a; yM = b; }
         }
-        ctx.strokeStyle = COLOR_MARKET;
-        ctx.lineWidth = 2.2;
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        // 3. Stroke Curve 2: 模型理论概率 (紫色实线)
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].yModel);
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(pts[i].x, pts[i].yModel);
-        }
-        ctx.strokeStyle = COLOR_MODEL;
-        ctx.lineWidth = 2.2;
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        const lastP = pts[pts.length - 1];
-
-        // 4. Live Pulse Dots on latest points
-        // Market dot (Green)
-        ctx.beginPath();
-        ctx.arc(lastP.x, lastP.yMarket, 5, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(5, 177, 105, 0.25)';
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(lastP.x, lastP.yMarket, 3, 0, Math.PI * 2);
-        ctx.fillStyle = COLOR_MARKET;
-        ctx.fill();
-
-        // Model dot (Purple)
-        ctx.beginPath();
-        ctx.arc(lastP.x, lastP.yModel, 5, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(139, 92, 246, 0.25)';
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(lastP.x, lastP.yModel, 3, 0, Math.PI * 2);
-        ctx.fillStyle = COLOR_MODEL;
-        ctx.fill();
-
-        // 5. Right Tag Pills (Intelligently unstacked to prevent overlap)
-        const probTagW = 100;
-        const probTagH = 18;
-        const probTagX = padLeft + plotW + 8;
-
-        let tagMarketY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastP.yMarket - probTagH / 2));
-        let tagModelY = Math.max(t2Top, Math.min(t2Top + t2H - probTagH, lastP.yModel - probTagH / 2));
-
-        if (Math.abs(tagMarketY - tagModelY) < (probTagH + 3)) {
-          if (tagModelY >= tagMarketY) {
-            tagModelY = Math.min(t2Top + t2H - probTagH, tagMarketY + probTagH + 3);
-          } else {
-            tagModelY = Math.max(t2Top, tagMarketY - probTagH - 3);
-          }
-        }
-
-        // Draw Market Tag (Green)
-        ctx.fillStyle = COLOR_MARKET;
-        if (ctx.roundRect) {
-          ctx.beginPath();
-          ctx.roundRect(probTagX, tagMarketY, probTagW, probTagH, 3);
-          ctx.fill();
-        } else {
-          ctx.fillRect(probTagX, tagMarketY, probTagW, probTagH);
-        }
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 10px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`盘口 ${(livePolyUp * 100).toFixed(1)}%`, probTagX + probTagW / 2, tagMarketY + 13);
-
-        // Draw Model Tag (Purple)
-        ctx.fillStyle = COLOR_MODEL;
-        if (ctx.roundRect) {
-          ctx.beginPath();
-          ctx.roundRect(probTagX, tagModelY, probTagW, probTagH, 3);
-          ctx.fill();
-        } else {
-          ctx.fillRect(probTagX, tagModelY, probTagW, probTagH);
-        }
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 10px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`模型 ${(curModelUp * 100).toFixed(1)}%`, probTagX + probTagW / 2, tagModelY + 13);
+        ctx.font = `700 10px ${MONO}`; ctx.textAlign = 'center';
+        const pill = (y, color, txt) => {
+          ctx.fillStyle = color;
+          if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(tx, y, tw, th, 5); ctx.fill(); } else ctx.fillRect(tx, y, tw, th);
+          ctx.fillStyle = '#ffffff'; ctx.fillText(txt, tx + tw / 2, y + 13.5);
+        };
+        pill(yM, C.poly, `盘口 ${(livePolyUp * 100).toFixed(1)}%`);
+        pill(yMo, C.model, `模型 ${(curModelUp * 100).toFixed(1)}%`);
       }
     }
 
+    // Hover crosshair
+    if (liveChartHover != null && history[liveChartHover]) {
+      const hp = history[liveChartHover];
+      const hx = timeToX(hp.t);
+      ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(15,23,42,0.4)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, gridTop); ctx.lineTo(hx, gridBottom); ctx.stroke(); ctx.restore();
+      const ring = (x, y, color) => { ctx.beginPath(); ctx.arc(x, y, 4.2, 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.beginPath(); ctx.arc(x, y, 4.2, 0, Math.PI * 2); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); };
+      if (priceToY) { ring(hx, priceToY(hp.price), hp.price >= binanceOpenPx ? C.up : C.down); if (hp.poly_price > 0) ring(hx, priceToY(hp.poly_price), C.poly); }
+      if (probToY) { ring(hx, probToY(hp.poly_up !== undefined ? hp.poly_up : 0.5), C.poly); ring(hx, probToY(hp.prob_up !== undefined ? hp.prob_up : 0.5), C.model); }
+    }
+
+    liveChartGeom = { padLeft, plotW, startT, history, W, H };
     ctx.restore();
+  }
+
+  function bindLiveChartHover() {
+    const canvas = document.getElementById('live-price-canvas');
+    const tip = document.getElementById('chart-tooltip');
+    if (!canvas || !tip) return;
+    const MONO = '"Geist Mono","JetBrains Mono","SF Mono",monospace';
+    canvas.addEventListener('mousemove', (e) => {
+      const g = liveChartGeom;
+      if (!g || !g.history || g.history.length < 2) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      if (x < g.padLeft || x > g.padLeft + g.plotW) { canvas.dispatchEvent(new Event('mouseleave')); return; }
+      const t = g.startT + ((x - g.padLeft) / g.plotW) * 300;
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < g.history.length; i++) { const d = Math.abs(g.history[i].t - t); if (d < bd) { bd = d; best = i; } }
+      liveChartHover = best;
+      if (liveData) drawLivePriceChart(liveData);
+      const pt = g.history[best];
+      const sec = Math.max(0, Math.round(pt.t - g.startT));
+      const mm = String(Math.floor(sec / 60)).padStart(2, '0'), ss = String(sec % 60).padStart(2, '0');
+      const f2 = (v) => (v == null ? '--' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+      const pc = (v) => (v == null ? '--' : `${(v * 100).toFixed(1)}%`);
+      tip.innerHTML =
+        `<div class="tt-time">第 ${mm}:${ss} 秒</div>` +
+        `<div class="tt-row"><span class="tt-sw" style="background:${pt.price >= (liveData.binance_open_px || liveData.open_px) ? '#05b169' : '#cf202f'}"></span>币安 <b>$${f2(pt.price)}</b></div>` +
+        `<div class="tt-row"><span class="tt-sw" style="background:#0ea5e9"></span>Poly <b>$${f2(pt.poly_price)}</b></div>` +
+        `<div class="tt-row"><span class="tt-sw" style="background:#0ea5e9"></span>盘口 <b>${pc(pt.poly_up)}</b></div>` +
+        `<div class="tt-row"><span class="tt-sw" style="background:#f59e0b"></span>模型 <b>${pc(pt.prob_up)}</b></div>`;
+      tip.hidden = false;
+      const box = canvas.parentElement.getBoundingClientRect();
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let lx = x + 16, ly = y + 16;
+      if (lx + tw > box.width - 8) lx = x - tw - 16;
+      if (ly + th > box.height - 8) ly = y - th - 16;
+      tip.style.left = `${Math.max(8, lx)}px`;
+      tip.style.top = `${Math.max(8, ly)}px`;
+    });
+    canvas.addEventListener('mouseleave', () => {
+      liveChartHover = null;
+      tip.hidden = true;
+      if (liveData) drawLivePriceChart(liveData);
+    });
   }
 
   // Update Live Market Workspace

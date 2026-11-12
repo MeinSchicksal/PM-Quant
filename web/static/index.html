@@ -442,8 +442,16 @@
           </div>
         </div>
 
+        <div class="chart-legend" id="chart-legend">
+          <span class="legend-chip" id="legend-poly"><span class="legend-sw" style="background:#0ea5e9"></span>Polymarket 官方 / 盘口</span>
+          <span class="legend-chip" id="legend-binance"><span class="legend-sw legend-sw-dir"></span>币安现货 (涨绿 / 跌红)</span>
+          <span class="legend-chip" id="legend-model"><span class="legend-sw" style="background:#f59e0b"></span>模型公允胜率</span>
+          <span class="legend-hint">悬停图表查看任意秒取值</span>
+        </div>
+
         <div class="canvas-container">
-          <canvas id="live-price-canvas" height="340"></canvas>
+          <canvas id="live-price-canvas" height="400"></canvas>
+          <div class="chart-tooltip" id="chart-tooltip" hidden></div>
         </div>
       </section>
 
