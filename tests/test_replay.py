@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 import config
-from sim.replay import GATE_OFF_OVERRIDES, overridden_params, run_replay
+from sim.replay import overridden_params, run_replay
 
 
 class TestEventDrivenReplay(unittest.TestCase):
@@ -34,33 +34,37 @@ class TestEventDrivenReplay(unittest.TestCase):
         token_up = "tok_up"
         token_dn = "tok_dn"
 
-        # Book snapshots every 2s: Up bid 0.46 (5 shares ahead), Down ask 0.50
-        # so a taker hedge immediately locks a pair cost below $1.00.
+        # Book snapshots every 2s, complement-consistent (ask sum = 0.47+0.53
+        # = 1.00, bid sum = 0.45+0.51 = 0.96 <= 1.00) so make_complementary
+        # leaves them untouched. Up bid 0.45 carries 5 shares of queue ahead;
+        # the MWDE stage works a 5-share maker bid there. Down ask 0.53 lets a
+        # taker hedge lock the pair at 0.45+0.53+fee <= $1.00.
         with open(events_dir / f"events_{self.date}.jsonl", "w", encoding="utf-8") as f:
             for i in range(150):
                 t = self.start + 2 * i
                 f.write(json.dumps({
                     "t": t, "token_id": token_up, "outcome": "Up",
-                    "best_bid": 0.46, "best_ask": 0.48,
-                    "bid_depth": [[0.46, 5.0]], "ask_depth": [[0.48, 50.0]],
-                    "last_trade_price": 0.47,
+                    "best_bid": 0.45, "best_ask": 0.47,
+                    "bid_depth": [[0.45, 5.0]], "ask_depth": [[0.47, 50.0]],
+                    "last_trade_price": 0.46,
                 }) + "\n")
                 f.write(json.dumps({
                     "t": t, "token_id": token_dn, "outcome": "Down",
-                    "best_bid": 0.48, "best_ask": 0.50,
-                    "bid_depth": [[0.48, 50.0]], "ask_depth": [[0.50, 50.0]],
-                    "last_trade_price": 0.49,
+                    "best_bid": 0.51, "best_ask": 0.53,
+                    "bid_depth": [[0.51, 50.0]], "ask_depth": [[0.53, 50.0]],
+                    "last_trade_price": 0.52,
                 }) + "\n")
 
-        # One 15-share print at our bid: 5 shares clear the queue, 10 fill us
-        # (only a 5-share order is resting, so exactly 5 shares execute).
+        # One 15-share print at our 0.45 bid, after the quote has gone live:
+        # 5 shares clear the queue ahead, then our resting 5-share order fills
+        # completely. The Down print is inert (no resting Down maker order).
         with open(events_dir / f"trades_{self.date}.jsonl", "w", encoding="utf-8") as f:
             for token, outcome in ((token_up, "Up"), (token_dn, "Down")):
                 f.write(json.dumps({
                     "token_id": token, "slug": self.slug, "outcome": outcome,
-                    "price": 0.46 if outcome == "Up" else 0.49,
+                    "price": 0.45 if outcome == "Up" else 0.52,
                     "size": 15.0, "side": "SELL",
-                    "timestamp": self.start + 10, "received_at": self.start + 10.2,
+                    "timestamp": self.start + 70, "received_at": self.start + 70.2,
                 }) + "\n")
 
         with open(oracle_dir / f"oracle_{self.date}.jsonl", "w", encoding="utf-8") as f:
@@ -97,17 +101,17 @@ class TestEventDrivenReplay(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        results = run_replay(limit=1, overrides={"STRATEGY_MODE": "legacy_mm"})
+        results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         r = results[0]
         self.assertTrue(r["replayed"])
         self.assertGreaterEqual(r["fills"], 2)  # maker entry + taker hedge
 
-        # Entry: 5 shares @ 0.46. Hedge: 5 shares @ 0.48 + taker fee.
-        # A locked pair must settle at 5 * (1 - pair_cost) whichever side wins,
-        # so the replay PnL is fully determined and winner-independent.
-        fee_per_share = 0.07 * 0.50 * (1.0 - 0.50)
-        expected = round(5.0 * (1.0 - (0.46 + 0.50 + fee_per_share)), 4)
+        # Entry: 5 shares @ 0.45 (maker, zero fee). Hedge: 5 shares @ 0.53 +
+        # taker fee. A locked pair settles at 5 * (1 - pair_cost) whichever side
+        # wins, so the replay PnL is fully determined and winner-independent.
+        fee_per_share = 0.07 * 0.53 * (1.0 - 0.53)
+        expected = round(5.0 * (1.0 - (0.45 + 0.53 + fee_per_share)), 4)
         self.assertAlmostEqual(r["replay_pnl"], expected, places=3)
         # The attribution label must come from the entry tick, not a tick-vote.
         self.assertEqual(r["regime_source"], "entry_time")
@@ -121,55 +125,22 @@ class TestEventDrivenReplay(unittest.TestCase):
                 f.write(json.dumps({
                     "token_id": token, "slug": self.slug, "outcome": outcome,
                     "price": 0.60, "size": 100.0, "side": "BUY",
-                    "timestamp": self.start + 10, "received_at": self.start + 10.2,
+                    "timestamp": self.start + 70, "received_at": self.start + 70.2,
                 }) + "\n")
 
-        results = run_replay(limit=1)
+        results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["replay_traded"])
         self.assertEqual(results[0]["replay_pnl"], 0.0)
 
-    def _move_recording_to_last_100s(self):
-        """Keep only the final 100 seconds: tau < MIN_ENTRY_TAU_S (180s)."""
-        ev_path = config.MARKET_DIR / "events" / self.date / f"events_{self.date}.jsonl"
-        rows = [json.loads(line) for line in ev_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        keep = [r for r in rows if float(r["t"]) >= self.start + 200]
-        ev_path.write_text("\n".join(json.dumps(r) for r in keep) + "\n", encoding="utf-8")
-
-        tr_path = config.MARKET_DIR / "events" / self.date / f"trades_{self.date}.jsonl"
-        trades = [json.loads(line) for line in tr_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        for t in trades:
-            t["timestamp"] = self.start + 210
-            t["received_at"] = self.start + 210.2
-        tr_path.write_text("\n".join(json.dumps(t) for t in trades) + "\n", encoding="utf-8")
-
-    def test_late_window_is_blocked_by_default_and_trades_with_gates_off(self):
-        # Same recording, but every quote/fill happens inside the last 100s.
-        self._move_recording_to_last_100s()
-
-        gated = run_replay(limit=1, quiet=True, write=False)[0]
-        self.assertTrue(gated["replayed"])
-        self.assertFalse(gated["replay_traded"], "tail freeze must block entries")
-        self.assertAlmostEqual(gated["replay_pnl"], 0.0, places=6)
-
-        # Counterfactual: the same window with the regime gates removed.
-        off = run_replay(
-            limit=1,
-            quiet=True,
-            write=False,
-            overrides=GATE_OFF_OVERRIDES,
-        )[0]
-        self.assertTrue(off["replay_traded"], "gates-off must quote and fill")
-        self.assertGreater(off["fills"], 0)
-
     def test_param_overrides_are_restored_on_error(self):
-        original = config.PARAMS["TAIL_FREEZE_S"]
+        original = config.PARAMS["LWAA_MIN_PROB"]
         with self.assertRaises(RuntimeError):
-            with overridden_params({"TAIL_FREEZE_S": 0.0, "NOT_A_REAL_PARAM": 1}):
-                self.assertEqual(config.PARAMS["TAIL_FREEZE_S"], 0.0)
+            with overridden_params({"LWAA_MIN_PROB": 0.5, "NOT_A_REAL_PARAM": 1}):
+                self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], 0.5)
                 self.assertEqual(config.PARAMS["NOT_A_REAL_PARAM"], 1)
                 raise RuntimeError("boom")
-        self.assertEqual(config.PARAMS["TAIL_FREEZE_S"], original)
+        self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], original)
         self.assertNotIn("NOT_A_REAL_PARAM", config.PARAMS)
 
 

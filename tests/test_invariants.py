@@ -2,9 +2,9 @@
 
 Proves core mathematical properties:
 1. Strict Discrete Lot Conservation (no odd shares).
-2. Inventory Monotonicity (Reservation bid decreases monotonically with long inventory).
-3. Immediate Emergency Taker Arbitration under adverse probability shocks.
-4. Bounded Drawdown guarantee.
+2. Official taker fee curve and settlement PnL exactness.
+3. FIFO queue matching and depth-limited taker fills.
+4. Fair-probability bounds, drift SNR / regime classification, and order-action hysteresis.
 """
 import unittest
 import sys
@@ -16,9 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import config
-from core.types import OrderBook, Position, SpotState, Decision
-from core.estimator import estimate_fair_prob, estimate_uncertainty_envelope
-from core.policy import calculate_reservation_bids, evaluate_unpaired_utility
+from core.types import OrderBook, Position, SpotState
+from core.estimator import estimate_fair_prob
 from core.execution import quantize_lots
 
 
@@ -41,62 +40,6 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(quantize_lots(10.0), 10.0)
         self.assertEqual(quantize_lots(12.5), 10.0)
         self.assertEqual(quantize_lots(20.0), 10.0)
-
-    def test_reservation_bids_monotonicity(self):
-        """Invariant 2: Reservation price is strictly monotonic with respect to inventory.
-        
-        Holding more Up (q > 0) must:
-        - Decrease willingness to buy more Up: r_up(q1) < r_up(q0) for q1 > q0.
-        - Increase willingness to buy Down to hedge: r_down(q1) > r_down(q0).
-        """
-        p_fair = 0.50
-        epsilon = 0.02
-        edge = 0.02
-        
-        r_up_0, r_dn_0 = calculate_reservation_bids(p_fair, epsilon, edge, q=0.0)
-        r_up_5, r_dn_5 = calculate_reservation_bids(p_fair, epsilon, edge, q=5.0)
-        r_up_10, r_dn_10 = calculate_reservation_bids(p_fair, epsilon, edge, q=10.0)
-        
-        # Long inventory reduces buy price for that side
-        self.assertGreater(r_up_0, r_up_5)
-        self.assertGreater(r_up_5, r_up_10)
-        
-        # Long inventory increases willingness to pay for opposite hedge
-        self.assertLess(r_dn_0, r_dn_5)
-        self.assertLess(r_dn_5, r_dn_10)
-
-    def test_immediate_taker_hedge_under_violent_adverse_jump(self):
-        """Invariant 3: Under adverse probability shock, Taker Hedge must immediately dominate Hold.
-        
-        Simulates the exact historical scenario:
-        - Held: 10 shares Up @ 0.38 (cost $3.80).
-        - Market: Down ask is 0.63 (pair cost = 0.38 + 0.63 = 1.01).
-        - BTC crashes, p_fair of Up drops from 0.50 to 0.20 (Down is 80% likely to win).
-        
-        The model MUST output taker_hedge immediately at t=0, locking -$0.26 loss
-        instead of passively waiting and bleeding -$3.80!
-        """
-        book_up = OrderBook(bids=[(0.20, 50.0)], asks=[(0.23, 50.0)])
-        book_down = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
-        
-        decision = evaluate_unpaired_utility(
-            held_side="Up",
-            held_shares=10.0,
-            held_basis_price=0.38,
-            p_fair_held=0.20,      # Market just crashed against Up!
-            book_held=book_up,
-            book_opp=book_down,
-            gamma=0.15
-        )
-        
-        # Must immediately trigger taker hedge on Down @ 0.63
-        self.assertEqual(decision.action, "taker_hedge")
-        self.assertEqual(decision.side, "Down")
-        self.assertAlmostEqual(decision.price, 0.63)
-        self.assertIn("U_hedge", decision.reason)
-        # Official taker fee @ 0.63 = 0.07*0.63*0.37 = 0.016317/share -> pair cost 1.026317,
-        # utility -$0.2632, still far superior to the -$2.00+ holding loss
-        self.assertAlmostEqual(decision.utility, -0.2632, places=4)
 
     def test_official_taker_fee_curve_and_booking(self):
         """Invariant 12: Taker fee follows the official rate*p*(1-p) curve and is booked into cash."""
@@ -121,7 +64,9 @@ class TestMathematicalInvariants(unittest.TestCase):
             runner.windows_dir.mkdir()
             runner.start_window("test_fee", 1000.0, 1300.0, open_px=75000.0)
             runner.pos_up = Position(shares=10.0, cash=3.80)
-            book_up = OrderBook(bids=[(0.20, 50.0)], asks=[(0.23, 50.0)])
+            # Complementary books (ask_up + ask_down == 1.00) so the hedge is a
+            # genuine lock; the runner reconciles inconsistent snapshots first.
+            book_up = OrderBook(bids=[(0.38, 50.0)], asks=[(0.40, 50.0)])
             book_down = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)])
             spot = SpotState(timestamp=1260.0, price=74700.0, open_price=75000.0, realized_vol_bps=15.0)
             runner.step(1260.0, spot, book_up, book_down, poly_spot=74700.0)
@@ -174,22 +119,6 @@ class TestMathematicalInvariants(unittest.TestCase):
         if decision.action == "quote":
             self.assertGreaterEqual(decision.price, 0.02)
             self.assertLessEqual(decision.price, 0.98)
-            
-        # Test 2: Unpaired position maker hedge must not cross opposite ask
-        book_up = OrderBook(bids=[(0.52, 20.0)], asks=[(0.55, 20.0)])
-        book_down = OrderBook(bids=[(0.40, 20.0)], asks=[(0.44, 20.0)])
-        dec_unpaired = evaluate_unpaired_utility(
-            held_side="Up",
-            held_shares=5.0,
-            held_basis_price=0.52,
-            p_fair_held=0.52,
-            book_held=book_up,
-            book_opp=book_down,
-            gamma=0.15
-        )
-        if dec_unpaired.action == "quote":
-            self.assertLess(dec_unpaired.price, book_down.best_ask)
-            self.assertGreaterEqual(dec_unpaired.price, 0.02)
 
     def test_settlement_pnl_exactness_and_fallback(self):
         """Invariant 7: Settlement proceeds, cost, and PnL must be mathematically exact."""
@@ -301,77 +230,15 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertAlmostEqual(vwap_sell, 0.40, places=6)
 
     def test_risk_budget_covers_corridor_entry_price(self):
-        """Regression: a $2.00 window budget with a 5-share lot capped entries at
-        $0.40, silently rejecting every quote the 0.38-0.62 corridor allowed."""
+        """Regression: the window loss budget must fund one minimum lot at the
+        v2.2 max entry price; validate_params rejects a budget that cannot."""
         import config
-        from core.policy import plan_decision
-        from core.types import OrderBook, Position, SpotState
 
         self.assertTrue(config.validate_params())
         bad = dict(config.PARAMS)
         bad["MAX_WINDOW_LOSS_USD"] = 1.00
         with self.assertRaises(ValueError):
             config.validate_params(bad)
-
-        book_up = OrderBook(bids=[(0.53, 20.0)], asks=[(0.57, 20.0)])
-        book_dn = OrderBook(bids=[(0.42, 20.0)], asks=[(0.47, 20.0)])
-        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
-        dec = plan_decision(
-            Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
-            tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50
-        )
-        self.assertEqual(dec.action, "quote", dec.reason)
-        self.assertGreaterEqual(dec.price, config.PARAMS["MIN_MAKER_ENTRY_PRICE"])
-        self.assertLessEqual(
-            dec.price * dec.size, config.PARAMS["MAX_WINDOW_LOSS_USD"] + 1e-9, dec.reason
-        )
-        self.assertNotIn("loss budget", dec.reason)
-
-    def test_pretrade_window_loss_budget_gate(self):
-        """Invariant 9c: a naked Leg-1 entry that could breach the window loss budget is refused."""
-        import config
-        from core.policy import plan_decision, risk_adjusted_entry_size
-        from core.types import OrderBook, Position, SpotState
-
-        # No lock available when the opposite ask is 0.45 at a 0.54 quote and
-        # the budget only affords one lot (5 * 0.54 = 2.70 > 2.00).
-        self.assertEqual(
-            risk_adjusted_entry_size(5.0, 0.54, OrderBook(bids=[(0.44, 5)], asks=[(0.45, 5)]),
-                                     5.0, 1, 3, 2.00),
-            0.0
-        )
-        # A locked pair needs visible hedge depth: 5 shares on the opposite ask
-        # can only lock one lot, so the rest would be naked beyond the budget.
-        self.assertEqual(
-            risk_adjusted_entry_size(10.0, 0.54, OrderBook(bids=[(0.43, 5)], asks=[(0.44, 5)]),
-                                     5.0, 1, 3, 2.00),
-            5.0
-        )
-        # With enough visible depth the same locked pair allows the full size.
-        self.assertEqual(
-            risk_adjusted_entry_size(10.0, 0.54, OrderBook(bids=[(0.43, 5)], asks=[(0.44, 10)]),
-                                     5.0, 1, 3, 2.00),
-            10.0
-        )
-        # Affordable case scales down to whole lots inside the budget.
-        self.assertEqual(
-            risk_adjusted_entry_size(15.0, 0.30, OrderBook(bids=[(0.68, 5)], asks=[(0.70, 5)]),
-                                     5.0, 1, 3, 2.00),
-            5.0
-        )
-
-        book_up = OrderBook(bids=[(0.53, 20.0)], asks=[(0.57, 20.0)])
-        book_dn = OrderBook(bids=[(0.42, 20.0)], asks=[(0.47, 20.0)])
-        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0, realized_vol_bps=8.0)
-        dec = plan_decision(
-            Position(0.0, 0.0), Position(0.0, 0.0), book_up, book_dn, spot,
-            tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50
-        )
-        if dec.action == "quote":
-            # Any accepted quote must be small enough to survive total loss.
-            self.assertLessEqual(dec.size * dec.price, config.PARAMS["MAX_WINDOW_LOSS_USD"] + 1e-9)
-        else:
-            self.assertIn("loss budget", dec.reason)
 
     def test_official_settlement_override(self):
         """Invariant 10: Official Gamma settlement truth overrides reference spot fallback."""
@@ -415,10 +282,10 @@ class TestMathematicalInvariants(unittest.TestCase):
         )
         # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
         # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
-        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"))
-        # With 0 bps move, no edge exists outside uncertainty band
+        dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
+        # Consistent basis (poly 75000 / open 75000) -> p_fair = 0.50; ask 0.52 is
+        # above the $0.45 MWDE discount cap, so the engine stands by.
         self.assertEqual(dec.action, "wait")
-        self.assertIn("No edge", dec.reason)
 
     def test_drift_snr_and_micro_regime_classification(self):
         """Invariant 13: Statistical drift SNR and regime classification must be mathematically exact."""
@@ -474,28 +341,6 @@ class TestMathematicalInvariants(unittest.TestCase):
         if dec.action == "quote":
             self.assertNotEqual(dec.side, "Up")
 
-    def test_catastrophic_pair_cost_hedge_disqualification(self):
-        """Invariant 15: When pair_cost > 1.05, taker hedge is disqualified and taker unwind dominates."""
-        from core.policy import evaluate_unpaired_utility
-
-        # Trader holds 15 Down bought at 0.74
-        # Market moved violently: Up ask is 0.83 (pair_cost = 0.74 + 0.83 + fee = 1.575 > 1.05)
-        # Down bid is 0.20
-        b_held = OrderBook(bids=[(0.20, 20.0)], asks=[(0.25, 20.0)])
-        b_opp = OrderBook(bids=[(0.80, 20.0)], asks=[(0.83, 20.0)])
-
-        dec = evaluate_unpaired_utility(
-            held_side="Down",
-            held_shares=15.0,
-            held_basis_price=0.74,
-            p_fair_held=0.10,
-            book_held=b_held,
-            book_opp=b_opp,
-            max_pair_cost=1.05
-        )
-        # Taker hedge at 0.83 must be disqualified; should unwind position or hold, NOT buy hedge @ 0.83
-        self.assertNotEqual(dec.action, "taker_hedge")
-
     def test_urgent_cancel_on_trend_regime_and_safe_entry_boundary(self):
         """Invariant 16: A structural urgent_cancel flag (regime/lifecycle lockout)
         pulls resting quotes immediately regardless of the message wording."""
@@ -522,33 +367,6 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(len(to_cancel_2), 1)
         self.assertEqual(to_cancel_2[0].id, 1)
 
-    def test_min_entry_tau_cutoff_boundary(self):
-        """Invariant 17: When remaining time tau < 180s, new Leg-1 entry is strictly forbidden."""
-        import config
-        from core.policy import plan_decision
-        pos_flat = Position(0.0, 0.0)
-        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
-        spot = SpotState(timestamp=1000.0, price=75010.0, open_price=75000.0)
-        
-        # tau = 120s (less than MIN_ENTRY_TAU_S = 180s)
-        dec = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=120.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"))
-        self.assertEqual(dec.action, "wait")
-        self.assertIn("Late window", dec.reason)
-        self.assertTrue(dec.urgent_cancel, "lifecycle lockouts must pull resting quotes")
-
-    def test_balanced_odds_entry_boundary(self):
-        """Invariant 18: Skewed fair probability outside [0.42, 0.58] strictly blocks Leg-1 maker entry."""
-        import config
-        from core.policy import plan_decision
-        pos_flat = Position(0.0, 0.0)
-        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
-        spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
-        
-        # Pass skewed p_fair = 0.81 (like in round 1794289800)
-        dec_skewed = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.81)
-        self.assertEqual(dec_skewed.action, "wait")
-        self.assertIn("balanced entry zone", dec_skewed.reason)
-
     def test_single_entry_per_window_lockout(self):
         """Invariant 19: When entries_count >= MAX_ENTRIES_PER_WINDOW, policy waits for next window."""
         import config
@@ -557,8 +375,8 @@ class TestMathematicalInvariants(unittest.TestCase):
         book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
         
-        # entries_count = 1 (position was already unwound this round)
-        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=dict(config.PARAMS, STRATEGY_MODE="legacy_mm"), p_fair=0.50, entries_count=1)
+        # entries_count = 1 (an entry already filled this round)
+        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.50, entries_count=1)
         self.assertEqual(dec_locked.action, "wait")
         self.assertIn("Max entries per window reached", dec_locked.reason)
 

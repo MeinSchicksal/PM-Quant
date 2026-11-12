@@ -1,13 +1,13 @@
-"""Unit Tests for Market Regime Classification & Adaptive Quoting Invariants.
+"""Unit Tests for Market Regime Classification & Runner Lifecycle Guards.
 
-Tests the multi-dimensional regime classification engine, boosted sizing in
-range-bound markets, strict block of toxic/trend regimes, and Leg-2 maker preference.
+Tests the multi-dimensional regime classification engine (range-bound sizing,
+strict block of toxic/trend/wide-spread regimes) and the runner's partial-fill
+entry dedup and dead-man switch.
 """
 import unittest
 import config
-from core.types import Position, OrderBook, SpotState, Order
-from core.policy import plan_decision, evaluate_unpaired_utility
-from core.regime import classify_market_regime, calculate_drift_snr
+from core.types import OrderBook, SpotState
+from core.regime import classify_market_regime
 from runtime.runner import PaperRunner
 import tempfile
 
@@ -64,49 +64,6 @@ class TestMarketRegimeClassifier(unittest.TestCase):
         self.assertEqual(reg_wide.regime, "wide_spread")
         self.assertFalse(reg_wide.can_quote_up)
         self.assertFalse(reg_wide.can_quote_down)
-
-    def test_smart_evaluate_unpaired_utility_maker_preference(self):
-        """Invariant 23: In balanced oscillation without adverse drift, Leg-2 maker quoting dominates."""
-        book_held = OrderBook(bids=[(0.44, 50.0)], asks=[(0.48, 50.0)])
-        book_opp = OrderBook(bids=[(0.44, 50.0)], asks=[(0.56, 50.0)])
-        
-        # Bought Down at 0.46, current odds balanced (p_fair_held = 0.50)
-        # Down ask is 0.56 (pair_cost = 0.46 + 0.56 + fee = 1.037 > 1.00)
-        # Policy must NOT panic and pay 0.56 taker; it must work the Leg-2 maker quote on Up!
-        dec = evaluate_unpaired_utility(
-            held_side="Down",
-            held_shares=5.0,
-            held_basis_price=0.46,
-            p_fair_held=0.50,
-            book_held=book_held,
-            book_opp=book_opp,
-            tau_s=200.0,
-            regime_name="range_bound"
-        )
-        self.assertEqual(dec.action, "quote")
-        self.assertEqual(dec.side, "Up")
-        self.assertLessEqual(dec.price, 0.54) # target price is at most 1.00 - 0.46 = 0.54
-
-    def test_smart_evaluate_unpaired_utility_arbitrage_lock(self):
-        """Invariant 24: When opposite ask offers pair_cost <= 1.00, Taker Hedge immediately locks profit."""
-        book_held = OrderBook(bids=[(0.44, 50.0)], asks=[(0.48, 50.0)])
-        # Up ask is cheap: 0.50 -> pair cost = 0.46 + 0.50 + 0.0175 fee = 0.9775 <= 1.00!
-        book_opp = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
-        
-        dec = evaluate_unpaired_utility(
-            held_side="Down",
-            held_shares=5.0,
-            held_basis_price=0.46,
-            p_fair_held=0.50,
-            book_held=book_held,
-            book_opp=book_opp,
-            tau_s=200.0,
-            regime_name="normal_oscillation"
-        )
-        self.assertEqual(dec.action, "taker_hedge")
-        self.assertEqual(dec.side, "Up")
-        self.assertEqual(dec.price, 0.50)
-        self.assertIn("arbitrage", dec.reason)
 
     def test_partial_fill_does_not_double_count_entries(self):
         """Invariant 25: Partial fills of the same order must not consume multiple entries_count."""

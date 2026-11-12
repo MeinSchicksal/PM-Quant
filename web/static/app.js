@@ -269,8 +269,8 @@
   }
 
   const REGIME_META = {
-    'range_bound': { name: '高确定性箱体震荡', desc: '信噪比 SNR ≤ 1.0, 偏离 ≤ 8 bps (核心价差捕获做市)', badge: 'ok', short: '箱体震荡' },
-    'normal_oscillation': { name: '常态微幅震荡', desc: '信噪比 SNR ≤ 1.2, 基线 1 手做市排队', badge: 'normal', short: '常态震荡' },
+    'range_bound': { name: '高确定性箱体震荡', desc: '信噪比 SNR ≤ 1.0, 偏离 ≤ 8 bps (高确定性箱体)', badge: 'ok', short: '箱体震荡' },
+    'normal_oscillation': { name: '常态微幅震荡', desc: '信噪比 SNR ≤ 1.2, 常态微幅震荡', badge: 'normal', short: '常态震荡' },
     'trending_up': { name: '单边上涨强动量', desc: '信噪比 SNR > 1.8 且偏上, 趋势防守 (禁止逆势买跌)', badge: 'freeze', short: '上涨动量' },
     'trending_down': { name: '单边下跌强动量', desc: '信噪比 SNR > 1.8 且偏下, 趋势防守 (禁止逆势买涨)', badge: 'freeze', short: '下跌动量' },
     'toxic': { name: '剧烈跳空毒流', desc: '波动率 > 35 bps 或秒级剧震, 主动收缩挂单避险', badge: 'warn', short: '毒流跳空' },
@@ -321,7 +321,7 @@
     }
 
     if (traded.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="action-empty">尚无带入场时点的成交样本 —— 自 v1.1.1 起，只有开仓时刻已打标的成交才参与归因</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="action-empty">尚无带入场时点的成交样本 —— 只有开仓时刻已打标的成交才参与归因</td></tr>`;
     } else {
       tbody.innerHTML = traded.map(r => {
         const decisive = r.wins + r.losses;
@@ -498,7 +498,7 @@
     // 3. Max position or entries reached
     if (reason.includes('max position') || reason.includes('position reached')) {
       return {
-        text: "⏸️ 单轮持仓已达风控上限 (15 股)：停止增仓，锁定底仓等待期末清算",
+        text: "⏸️ 单轮持仓已达风控上限 (10 股)：停止增仓，锁定底仓等待期末清算",
         level: "freeze"
       };
     }
@@ -509,7 +509,7 @@
       };
     }
 
-    // 4. Tail freeze & Late window (tau < 180s or tau < 60s)
+    // 4. Tail freeze & Late window (v2.2 engine freeze tau < 15s; legacy late-window reasons)
     if (reason.includes('tail freeze') || reason.includes('late window') || reason.includes('tau <') || reason.includes('tau<') || reason.includes('tau ')) {
       return {
         text: "⏱️ 临近交割尾盘 (尾盘流动性保护)：禁止新开第1腿，锁定挂单防守",
@@ -562,7 +562,7 @@
       };
     }
 
-    // 8b. v2.1 Dual-Stage (MWDE + LWAA) Strategies
+    // 8b. v2.2 Dual-Stage (MWDE + LWAA) Strategies
     if (reason.includes('mwde taker absorption')) {
       const sideText = (side === 'DOWN' || reason.includes('down')) ? '看跌 (DOWN)' : '看涨 (UP)';
       return {
@@ -591,15 +591,15 @@
         level: (side === 'DOWN' || reason.includes('down')) ? "down" : "ok"
       };
     }
-    if (reason.includes('死扛让子弹飞') || reason.includes('lwaa: holding') || (reason.includes('v2.1: holding'))) {
+    if (reason.includes('死扛让子弹飞') || reason.includes('lwaa: holding') || (reason.includes('v2.2: holding'))) {
       return {
         text: `💎 顺势持仓中：不急于买对侧止损，死扛让子弹飞至到期结算 ($1.00)`,
         level: "ok"
       };
     }
-    if (reason.includes('early/mid window standby') || reason.includes('standby in early/mid') || reason.includes('v2.1: standby')) {
+    if (reason.includes('early/mid window standby') || reason.includes('standby in early/mid') || reason.includes('v2.2: standby')) {
       return {
-        text: `⏳ 处于观察等待期：监测前半程顺势低吸机会 (60s-150s) 或等待尾盘高确信吸收`,
+        text: `⏳ 处于观察等待期：监测前半程顺势低吸机会 (60s-180s) 或等待尾盘高确信吸收`,
         level: "info"
       };
     }
@@ -1435,7 +1435,7 @@
       riskText.textContent = `高波动防守区${volStr}`;
     } else if (live.regime === 'range_bound') {
       riskPill.className = 'status-pill status-ready';
-      riskText.textContent = `高确定性箱体震荡·做市区间${volStr}`;
+      riskText.textContent = `高确定性箱体震荡·低吸区间${volStr}`;
     } else if (live.regime === 'trending_up') {
       riskPill.className = 'status-pill status-ready';
       riskText.textContent = `单边看涨动量趋势${volStr}`;
@@ -1522,7 +1522,7 @@
           <div class="queue-status-card idle">
             <span class="queue-status-dot"></span>
             <span class="queue-status-title">当前无在途排队挂单</span>
-            <span class="queue-status-desc">${hasPos ? '已持有仓位，等待尾盘折价对冲或到期结算' : '空仓待机，等待高确信做市/对冲偏差触发'}</span>
+            <span class="queue-status-desc">${hasPos ? '已持有仓位，等待尾盘折价对冲或到期结算' : '空仓待机，等待高确信吸收/对冲偏差触发'}</span>
           </div>
         `;
       } else {
@@ -1936,7 +1936,7 @@
           <div>
             <strong style="display:block; color:var(--ink); margin-bottom:4px;">本轮未触发交易 · 策略全程防守观望</strong>
             <p style="margin:0; color:var(--label); font-size:13px; line-height: 1.6;">
-              <strong>决策依据：</strong>现货价格在开盘价基准线附近窄幅震荡，未出现突破 88% 阈值的高确定性趋势信号，且盘口 UP/DOWN 均未出现安全边际贴水。量化系统遵守风控防守纪律，保持空仓观望，避免无确定性摩擦成本，底仓本金 100% 安全。
+              <strong>决策依据：</strong>现货价格在开盘价基准线附近窄幅震荡，未出现突破 80% 阈值的高确定性趋势信号，且盘口 UP/DOWN 均未出现安全边际贴水。量化系统遵守风控防守纪律，保持空仓观望，避免无确定性摩擦成本，底仓本金 100% 安全。
             </p>
           </div>
         </div>
@@ -1962,7 +1962,7 @@
       } else if (a.purpose === 'hedge') {
         actionBadge = `<span class="action-kind-tag taker-hedge">🛡️ 无风险套利对冲 (Taker Hedge)</span>`;
       } else {
-        actionBadge = `<span class="action-kind-tag maker">📌 做市挂单 (Quote)</span>`;
+        actionBadge = `<span class="action-kind-tag maker">📌 被动吸收挂单 (Quote)</span>`;
       }
 
       // Microstructure UP / DOWN prices
@@ -1994,16 +1994,16 @@
           probHtml = `<strong style="color:#05b169;">UP ${(probUp * 100).toFixed(1)}%</strong> <small style="color:#64748b;">(DOWN ${(probDown * 100).toFixed(1)}%)</small>`;
         }
       } else {
-        probHtml = side === 'Down' ? '<strong style="color:#cf202f;">DOWN 89.0%</strong>' : '<strong style="color:#05b169;">UP 91.0%</strong>';
+        probHtml = '<strong style="color:#64748b;">--</strong>';
       }
 
       // Professional investor Chinese rationale
       let reasonText = '';
       const rawReason = String(a.reason || '');
       if (rawReason.includes('Absorption') || (a.purpose === 'entry' && side === 'Down')) {
-        reasonText = `尾盘剩余 ${tau} 秒，现货跌破开盘基准线，模型评估 DOWN 胜率达 ${(probUp ? ((1 - probUp) * 100).toFixed(1) : '89.0')}%，盘口卖价 $${px.toFixed(2)} 存在巨幅折价安全边际，执行吃单吸收。`;
+        reasonText = `尾盘剩余 ${tau} 秒，模型评估 ${side === 'Down' ? 'DOWN' : 'UP'} 胜率达 ${probUp !== null ? ((side === 'Down' ? 1 - probUp : probUp) * 100).toFixed(1) : '--'}%，盘口卖价 $${px.toFixed(2)} 存在折价安全边际，执行吃单吸收。`;
       } else if (rawReason.includes('Arbitrage lock') || rawReason.includes('hedge') || a.purpose === 'hedge') {
-        reasonText = `触发无风险套利锁赢：双边配对综合建仓成本 $${(px + 0.58).toFixed(3)} ≤ $1.00，以 $${px.toFixed(2)} 买入 UP 锁死到期兑现，刚性锁定纯套利收益。`;
+        reasonText = `触发无风险套利锁赢：以 $${px.toFixed(2)} 买入 ${side === 'Down' ? 'DOWN' : 'UP'} 补齐配对，双边综合建仓成本 ≤ $1.00，锁死到期 $1.00 兑现的刚性套利收益。`;
       } else if (rawReason) {
         reasonText = rawReason;
       } else {

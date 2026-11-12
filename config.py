@@ -14,9 +14,6 @@ ROOT = Path(__file__).resolve().parent
 
 # Core Mathematical & Economic Parameters
 PARAMS = {
-    # 0. Active Strategy Engine
-    "STRATEGY_MODE": "LWAA",          # Active Strategy: "LWAA" v2.2 Continuous Dynamic Absorption
-
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares, baseline sizing)
@@ -45,7 +42,7 @@ PARAMS = {
     "LWAA_MAX_QUOTE_ATTEMPTS": 1,      # Maximum maker quote attempts per window
     "LWAA_ENABLE_ARBITRAGE_HEDGE": True, # Always lock both sides when opp ask drops (pair_cost <= 1.00)
     "ALLOW_TAKER_UNWIND": False,       # Strictly forbid panic unwinds / selling (死扛到期，不要卖出)
-    "MAX_QUEUE_WAIT_S": 20.0,          # Passive queue waiting timeout (20s) to fill before canceling
+    "MAX_QUEUE_WAIT_S": 15.0,          # Passive queue waiting timeout (15s) to fill before canceling
 
     # 3. Lifecycle & Account-Level Watchdog Boundaries
     "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window
@@ -56,15 +53,8 @@ PARAMS = {
     "DEADMAN_TIMEOUT_S": 3.0,         # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Polymarket TWAP older than this (fall back to Binance spot basis)
 
-    # 4. Legacy Avellaneda-Stoikov & Dual-Regime Compatibility Parameters
-    "TAIL_FREEZE_S": 60.0,            # Seconds before expiration where all actions are frozen
-    "MIN_ENTRY_TAU_S": 180.0,         # Minimum remaining seconds (tau >= 180s) to permit initial Leg-1 entry in legacy mode
-    "BASE_EDGE": 0.025,               # Minimum price edge demanded over uncertainty band (2.5 ticks)
-    "UNCERTAINTY_K": 1.2,             # Scaling multiplier for real-time uncertainty bandwidth
-    "BASELINE_VOL_BPS": 15.0,         # Fallback baseline realized volatility in bps / 5m
-    "KELLY_FRACTION": 0.25,           # Quarter-Kelly risk fraction scaling factor
-    "RISK_AVERSION_GAMMA": 0.15,      # Avellaneda-Stoikov risk aversion factor for inventory penalty
-    "MAX_QUEUE_WAIT_S": 15.0,         # Maximum acceptable passive queue waiting time based on trade rate
+    # 4. Market-Regime Classification (attribution / dashboard only; not a v2.2 entry gate)
+    "MIN_ENTRY_TAU_S": 180.0,         # Regime classifier horizon reference for can-quote attribution
     "TOXICITY_SHOCK_BPS": 3.5,        # 3-second rapid price shock threshold indicating informed toxicity
     "SNR_TREND_THRESHOLD": 1.8,       # Signal-to-Noise Ratio threshold to classify momentum trend (p < 0.05)
     "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify normal oscillation regime
@@ -72,19 +62,15 @@ PARAMS = {
     "MAX_RANGE_DISPLACEMENT_BPS": 8.0,# Max displacement from strike to qualify for range-bound regime
     "MAX_ORDERBOOK_SPREAD": 0.06,     # Max book spread (0.06 = 6 cents) before declaring wide-spread regime
     "ALLOW_INCREASED_RANGE_SIZE": False,
-    "MAX_MAKER_ENTRY_PRICE": 0.90,    # Maximum price for passive entry
-    "MIN_MAKER_ENTRY_PRICE": 0.38,    # Minimum price allowed for passive entry
-    "MIN_FAIR_PROB_ENTRY": 0.42,      # Minimum fair probability for balanced Leg-1 entry
-    "MAX_FAIR_PROB_ENTRY": 0.58,      # Maximum fair probability for balanced Leg-1 entry
-    "MAX_PAIR_HEDGE_COST": 1.05,      # Maximum acceptable pair cost for Taker Hedge
-    "P_FILL_MAKER": 0.60,             # Assumed probability a resting Leg-2 maker quote fills before expiry
+    "MIN_FAIR_PROB_ENTRY": 0.42,      # Regime classifier balanced-odds lower bound (attribution)
+    "MAX_FAIR_PROB_ENTRY": 0.58,      # Regime classifier balanced-odds upper bound (attribution)
 }
 
 def validate_params(params=None):
     """Fail fast when risk parameters contradict each other."""
     p = PARAMS if params is None else params
     errors = []
-    max_px = p.get("LWAA_MAX_ENTRY_PRICE", p.get("MAX_MAKER_ENTRY_PRICE", 0.90))
+    max_px = p.get("LWAA_MAX_ENTRY_PRICE", 0.65)
     min_lot_cost = p["LOT_SIZE"] * max_px * p["MIN_LOTS"]
     if p["MAX_WINDOW_LOSS_USD"] + 1e-9 < min_lot_cost:
         errors.append(
@@ -97,8 +83,6 @@ def validate_params(params=None):
             f"MAX_WINDOW_LOSS_USD={p['MAX_WINDOW_LOSS_USD']:.2f} exceeds "
             f"MAX_DAILY_DRAWDOWN_USD={p['MAX_DAILY_DRAWDOWN_USD']:.2f}"
         )
-    if p.get("MIN_MAKER_ENTRY_PRICE", 0.38) > p.get("MAX_MAKER_ENTRY_PRICE", 0.90):
-        errors.append("MIN_MAKER_ENTRY_PRICE exceeds MAX_MAKER_ENTRY_PRICE")
     if p["MIN_LOTS"] > p["MAX_LOTS"]:
         errors.append("MIN_LOTS exceeds MAX_LOTS")
     if errors:

@@ -1,10 +1,10 @@
-"""Unit tests for the PM-Quant v2.0 LWAA (Late-Window Asymmetric Absorption) Strategy.
+"""Unit tests for the PM-Quant v2.2 dual-stage absorption strategy (MWDE + LWAA).
 
 Verifies the mathematical invariants and execution behavior:
-1. Early/mid-window standby (tau > 60s).
-2. Late-window high-confidence horizon detection (tau in [15s, 60s], P* >= 0.88).
-3. Taker absorption execution on mispriced asks (P* - ask - fee >= 0.02).
-4. Maker absorption execution on bids when ask is expensive.
+1. Early-window standby and MWDE discount-only entry (no chase above $0.45).
+2. Late-window high-confidence detection (LWAA tau in [15s, 120s], P* >= 0.80).
+3. Taker absorption on mispriced asks (P* - ask - fee >= 0.02, within [0.35, 0.65]).
+4. Maker absorption on bids when the ask is expensive.
 5. Strict anti-panic hold-to-expiration (taker unwinds disabled).
 6. Risk-free arbitrage lock when pair_cost <= 1.00.
 7. Tail freeze when tau < 15s.
@@ -21,21 +21,21 @@ if str(ROOT) not in sys.path:
 
 import config
 from core.types import OrderBook, Position, SpotState, Decision
-from core.policy import plan_decision, plan_decision_lwaa
+from core.policy import plan_decision
 from runtime.runner import PaperRunner
 
 
 class TestLWAAStrategy(unittest.TestCase):
     def setUp(self):
-        self.params = dict(config.PARAMS, STRATEGY_MODE="LWAA")
+        self.params = dict(config.PARAMS)
 
     def test_early_window_standby(self):
-        """Invariant 1: Early & mid window (tau > 150s) strictly stands by to avoid random-walk noise."""
+        """Invariant 1: MWDE window stands by when the book offers no discount <= $0.45."""
         pos = Position(0.0, 0.0)
         book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         spot = SpotState(timestamp=1000.0, price=75100.0, open_price=75000.0)
 
-        # tau = 200s (> LWAA_MAX_TAU_S = 150s)
+        # tau = 200s is inside MWDE (120, 240], but bid/ask 0.48/0.50 exceed the $0.45 dip cap
         dec = plan_decision(pos, pos, book, book, spot, tau_s=200.0, params=self.params, p_fair=0.92)
         self.assertEqual(dec.action, "wait")
         self.assertIn("Standby in early/mid window", dec.reason)
@@ -53,7 +53,7 @@ class TestLWAAStrategy(unittest.TestCase):
         self.assertTrue(dec.urgent_cancel)
 
     def test_late_window_uncertain_outcome(self):
-        """Invariant 3: Late window with uncertain odds (P* < 0.88) does not gamble."""
+        """Invariant 3: Late window with uncertain odds (P* < 0.80) does not gamble."""
         pos = Position(0.0, 0.0)
         book = OrderBook(bids=[(0.52, 50.0)], asks=[(0.55, 50.0)])
         spot = SpotState(timestamp=1260.0, price=75005.0, open_price=75000.0)
@@ -121,8 +121,7 @@ class TestLWAAStrategy(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.75, 50.0)], asks=[(0.85, 50.0)])
         spot = SpotState(timestamp=1270.0, price=74990.0, open_price=75000.0)
 
-        # In v1.1, the panic unwind rule would have sold at 0.10 losing $3.75!
-        # In LWAA, policy MUST NOT SELL. It holds to settlement!
+        # v2.2 never panic-sells at the 0.10 floor; it holds the single leg to settlement.
         dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=30.0, params=self.params, p_fair=0.40)
         self.assertNotEqual(dec.action, "taker_unwind")
         self.assertEqual(dec.action, "wait")
@@ -161,13 +160,13 @@ class TestLWAAStrategy(unittest.TestCase):
             book_up = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)], source_t=1150.0)
             book_dn = OrderBook(bids=[(0.38, 20.0)], asks=[(0.40, 20.0)], source_t=1150.0)
 
-            # Tick 1: Early window (tau = 200s > 150s) -> Standby, no trades
+            # Tick 1: tau = 200s (MWDE), book 0.58/0.60 above the $0.45 dip cap -> Standby, no trades
             spot_early = SpotState(timestamp=1100.0, price=75150.0, open_price=open_px, realized_vol_bps=15.0)
             runner._last_step_time = 1100.0
             runner.step(1100.0, spot_early, book_up, book_dn, poly_spot=75150.0)
             self.assertEqual(len(runner.fills), 0)
 
-            # Tick 2: Late window (tau = 40s) -> High confidence P* >= 0.90 -> Taker Buy 5 shares Up @ 0.60
+            # Tick 2: Late window (tau = 40s) -> High confidence P* >= 0.80 -> Taker Buy 5 shares Up @ 0.60
             book_up.source_t = 1260.0
             book_dn.source_t = 1260.0
             spot_late = SpotState(timestamp=1260.0, price=75150.0, open_price=open_px, realized_vol_bps=15.0)

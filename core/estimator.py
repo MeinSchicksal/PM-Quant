@@ -1,7 +1,7 @@
 """Mathematical Estimation & Microstructure Metrics.
 
-Handles continuous probability estimation, uncertainty envelope calculation,
-order flow toxicity detection and regime-shift statistics.
+Handles continuous settlement-probability estimation, EWMA realized volatility,
+volatility-adaptive spread parameters and drift signal-to-noise statistics.
 """
 import math
 from typing import Tuple, List, Optional
@@ -61,60 +61,6 @@ def estimate_p_fair(
     if open_px > 0 and getattr(spot, "price", 0.0) > 0:
         return estimate_fair_prob(spot.price, open_px, tau_s, vol_bps)
     return 0.50
-
-
-def estimate_uncertainty_envelope(
-    vol_bps: float,
-    latency_s: float = 0.30,
-    k_mult: float = 1.2,
-    basis_error: float = 0.004,
-    tau_s: float = 300.0,
-    floor: float = 0.008,
-    cap: float = 0.08,
-) -> float:
-    """Calculate the uncertainty band epsilon_t in probability units.
-
-    Epsilon incorporates:
-    1. Price diffusion over the remaining horizon tau (bps -> probability via
-       the normal density near 0.50, max pdf ~0.40).
-    2. Extra diffusion during the wire latency window.
-    3. Residual oracle basis error between Binance spot and Chainlink TWAP.
-
-    Dimensional note: sigma is a return dispersion (vol_bps / 10000), so
-    dp ~= 0.40 * sigma. The band must therefore scale with tau: earlier
-    versions multiplied a return by 100 and effectively collapsed to the
-    clamp floor, making the "adaptive" envelope a constant.
-    """
-    vol_ret = max(0.0, vol_bps) / 10000.0
-    tau = max(0.0, tau_s)
-    sigma_tau = vol_ret * math.sqrt(tau / 300.0)
-    sigma_latency = vol_ret * (
-        math.sqrt((tau + max(0.0, latency_s)) / 300.0) - math.sqrt(tau / 300.0)
-    )
-    prob_uncertainty = 0.40 * (sigma_tau + sigma_latency)
-
-    epsilon = k_mult * (prob_uncertainty + basis_error)
-    # Hard bounds: never quote inside 0.8 cents, never widen past 8 cents.
-    return max(floor, min(cap, round(epsilon, 4)))
-
-
-def detect_toxicity_shock(
-    spot_history_3s: List[Tuple[float, float]], 
-    shock_threshold_bps: float = 3.5
-) -> bool:
-    """Check if BTC experienced an adverse jump of >= shock_threshold_bps in past 3 seconds.
-    
-    Informed toxic flow manifests as rapid multi-tick directional spot moves.
-    """
-    if len(spot_history_3s) < 2:
-        return False
-    t_now, px_now = spot_history_3s[-1]
-    for t, px in spot_history_3s[:-1]:
-        if t_now - t <= 3.5 and px > 0:
-            diff_bps = abs(px_now - px) / px * 10000.0
-            if diff_bps >= shock_threshold_bps:
-                return True
-    return False
 
 
 def calculate_dynamic_realized_vol(
@@ -210,62 +156,6 @@ def calculate_adaptive_spread_params(
         return edge, k, "volatile"
     else:
         return base_edge, k_mult, "normal"
-
-
-def calculate_kelly_order_size(
-    available_capital: float,
-    p_win: float,
-    quote_price: float,
-    lot_size: float = 5.0,
-    min_lots: int = 1,
-    max_lots: int = 3,
-    kelly_fraction: float = 0.25
-) -> float:
-    """Calculate fractional Kelly order size in discrete exchange lots.
-
-    NOTE: reference implementation, not wired into v1.x Leg-1 sizing. Current
-    sizing is `regime.recommended_lots` bounded by the pre-trade loss budget in
-    `policy.risk_adjusted_entry_size`; wiring Kelly requires a calibrated
-    p_win, which the system does not yet have (see docs/CORE_STRATEGY_PHILOSOPHY.md).
-    
-    Args:
-        available_capital: Current available balance (USD).
-        p_win: Estimated model win probability for this side.
-        quote_price: Planned execution or maker quote price.
-        lot_size: Minimum discrete lot increment (default 5.0 shares).
-        min_lots: Minimum entry lots when positive edge exists (default 1 lot = 5 shares).
-        max_lots: Maximum entry lots when edge is large (default 3 lots = 15 shares).
-        kelly_fraction: Fractional Kelly scaling factor (0.25 = Quarter-Kelly).
-        
-    Returns:
-        Order size in shares: discrete multiple in {5.0, 10.0, 15.0}.
-    """
-    min_cost = quote_price * lot_size
-    if available_capital < min_cost or quote_price <= 0.01 or quote_price >= 0.99:
-        return 0.0 if available_capital < min_cost else float(min_lots * lot_size)
-        
-    edge = p_win - quote_price
-    if edge <= 1e-4:
-        return float(min_lots * lot_size)
-        
-    # Binary payoff odds: b = (1 - quote_price) / quote_price
-    # Full Kelly: f* = (p_win * (b + 1) - 1) / b = (p_win - quote_price) / (1 - quote_price)
-    full_kelly = edge / (1.0 - quote_price)
-    quarter_kelly = max(0.0, kelly_fraction * full_kelly)
-    
-    # Capital risked
-    risk_usd = available_capital * quarter_kelly
-    raw_shares = risk_usd / quote_price
-    raw_lots = raw_shares / lot_size
-    
-    if raw_lots < 1.5:
-        target_lots = min_lots
-    elif raw_lots < 2.5:
-        target_lots = min(2, max_lots)
-    else:
-        target_lots = max_lots
-        
-    return float(target_lots * lot_size)
 
 
 def calculate_drift_snr(

@@ -1,8 +1,8 @@
-"""Unit tests for PM-Quant v2.1 Dual-Stage Strategy:
+"""Unit tests for PM-Quant Dual-Stage Strategy:
 MWDE (Mid-Window Trend-Biased Discount Entry) + LWAA (Late-Window Asymmetric Absorption).
 
 Verifies the mathematical invariants:
-1. Stage 1 (tau in [150s, 240s]): When consolidation corridor holds and spot delta/probability favors Up,
+1. Stage 1 (tau in [120s, 240s]): When consolidation corridor holds and spot delta/probability favors Up,
    an Ask <= $0.45 triggers immediate trend-biased dip-buying.
 2. Stage 1 Down: When spot delta favors Down, an Ask <= $0.45 triggers Down dip-buying.
 3. Ceiling enforcement: Ask > $0.45 in Stage 1 is rejected (never chase expensive dips).
@@ -23,13 +23,11 @@ from core.types import OrderBook, Position, SpotState, Decision
 from core.policy import plan_decision
 
 
-class TestV21DualStageStrategy(unittest.TestCase):
+class TestDualStageStrategy(unittest.TestCase):
     def setUp(self):
         self.params = dict(
             config.PARAMS,
-            STRATEGY_MODE="LWAA",
             MWDE_ENABLE=True,
-            MWDE_MIN_TAU_S=150.0,
             MWDE_MAX_TAU_S=240.0,
             MWDE_MAX_ENTRY_PRICE=0.45,
             PREV_ROUND_ABS_MOVE=35.0,
@@ -45,7 +43,7 @@ class TestV21DualStageStrategy(unittest.TestCase):
         # Spot is 75005 vs open 75000 (delta_s = +5.0)
         spot = SpotState(timestamp=1100.0, price=75005.0, open_price=75000.0)
 
-        # tau = 200s (elapsed 100s, within [150s, 240s])
+        # tau = 200s (elapsed 100s, within [120s, 240s])
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=200.0, params=self.params, p_fair=0.52)
         self.assertEqual(dec.action, "taker_buy")
         self.assertEqual(dec.side, "Up")

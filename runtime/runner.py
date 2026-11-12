@@ -20,7 +20,7 @@ from core.policy import plan_decision
 from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
-from sim.matcher import QueueMatcher
+from sim.matcher import QueueMatcher, make_complementary
 
 
 class PaperRunner:
@@ -183,6 +183,10 @@ class PaperRunner:
     ):
         """Execute one evaluation tick: probability, regime, risk gates, matching."""
         tau = max(0.0, self.window_end - now)
+        # Single shared chokepoint for live and replay: reconcile the two
+        # complementary token books to no-arbitrage before any decision or fill,
+        # so inconsistent dual snapshots can never book a sub-$1 pair as profit.
+        book_up, book_down = make_complementary(book_up, book_down)
         open_px = getattr(self, "open_price", 0.0)
         vol_bps = getattr(spot, "realized_vol_bps", 15.0)
 

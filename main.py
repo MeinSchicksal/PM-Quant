@@ -4,7 +4,7 @@ Usage:
   python main.py [start] [port] [--no-browser]
                            - 一键启动量化交易管道 + Web看板 (+ 浏览器)
   python main.py stop      - 一键停止所有交易进程与释放 8900 端口
-  python main.py run       - 启动纸面（Paper）量化做市与对冲管道 (Pipeline Driver)
+  python main.py run       - 启动纸面（Paper）量化交易与对冲管道 (Pipeline Driver)
   python main.py web [p] [--no-browser]
                            - 仅启动 Web 投资人监控看板 (默认端口: 8900)
   python main.py test      - 运行所有微观结构与数学不变量单元测试
@@ -35,7 +35,7 @@ def cmd_start(port: int = 8900, open_browser: bool = True):
     from runtime.pipeline import PipelineDriver
 
     print("==================================================================")
-    print(f"        PM-Quant 全自动量化做市与高频对冲系统 ({config.VERSION})        ")
+    print(f"        PM-Quant 全自动纸面量化交易与对冲系统 ({config.VERSION})        ")
     print("==================================================================")
     print(f"[*] 启动看板 Web 服务: http://127.0.0.1:{port}/#market")
 
@@ -204,12 +204,8 @@ def cmd_reset(auto_stop: bool = True):
 
 
 def cmd_replay():
-    from sim.replay import run_gate_comparison, run_replay
-    flags = {a.lower() for a in sys.argv[2:]}
-    if "--no-gates" in flags or "gates" in flags:
-        run_gate_comparison()
-    else:
-        run_replay()
+    from sim.replay import run_replay
+    run_replay()
 
 
 def cmd_stress():
@@ -289,7 +285,7 @@ Set s1 = ws.CreateShortcut("{s1_path}")
 s1.TargetPath = "{start_bat}"
 s1.WorkingDirectory = "{ROOT}"
 s1.WindowStyle = 1
-s1.Description = "PM-Quant 全自动量化做市与高频对冲系统"
+s1.Description = "PM-Quant 全自动纸面量化交易与对冲系统"
 s1.Save()
 
 Set s2 = ws.CreateShortcut("{s2_path}")

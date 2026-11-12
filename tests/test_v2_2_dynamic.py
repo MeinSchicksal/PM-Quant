@@ -23,7 +23,6 @@ class TestV22DynamicFeatures(unittest.TestCase):
     def setUp(self):
         self.params = dict(
             config.PARAMS,
-            STRATEGY_MODE="LWAA",
             LWAA_MAX_TAU_S=120.0,
             LWAA_MIN_TAU_S=15.0,
             LWAA_MIN_PROB=0.80,

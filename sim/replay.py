@@ -256,25 +256,8 @@ def replay_window(
 
 
 # --------------------------------------------------------------------------
-# Gate counterfactual
+# Parameter overrides
 # --------------------------------------------------------------------------
-# Regimes the policy refuses to quote in. Turning them off answers a question
-# the attribution matrix cannot: "would the gates have saved money?".
-GATE_OFF_OVERRIDES = {
-    "STRATEGY_MODE": "legacy_mm",
-    "TAIL_FREEZE_S": 0.0,            # allow quoting until expiry
-    "MIN_ENTRY_TAU_S": 0.0,          # allow late entries
-    "MAX_ENTRIES_PER_WINDOW": 10_000,
-    "TOXICITY_SHOCK_BPS": 1e9,       # never classify a shock
-    "MAX_ORDERBOOK_SPREAD": 1.0,     # never refuse on wide spread
-    "SNR_TREND_THRESHOLD": 1e9,      # never classify a trend
-    "SNR_RANGE_THRESHOLD": 1e9,      # everything becomes "normal oscillation"
-    "MIN_FAIR_PROB_ENTRY": 0.0,
-    "MAX_FAIR_PROB_ENTRY": 1.0,
-    "MAX_RANGE_DISPLACEMENT_BPS": 1e9,
-}
-
-
 @contextmanager
 def overridden_params(overrides):
     """Temporarily patch config.PARAMS (restored even if the body raises)."""
@@ -288,86 +271,6 @@ def overridden_params(overrides):
             config.PARAMS[k] = v
         for k in added:
             config.PARAMS.pop(k, None)
-
-
-def _run_reports_dir():
-    return getattr(config, "REPORTS_DIR", ROOT / "data" / "3_reports")
-
-
-def run_gate_comparison(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Replay the same windows twice: with the regime gates, then with them off.
-
-    The delta is the gates' contribution. A positive "net contribution" means
-    refusing to trade saved money; a negative one means the gates blocked
-    profitable trades.
-    """
-    print("==================================================================")
-    print(f"   PM-Quant 闸门反事实对比 ({config.VERSION})")
-    print("==================================================================")
-
-    print("\n[A] 现行闸门")
-    base = run_replay(limit=limit, quiet=True, write=False)
-    _print_report(base)
-
-    print("\n[B] 关闭 regime 闸门（tail freeze / late window / toxic / spread / trend / skew）")
-    off = run_replay(limit=limit, overrides=GATE_OFF_OVERRIDES, quiet=True, write=False)
-    _print_report(off)
-
-    gated = {r["slug"]: r for r in base if r.get("replayed")}
-    rows = []
-    for r in off:
-        if not r.get("replayed") or r["slug"] not in gated:
-            continue
-        g = gated[r["slug"]]
-        rows.append({
-            "slug": r["slug"],
-            "gated_traded": bool(g.get("replay_traded")),
-            "gated_pnl": round(float(g.get("replay_pnl") or 0.0), 4),
-            "ungated_traded": bool(r.get("replay_traded")),
-            "ungated_pnl": round(float(r.get("replay_pnl") or 0.0), 4),
-            "delta": round(float(r.get("replay_pnl") or 0.0) - float(g.get("replay_pnl") or 0.0), 4),
-        })
-
-    gated_total = sum(x["gated_pnl"] for x in rows)
-    off_total = sum(x["ungated_pnl"] for x in rows)
-    blocked = [x for x in rows if not x["gated_traded"] and x["ungated_traded"]]
-    blocked_pnl = [x["ungated_pnl"] for x in blocked]
-    missed = [x for x in rows if x["gated_traded"] and not x["ungated_traded"]]
-
-    print("\n---------------- 闸门贡献 ----------------")
-    print(f"  可对比窗口           : {len(rows)} 场")
-    print(f"  闸门开启累计盈亏     : ${gated_total:+.3f}")
-    print(f"  闸门关闭累计盈亏     : ${off_total:+.3f}")
-    print(f"  闸门净贡献           : ${gated_total - off_total:+.3f}  "
-          f"({'闸门省钱' if gated_total > off_total else '闸门在拦赚钱的单'})")
-    if blocked:
-        mean = _mean(blocked_pnl)
-        sd = _stdev(blocked_pnl)
-        t_stat = mean / (sd / math.sqrt(len(blocked_pnl))) if sd > 0 and len(blocked_pnl) > 1 else 0.0
-        print(f"  被闸门拦下但本会成交 : {len(blocked)} 场, 反事实盈亏 ${sum(blocked_pnl):+.3f}, "
-              f"单窗 ${mean:+.4f} (sd ${sd:.4f}, t={t_stat:+.2f})")
-        worst = sorted(blocked, key=lambda x: x["ungated_pnl"])[:5]
-        print("  拦得对的窗口（反事实最亏）:")
-        for x in worst:
-            print(f"      {x['slug']}  ${x['ungated_pnl']:+.3f}")
-    if missed:
-        print(f"  闸门关闭后反而没成交 : {len(missed)} 场（反事实路径被持仓/预算占满）")
-    print("--------------------------------------------------")
-
-    try:
-        import time as _time
-        out_dir = _run_reports_dir()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = _time.strftime("%Y%m%d_%H%M%S")
-        out = out_dir / f"replay_gates_{stamp}.jsonl"
-        with open(out, "w", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        print(f"[*] 对比明细已保存: {out}")
-    except Exception as e:
-        print(f"[!] 对比报告写入失败: {e}")
-
-    return rows
 
 
 # --------------------------------------------------------------------------
@@ -392,9 +295,9 @@ def run_replay(
 ) -> List[Dict[str, Any]]:
     """Replay every recorded window through the live decision pipeline.
 
-    ``overrides`` temporarily patches config.PARAMS for the whole run, which is
-    how the gate counterfactual removes the regime filters. The caller's
-    parameters are restored even if the replay raises.
+    ``overrides`` temporarily patches config.PARAMS for the whole run (used by
+    tests and research to vary parameters). The caller's parameters are restored
+    even if the replay raises.
     """
     if not quiet:
         print("==================================================================")
