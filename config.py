@@ -28,6 +28,7 @@ PARAMS = {
     "MWDE_MIN_TAU_S": 120.0,           # Seamless handoff at tau=120s (zero gap!)
     "MWDE_MAX_TAU_S": 240.0,           # Active scanning starts after first 60s observation
     "MWDE_MAX_ENTRY_PRICE": 0.45,      # Maximum buying price for dip entry (放宽到 $0.45)
+    "MWDE_TAKER_PAIR_COST": 0.90,      # 前半程严格吃单门槛: 除非两边ask之和 < 0.90 (深度套利特价)，否则优先尝试挂单
     "MWDE_HEDGE_LOCK_COST": 0.85,      # Leg 2 lock: only buy opposite side if combined cost <= $0.85
     "POST_SHOCK_MIN_MOVE": 40.0,       # 大涨/大跌门槛 ($40.0): 超过此幅度后警惕单边延续，优先买入高价侧
 
@@ -43,12 +44,19 @@ PARAMS = {
     "LWAA_ENABLE_ARBITRAGE_HEDGE": True, # Always lock both sides when opp ask drops (pair_cost <= 1.00)
     "ALLOW_TAKER_UNWIND": False,       # Strictly forbid panic unwinds / selling (死扛到期，不要卖出)
     "MAX_QUEUE_WAIT_S": 15.0,          # Passive queue waiting timeout (15s) to fill before canceling
+    "DYNAMIC_QUOTING_ENABLE": True,    # 结合实时盘口买一/买卖价差动态定价，防深水悬空挂单
+    "MAX_PAIRING_PRECHECK_COST": 1.05, # 开第一腿前校验对侧卖价：若 my_px + opp_ask + fee > 1.05 则禁止开仓
+    "DEFENSIVE_SALVAGE_ENABLE": True,  # 尾盘最后30s胜率坍塌时市价出清残值防守
+    "DEFENSIVE_SALVAGE_TAU_S": 30.0,   # 尾盘残值防守触发时间 (剩余 30s 以内)
+    "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,# 胜率跌破 12% 触发出清
+    "DEFENSIVE_SALVAGE_MIN_BID": 0.06, # 最低残值变现门槛 ($0.06)
 
     # 3. Lifecycle & Account-Level Watchdog Boundaries
+    "ENABLE_CIRCUIT_BREAKER": False,  # 取消熔断线限制 (日内最大回撤与连亏不阻断新开仓)
     "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window
     "MAX_WINDOW_LOSS_USD": 5.00,      # Hard per-window loss envelope. Funds 1 minimum lot at MAX_ENTRY_PRICE (5 * 0.90 = $4.50)
-    "MAX_DAILY_DRAWDOWN_USD": 15.00,  # Account-level daily drawdown circuit breaker ($15.00 cumulative loss)
-    "LOSS_STREAK_COOLING": 3,         # Consecutive losing rounds triggering cooling mode
+    "MAX_DAILY_DRAWDOWN_USD": 999999.00, # Account-level daily drawdown circuit breaker (已取消熔断，设为极大值)
+    "LOSS_STREAK_COOLING": 999999,    # Consecutive losing rounds triggering cooling mode (已取消熔断)
     "COOLING_ROUNDS": 3,              # Number of rounds to cool off when loss streak triggers
     "DEADMAN_TIMEOUT_S": 3.0,         # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Polymarket TWAP older than this (fall back to Binance spot basis)

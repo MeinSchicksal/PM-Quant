@@ -16,8 +16,10 @@ class CircuitBreaker:
         self,
         max_daily_drawdown_usd: float = 8.00,
         loss_streak_cooling: int = 3,
-        cooling_rounds: int = 3
+        cooling_rounds: int = 3,
+        enabled: bool = True
     ):
+        self.enabled = enabled
         self.max_daily_drawdown_usd = max_daily_drawdown_usd
         self.loss_streak_cooling = loss_streak_cooling
         self.cooling_rounds = cooling_rounds
@@ -76,6 +78,8 @@ class CircuitBreaker:
         Returns:
             (active, reason): active=True indicates 'reduce-only' (no new entries).
         """
+        if not self.enabled:
+            return False, "Disabled (熔断器已禁用)"
         self._check_day_rollover(ts)
         if self.is_tripped or self.daily_pnl <= -self.max_daily_drawdown_usd:
             reason = self.trip_reason or f"Daily drawdown limit reached (-${abs(self.daily_pnl):.2f})"
@@ -86,6 +90,18 @@ class CircuitBreaker:
 
     def get_status(self, ts: float = None) -> Dict[str, Any]:
         """Return serialized status for live journal and dashboard."""
+        if not self.enabled:
+            return {
+                "active": False,
+                "reason": "Disabled (已取消熔断)",
+                "status": "DISABLED",
+                "daily_pnl": round(self.daily_pnl, 4),
+                "is_tripped": False,
+                "cooling_rounds_left": 0,
+                "consecutive_losses": self.consecutive_losses,
+                "max_daily_drawdown_usd": self.max_daily_drawdown_usd,
+                "loss_streak_cooling": self.loss_streak_cooling
+            }
         active, reason = self.is_active(ts)
         status_tag = "TRIPPED" if self.is_tripped else ("COOLING" if self.cooling_rounds_left > 0 else "NORMAL")
         return {

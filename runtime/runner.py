@@ -35,7 +35,8 @@ class PaperRunner:
         self.circuit_breaker = CircuitBreaker(
             max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
             loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
-            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3))
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3)),
+            enabled=bool(config.PARAMS.get("ENABLE_CIRCUIT_BREAKER", True))
         )
         self.current_slug = ""
         self.window_start = 0.0
@@ -57,11 +58,15 @@ class PaperRunner:
         self._last_regime_t = None
         self.entry_regime = None
         self._last_step_time = None
+        self.consecutive_up = 0
+        self.consecutive_down = 0
         self._load_ledger_history()
 
     def _load_ledger_history(self):
-        """Restore circuit breaker metrics and total cumulative PnL from summary.jsonl."""
+        """Restore circuit breaker metrics, consecutive trends, and total cumulative PnL from summary.jsonl."""
         self._settled_slugs = set()
+        self.consecutive_up = 0
+        self.consecutive_down = 0
         if not self.summary_file.exists():
             return
         records = []
@@ -72,6 +77,14 @@ class PaperRunner:
             self._settled_slugs = {r.get("slug") for r in records if r.get("slug")}
             self.circuit_breaker.load_from_summary(records)
             self.total_pnl = sum(float(r.get("net_pnl", 0.0)) for r in records if r.get("traded"))
+            for r in records:
+                w = r.get("winner")
+                if w == "Up":
+                    self.consecutive_up += 1
+                    self.consecutive_down = 0
+                elif w == "Down":
+                    self.consecutive_down += 1
+                    self.consecutive_up = 0
         except Exception:
             pass
 
@@ -81,7 +94,8 @@ class PaperRunner:
         self.circuit_breaker = CircuitBreaker(
             max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
             loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
-            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3))
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3)),
+            enabled=bool(config.PARAMS.get("ENABLE_CIRCUIT_BREAKER", True))
         )
         self._load_ledger_history()
 
@@ -301,7 +315,9 @@ class PaperRunner:
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
             PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
-            FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0)
+            FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0),
+            CONSECUTIVE_UP_ROUNDS=getattr(self, "consecutive_up", 0),
+            CONSECUTIVE_DOWN_ROUNDS=getattr(self, "consecutive_down", 0)
         )
 
         if is_deadman_active:
@@ -485,6 +501,12 @@ class PaperRunner:
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
         self.last_round_abs_move = round(abs(close_px - self.open_price), 2)
+        if winner == "Up":
+            self.consecutive_up = getattr(self, "consecutive_up", 0) + 1
+            self.consecutive_down = 0
+        elif winner == "Down":
+            self.consecutive_down = getattr(self, "consecutive_down", 0) + 1
+            self.consecutive_up = 0
         is_traded = len(self.fills) > 0 or total_cost > 1e-4
 
         # Attribution: the regime that permitted the first entry describes the

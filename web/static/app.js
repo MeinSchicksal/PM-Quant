@@ -909,6 +909,61 @@
       const above = lastP.price >= binanceOpenPx;
       const dirColor = above ? C.up : C.down;
 
+      // 辅助断线绘制函数：当相邻采样点时间间隔 > 10秒时，断开实线，转为虚线/标注断流
+      const drawSegmentedLine = (points, strokeStyle, lineWidth, isPoly = false) => {
+        if (!points || points.length < 2) return;
+        ctx.save();
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        let segStart = 0;
+        for (let i = 1; i < points.length; i++) {
+          const dt = points[i].t - points[i - 1].t;
+          if (dt > 10.0) {
+            // 绘制正常连续区段
+            ctx.beginPath();
+            ctx.setLineDash([]);
+            ctx.moveTo(points[segStart].x, points[segStart].y);
+            for (let j = segStart + 1; j < i; j++) ctx.lineTo(points[j].x, points[j].y);
+            ctx.stroke();
+
+            // 绘制断流跳空虚线区段
+            ctx.beginPath();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)'; // 告警红色虚线
+            ctx.lineWidth = Math.max(1.2, lineWidth * 0.7);
+            ctx.moveTo(points[i - 1].x, points[i - 1].y);
+            ctx.lineTo(points[i].x, points[i].y);
+            ctx.stroke();
+
+            // 在跳空处绘制断流告警标识
+            if (!isPoly) {
+              const midX = (points[i - 1].x + points[i].x) / 2;
+              const midY = (points[i - 1].y + points[i].y) / 2;
+              ctx.font = `600 10px ${SANS}`;
+              ctx.fillStyle = '#ef4444';
+              ctx.textAlign = 'center';
+              ctx.fillText(`⚠️ 采样中断 ${Math.round(dt)}s`, midX, Math.max(t1Top + 14, midY - 8));
+            }
+
+            // 恢复正常样式
+            ctx.strokeStyle = strokeStyle;
+            ctx.lineWidth = lineWidth;
+            ctx.setLineDash([]);
+            segStart = i;
+          }
+        }
+        // 绘制最后一段
+        ctx.beginPath();
+        ctx.setLineDash([]);
+        ctx.moveTo(points[segStart].x, points[segStart].y);
+        for (let j = segStart + 1; j < points.length; j++) ctx.lineTo(points[j].x, points[j].y);
+        ctx.stroke();
+        ctx.restore();
+      };
+
       const g = ctx.createLinearGradient(0, t1Top, 0, t1Top + t1H);
       g.addColorStop(0, above ? 'rgba(5,177,105,0.14)' : 'rgba(207,32,47,0.14)');
       g.addColorStop(1, 'rgba(255,255,255,0)');
@@ -918,13 +973,9 @@
       ctx.fillStyle = g; ctx.fill();
 
       if (polyPts.length >= 2) {
-        ctx.beginPath(); ctx.moveTo(polyPts[0].x, polyPts[0].y);
-        for (let i = 1; i < polyPts.length; i++) ctx.lineTo(polyPts[i].x, polyPts[i].y);
-        ctx.strokeStyle = C.poly; ctx.lineWidth = 2.4; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+        drawSegmentedLine(polyPts, C.poly, 2.4, true);
       }
-      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      ctx.strokeStyle = dirColor; ctx.lineWidth = 2.0; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+      drawSegmentedLine(pts, dirColor, 2.0, false);
 
       let maxPt = pts[0], minPt = pts[0];
       for (const p of pts) { if (p.price > maxPt.price) maxPt = p; if (p.price < minPt.price) minPt = p; }
@@ -994,12 +1045,45 @@
         ctx.fillStyle = curModelUp >= livePolyUp ? 'rgba(14,165,233,0.12)' : 'rgba(245,158,11,0.12)';
         ctx.fill(); ctx.restore();
 
-        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].yM);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].yM);
-        ctx.strokeStyle = C.poly; ctx.lineWidth = 2.2; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].yMo);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].yMo);
-        ctx.strokeStyle = C.model; ctx.lineWidth = 2.0; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+        const drawSegmentedProbLine = (points, propKey, strokeStyle, lineWidth, label) => {
+          ctx.save();
+          ctx.strokeStyle = strokeStyle;
+          ctx.lineWidth = lineWidth;
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          let segStart = 0;
+          for (let i = 1; i < points.length; i++) {
+            const dt = points[i].t - points[i - 1].t;
+            if (dt > 10.0) {
+              ctx.beginPath();
+              ctx.setLineDash([]);
+              ctx.moveTo(points[segStart].x, points[segStart][propKey]);
+              for (let j = segStart + 1; j < i; j++) ctx.lineTo(points[j].x, points[j][propKey]);
+              ctx.stroke();
+
+              // 绘制跳空断流警示虚线
+              ctx.beginPath();
+              ctx.setLineDash([4, 4]);
+              ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+              ctx.moveTo(points[i - 1].x, points[i - 1][propKey]);
+              ctx.lineTo(points[i].x, points[i][propKey]);
+              ctx.stroke();
+
+              ctx.strokeStyle = strokeStyle;
+              ctx.setLineDash([]);
+              segStart = i;
+            }
+          }
+          ctx.beginPath();
+          ctx.setLineDash([]);
+          ctx.moveTo(points[segStart].x, points[segStart][propKey]);
+          for (let j = segStart + 1; j < points.length; j++) ctx.lineTo(points[j].x, points[j][propKey]);
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        drawSegmentedProbLine(pts, 'yM', C.poly, 2.2, '盘口');
+        drawSegmentedProbLine(pts, 'yMo', C.model, 2.0, '模型');
 
         const lp = pts[pts.length - 1];
         const dot = (x, y, color) => {
@@ -1126,7 +1210,21 @@
     const cb = live.circuit_breaker || {};
     const volStr = live.realized_vol_bps ? ` (${live.realized_vol_bps} bps)` : '';
 
-    if (cb.active) {
+    // 检测实时行情流延迟与断线 (Dead-Man / Feed Stale Check)
+    const nowSec = Date.now() / 1000.0;
+    const dataAge = (live.now && live.now > 0) ? Math.max(0, nowSec - live.now) : 0;
+    const lastPt = (live.price_history && live.price_history.length > 0) ? live.price_history[live.price_history.length - 1] : null;
+    const historyAge = (lastPt && lastPt.t > 0) ? Math.max(0, nowSec - lastPt.t) : dataAge;
+    const maxFeedAge = Math.max(dataAge, historyAge);
+
+    if (maxFeedAge > 5.0) {
+      riskPill.className = 'status-pill status-warn';
+      riskPill.style.background = '#ef4444';
+      riskPill.style.color = '#ffffff';
+      riskText.textContent = `⚠️ 行情数据中断延迟 (${Math.round(maxFeedAge)}s 未更新，死人开关撤单防守中)`;
+    } else if (cb.active) {
+      riskPill.style.background = '';
+      riskPill.style.color = '';
       riskPill.className = 'status-pill status-warn';
       let cbMsg = cb.reason || '仅限对冲平仓';
       if (cbMsg.toLowerCase().includes('drawdown')) {
@@ -1503,51 +1601,118 @@
     ctx.strokeStyle = '#05b169';
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
-    ctx.beginPath();
     let hasUp = false;
-    history.forEach((pt, idx) => {
+    let segStartUp = -1;
+    for (let idx = 0; idx < history.length; idx++) {
+      const pt = history[idx];
       if (pt.poly_up !== undefined && pt.poly_up !== null) {
         hasUp = true;
-        const x = getX(pt.t);
-        const y = getY2(pt.poly_up);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (segStartUp === -1) {
+          ctx.beginPath();
+          ctx.setLineDash([]);
+          ctx.strokeStyle = '#05b169';
+          ctx.moveTo(getX(pt.t), getY2(pt.poly_up));
+          segStartUp = idx;
+        } else {
+          const dt = pt.t - history[idx - 1].t;
+          if (dt > 10.0) {
+            ctx.stroke();
+            // 跳空虚线
+            ctx.beginPath();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+            ctx.moveTo(getX(history[idx - 1].t), getY2(history[idx - 1].poly_up));
+            ctx.lineTo(getX(pt.t), getY2(pt.poly_up));
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = '#05b169';
+            ctx.moveTo(getX(pt.t), getY2(pt.poly_up));
+          } else {
+            ctx.lineTo(getX(pt.t), getY2(pt.poly_up));
+          }
+        }
       }
-    });
+    }
     if (hasUp) ctx.stroke();
 
     // 2. DOWN Implied Probability (Red)
     ctx.strokeStyle = '#cf202f';
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
-    ctx.beginPath();
     let hasDown = false;
-    history.forEach((pt, idx) => {
+    let segStartDn = -1;
+    for (let idx = 0; idx < history.length; idx++) {
+      const pt = history[idx];
       if (pt.poly_down !== undefined && pt.poly_down !== null) {
         hasDown = true;
-        const x = getX(pt.t);
-        const y = getY2(pt.poly_down);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (segStartDn === -1) {
+          ctx.beginPath();
+          ctx.setLineDash([]);
+          ctx.strokeStyle = '#cf202f';
+          ctx.moveTo(getX(pt.t), getY2(pt.poly_down));
+          segStartDn = idx;
+        } else {
+          const dt = pt.t - history[idx - 1].t;
+          if (dt > 10.0) {
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+            ctx.moveTo(getX(history[idx - 1].t), getY2(history[idx - 1].poly_down));
+            ctx.lineTo(getX(pt.t), getY2(pt.poly_down));
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = '#cf202f';
+            ctx.moveTo(getX(pt.t), getY2(pt.poly_down));
+          } else {
+            ctx.lineTo(getX(pt.t), getY2(pt.poly_down));
+          }
+        }
       }
-    });
+    }
     if (hasDown) ctx.stroke();
 
     // 3. Model Fair Probability P*(UP) (Purple dashed)
     ctx.strokeStyle = '#8b5cf6';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
-    ctx.beginPath();
     let hasFair = false;
-    history.forEach((pt, idx) => {
+    let segStartFair = -1;
+    for (let idx = 0; idx < history.length; idx++) {
+      const pt = history[idx];
       if (pt.prob_up !== undefined && pt.prob_up !== null) {
         hasFair = true;
-        const x = getX(pt.t);
-        const y = getY2(pt.prob_up);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (segStartFair === -1) {
+          ctx.beginPath();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = '#8b5cf6';
+          ctx.moveTo(getX(pt.t), getY2(pt.prob_up));
+          segStartFair = idx;
+        } else {
+          const dt = pt.t - history[idx - 1].t;
+          if (dt > 10.0) {
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.setLineDash([2, 4]);
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.5)';
+            ctx.moveTo(getX(history[idx - 1].t), getY2(history[idx - 1].prob_up));
+            ctx.lineTo(getX(pt.t), getY2(pt.prob_up));
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.moveTo(getX(pt.t), getY2(pt.prob_up));
+          } else {
+            ctx.lineTo(getX(pt.t), getY2(pt.prob_up));
+          }
+        }
       }
-    });
+    }
     if (hasFair) ctx.stroke();
 
     // --- Action Markers & Pins (买入 / 对冲触发时点) ---

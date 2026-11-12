@@ -138,6 +138,45 @@ class TestV22DynamicFeatures(unittest.TestCase):
         self.assertIsNotNone(action)
         self.assertEqual(action.price, 0.58)
 
+    def test_anti_airball_when_bid_exceeds_hard_chase_ceiling(self):
+        """Invariant 7: When market bid exceeds hard chase ceiling (> 0.70), policy waits instead of quoting deep in the water."""
+        pos = Position(0.0, 0.0)
+        # Bid is 0.76, Ask is 0.80
+        book_up = OrderBook(bids=[(0.76, 20.0)], asks=[(0.80, 20.0)])
+        book_dn = OrderBook(bids=[(0.18, 20.0)], asks=[(0.22, 20.0)])
+        spot = SpotState(timestamp=1250.0, price=75100.0, open_price=75000.0)
+
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=self.params, p_fair=0.90)
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("超过追高硬顶", dec.reason)
+
+    def test_pairing_precheck_rejects_expensive_hedge_book(self):
+        """Invariant 8: Before taking Leg 1, if opposite book ask is too expensive (pair_cost > 1.05), reject entry."""
+        pos = Position(0.0, 0.0)
+        # Up ask is 0.60 (<= 0.65), but opposite Down ask is 0.55 (sum = 1.15 > 1.05)
+        book_up = OrderBook(bids=[(0.55, 20.0)], asks=[(0.60, 20.0)])
+        book_dn = OrderBook(bids=[(0.40, 20.0)], asks=[(0.55, 20.0)])
+        spot = SpotState(timestamp=1250.0, price=75100.0, open_price=75000.0)
+
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=self.params, p_fair=0.88)
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("对侧补腿盘口过贵", dec.reason)
+
+    def test_defensive_salvage_when_held_probability_collapses(self):
+        """Invariant 9: When tau <= 30s and held leg probability collapses (< 0.12), unwind at market bid to salvage residual cash."""
+        # Hold 5 Up @ 0.45 (cash = 2.25), but price reversed heavily: p_fair is now 0.05
+        pos_up = Position(shares=5.0, cash=2.25)
+        pos_dn = Position(0.0, 0.0)
+        book_up = OrderBook(bids=[(0.10, 20.0)], asks=[(0.15, 20.0)])
+        book_dn = OrderBook(bids=[(0.85, 20.0)], asks=[(0.90, 20.0)])
+        spot = SpotState(timestamp=1275.0, price=74800.0, open_price=75000.0)
+
+        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=25.0, params=self.params, p_fair=0.05)
+        self.assertEqual(dec.action, "taker_unwind")
+        self.assertEqual(dec.side, "Up")
+        self.assertAlmostEqual(dec.price, 0.10)
+        self.assertIn("Defensive Salvage", dec.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

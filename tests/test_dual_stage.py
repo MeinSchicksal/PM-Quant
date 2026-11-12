@@ -34,39 +34,41 @@ class TestDualStageStrategy(unittest.TestCase):
             FIRST_60S_RANGE=5.0,
         )
 
-    def test_mwde_trend_biased_dip_buy_up(self):
-        """Invariant 1: When spot delta > 0 and P* >= 0.50, buy Up dip when Ask <= 0.45."""
+    def test_mwde_maker_quote_priority_over_taker(self):
+        """Invariant 1: When book offers normal prices (sum of asks >= 0.90), priority is maker quoting, not early taker eating."""
         pos = Position(0.0, 0.0)
-        # Up Ask is 0.42 (<= 0.45 dip), Down Ask is 0.58
+        # Up bid=0.40, ask=0.42. Down ask=0.58. Sum of asks = 0.42 + 0.58 = 1.00 >= 0.90
         book_up = OrderBook(bids=[(0.40, 20.0)], asks=[(0.42, 20.0)])
         book_dn = OrderBook(bids=[(0.55, 20.0)], asks=[(0.58, 20.0)])
-        # Spot is 75005 vs open 75000 (delta_s = +5.0)
         spot = SpotState(timestamp=1100.0, price=75005.0, open_price=75000.0)
 
         # tau = 200s (elapsed 100s, within [120s, 240s])
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=200.0, params=self.params, p_fair=0.52)
-        self.assertEqual(dec.action, "taker_buy")
+        # Because sum of asks is 1.00 >= 0.90, policy must try MAKER QUOTE first (bid+0.01 = 0.41)
+        self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")
-        self.assertAlmostEqual(dec.price, 0.42)
+        self.assertAlmostEqual(dec.price, 0.41)
         self.assertEqual(dec.size, 5.0)
-        self.assertIn("MWDE Taker Absorption", dec.reason)
+        self.assertIn("MWDE Maker Absorption", dec.reason)
 
-    def test_mwde_trend_biased_dip_buy_down(self):
-        """Invariant 2: When spot delta < 0 and P* <= 0.50, buy Down dip when Ask <= 0.45."""
+    def test_mwde_taker_allowed_when_pair_sum_below_point_nine(self):
+        """Invariant 2: When both asks sum to < 0.90 (deep discount arb), taking is permitted."""
         pos = Position(0.0, 0.0)
-        # Down Ask is 0.38 (<= 0.45 dip), Up Ask is 0.62
-        book_up = OrderBook(bids=[(0.60, 20.0)], asks=[(0.62, 20.0)])
-        book_dn = OrderBook(bids=[(0.35, 20.0)], asks=[(0.38, 20.0)])
-        # Spot is 74995 vs open 75000 (delta_s = -5.0)
+        # Up Ask is 0.38 (<= 0.45 dip), Down Ask is 0.50. Sum of asks = 0.38 + 0.50 = 0.88 < 0.90!
+        # Quote attempts already reached 1, so quoting path is skipped
+        book_up = OrderBook(bids=[(0.35, 20.0)], asks=[(0.38, 20.0)])
+        book_dn = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 20.0)])
         spot = SpotState(timestamp=1100.0, price=74995.0, open_price=75000.0)
 
-        # tau = 180s (elapsed 120s)
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=180.0, params=self.params, p_fair=0.48)
+        # Down trend: delta_s < 0, p_fair = 0.48
+        # pref_side is Down. Down ask is 0.50 (> 0.45, so won't buy). Let's test Up trend:
+        spot_up = SpotState(timestamp=1100.0, price=75005.0, open_price=75000.0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot_up, tau_s=200.0, params=self.params, p_fair=0.52, quote_attempts=1)
         self.assertEqual(dec.action, "taker_buy")
-        self.assertEqual(dec.side, "Down")
+        self.assertEqual(dec.side, "Up")
         self.assertAlmostEqual(dec.price, 0.38)
         self.assertEqual(dec.size, 5.0)
-        self.assertIn("MWDE Taker Absorption", dec.reason)
+        self.assertIn("两侧合计极度便宜", dec.reason)
 
     def test_mwde_rejects_expensive_ask(self):
         """Invariant 3: In Stage 1, asks > $0.45 are strictly rejected (no chase)."""
@@ -122,6 +124,49 @@ class TestDualStageStrategy(unittest.TestCase):
         dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=100.0, params=self.params, p_fair=0.50)
         self.assertEqual(dec.action, "wait")
         self.assertIn("fully hedged arbitrage pair", dec.reason.lower())
+
+    def test_mwde_trend_strictly_forbids_counter_trend_cheap_dip(self):
+        """Invariant 7: When spot delta > 0 (Bitcoin rising in first half), strictly forbid buying cheap Down side."""
+        pos = Position(0.0, 0.0)
+        # Up Ask is 0.60 (too expensive for MWDE <= 0.45), Down Ask is 0.40 (temptingly cheap!)
+        book_up = OrderBook(bids=[(0.55, 20.0)], asks=[(0.60, 20.0)])
+        book_dn = OrderBook(bids=[(0.35, 20.0)], asks=[(0.40, 20.0)])
+        # Spot is up +8.0 (rising trend)
+        spot = SpotState(timestamp=1100.0, price=75008.0, open_price=75000.0)
+
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=200.0, params=self.params, p_fair=0.55)
+        # Even though Down is cheap at 0.40, because trend is UP, policy MUST NOT buy Down! It must wait instead of catching falling knives!
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("严格顺势防守", dec.reason)
+        self.assertIn("严禁反向抄底便宜侧 Down", dec.reason)
+
+    def test_mwde_down_trend_strictly_forbids_counter_trend_cheap_up(self):
+        """Invariant 8: When spot delta < 0 (Bitcoin falling in first half), strictly forbid buying cheap Up side."""
+        pos = Position(0.0, 0.0)
+        # Down Ask is 0.60 (too expensive for MWDE <= 0.45), Up Ask is 0.40 (temptingly cheap!)
+        book_up = OrderBook(bids=[(0.35, 20.0)], asks=[(0.40, 20.0)])
+        book_dn = OrderBook(bids=[(0.55, 20.0)], asks=[(0.60, 20.0)])
+        # Spot is down -8.0 (falling trend)
+        spot = SpotState(timestamp=1100.0, price=74992.0, open_price=75000.0)
+
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=200.0, params=self.params, p_fair=0.45)
+        # Even though Up is cheap at 0.40, because trend is DOWN, policy MUST NOT buy Up! It must wait instead of catching falling knives!
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("严格顺势防守", dec.reason)
+        self.assertIn("严禁反向抄底便宜侧 Up", dec.reason)
+
+    def test_mwde_strictly_forbids_entry_when_prob_below_half(self):
+        """Invariant 9: When probability is below 0.50 (e.g. p_up=0.33 while delta_s > 0), strictly forbid buying the low-prob side."""
+        pos = Position(0.0, 0.0)
+        # Up is cheap at 0.29, Down is 0.71. But Up probability is only 0.33 (< 0.50)!
+        book_up = OrderBook(bids=[(0.28, 20.0)], asks=[(0.29, 20.0)])
+        book_dn = OrderBook(bids=[(0.70, 20.0)], asks=[(0.71, 20.0)])
+        # Binance spot is up +5.0, but Polymarket settlement strike makes p_up only 0.33!
+        spot = SpotState(timestamp=1100.0, price=75005.0, open_price=75000.0)
+
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=200.0, params=self.params, p_fair=0.33)
+        self.assertEqual(dec.action, "wait")
+        self.assertIn("严禁介入劣势方", dec.reason)
 
 
 if __name__ == "__main__":

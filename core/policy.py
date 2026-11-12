@@ -58,7 +58,8 @@ def plan_decision(
     net_gap = round(u_shares - d_shares, 4)
 
     # Watchdog 1: Circuit breaker check
-    cb_active = circuit_breaker_active or bool(params.get("CIRCUIT_BREAKER_ACTIVE", False))
+    cb_enabled = bool(params.get("ENABLE_CIRCUIT_BREAKER", True))
+    cb_active = cb_enabled and (circuit_breaker_active or bool(params.get("CIRCUIT_BREAKER_ACTIVE", False)))
     if cb_active:
         cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
         return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
@@ -104,7 +105,30 @@ def plan_decision(
                     reason=f"Arbitrage lock: pair_cost={pair_cost:.3f} <= {max_pair_cost:.2f}, take hedge @ {hedge_ask}"
                 )
 
-        # High-conviction directional mode: NEVER UNWIND!
+        # Check for defensive salvage:
+        # When nearing expiry (tau <= 30s) and our held leg probability has collapsed (p_fair_held < 0.12),
+        # allow exiting at market bid to salvage residual capital instead of 100% loss.
+        salvage_tau = float(params.get("DEFENSIVE_SALVAGE_TAU_S", 30.0))
+        salvage_prob = float(params.get("DEFENSIVE_SALVAGE_MAX_PROB", 0.12))
+        salvage_min_bid = float(params.get("DEFENSIVE_SALVAGE_MIN_BID", 0.06))
+        salvage_enabled = bool(params.get("DEFENSIVE_SALVAGE_ENABLE", True))
+
+        if salvage_enabled and tau_s <= salvage_tau and p_fair_held < salvage_prob:
+            held_book = book_up if held_side == "Up" else book_down
+            salvage_bid = held_book.best_bid
+            if salvage_bid is not None and salvage_bid >= salvage_min_bid:
+                fee = taker_fee_per_share(salvage_bid, fee_rate)
+                salvage_cash = held_shares * (salvage_bid - fee)
+                return Decision(
+                    action="taker_unwind",
+                    side=held_side,
+                    price=salvage_bid,
+                    size=held_shares,
+                    utility=round(salvage_bid - fee - p_fair_held, 4),
+                    reason=f"Defensive Salvage: 尾盘({tau_s:.0f}s)胜率坍塌(P*={p_fair_held:.2f} < {salvage_prob:.2f})，市价出清残值 @ {salvage_bid:.2f} (挽回${salvage_cash:.2f})"
+                )
+
+        # High-conviction directional mode: NEVER UNWIND outside of extreme defensive salvage!
         # "不着急买入另外一侧止损，死扛让子弹飞至到期结算"
         return _wait(
             f"v2.2: Holding {held_shares:.0f} {held_side} @ {held_basis:.2f} to settlement (死扛让子弹飞，不急止损, p_fair={p_fair_held:.2f})",
@@ -156,15 +180,15 @@ def plan_decision(
     p_down = 1.0 - p_fair
 
     if mwde_enabled and mwde_min_tau < tau_s <= mwde_max_tau:
-        # 大涨/大跌警惕机制:
-        # 用户原则: "大涨/跌之后要警惕，可能不会继续涨/跌，可以先买价格高的一侧"
+        consec_up = int(params.get("CONSECUTIVE_UP_ROUNDS", 0))
+        consec_down = int(params.get("CONSECUTIVE_DOWN_ROUNDS", 0))
         prev_move = float(params.get("PREV_ROUND_ABS_MOVE", 0.0))
         post_shock_min_move = float(params.get("POST_SHOCK_MIN_MOVE", 40.0))
-        max_entry_px = float(params.get("LWAA_MAX_ENTRY_PRICE", 0.65))
-        hard_chase_ceiling = float(params.get("LWAA_HARD_CHASE_CEILING", 0.70))
+        mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
+        max_pair_precheck = float(params.get("MAX_PAIRING_PRECHECK_COST", 1.05))
 
         if prev_move >= post_shock_min_move:
-            # 识别盘口高价侧 (胜率更高、市场共识侧)
+            # 历史单边大幅位移兼容逻辑
             up_ask = book_up.best_ask or 0.50
             dn_ask = book_down.best_ask or 0.50
             up_bid = book_up.best_bid or 0.50
@@ -183,8 +207,9 @@ def plan_decision(
 
             favored_ask = favored_book.best_ask
             favored_bid = favored_book.best_bid
+            max_entry_px = float(params.get("LWAA_MAX_ENTRY_PRICE", 0.65))
+            hard_chase_ceiling = float(params.get("LWAA_HARD_CHASE_CEILING", 0.70))
 
-            # 1. 高价侧如果在安全成本内 (<= 0.65)，优先吃单高价侧
             if favored_ask is not None and 0.45 <= favored_ask <= max_entry_px:
                 fee = taker_fee_per_share(favored_ask, fee_rate)
                 return Decision(
@@ -196,11 +221,9 @@ def plan_decision(
                     reason=f"Post-Shock Consensus: 大涨大跌后警惕延续(前盘${prev_move:.1f})，优先吃单高价侧 {favored_side} ask={favored_ask:.2f} <= ${max_entry_px:.2f}"
                 )
 
-            # 2. 如果高价侧超过 0.70，坚决不追高
             if favored_ask is not None and favored_ask > hard_chase_ceiling:
                 return _wait(f"v2.2: 大涨大跌后高价侧 {favored_side} ask={favored_ask:.2f} 超过 ${hard_chase_ceiling:.2f}，坚决不追高防守", urgent=True)
 
-            # 3. 如果高价侧买一价合适，挂单高价侧
             max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
             if quote_attempts < max_quote_attempts and favored_bid is not None and 0.45 <= favored_bid <= max_entry_px:
                 maker_px = round(min(max_entry_px, favored_bid), 2)
@@ -215,43 +238,44 @@ def plan_decision(
 
             return _wait(f"v2.2: 大涨大跌后警惕(前盘${prev_move:.1f})，高价侧 {favored_side} 盘口无安全成本，防守等待")
 
-        # 正常波动区间: 顺势低吸侧选择 (同步看当前距离开盘价的涨跌大小，结合胜率优先选边)
-        if delta_s > 0 or p_up >= 0.50:
+        # 1. 严格顺势共振判定 (概率过半 + 现货走势一致，绝不买入胜率低于 0.50 的劣势方)
+        # 必须同时满足：
+        # - 做多 Up: 现货明确上涨 (delta_s > 0) 且 多头公允胜率明确过半 (p_up >= 0.50)
+        # - 做空 Down: 现货明确下跌 (delta_s < 0) 且 空头公允胜率明确过半 (p_down >= 0.50，即 p_up <= 0.50)
+        # 若两者冲突（如现货微涨但结算概率被压制在0.50以下，或胜率未明），坚决保持观望，绝不抄底劣势方！
+        if delta_s > 0 and p_up >= 0.50:
             pref_side: Side = "Up"
             pref_p = p_up
             target_book = book_up
-        else:
+            opp_book = book_down
+            trend_label = f"本轮顺势共振偏多 (ΔS={delta_s:+.1f}, P*={p_up:.2f}>=0.50)"
+        elif delta_s < 0 and p_down >= 0.50:
             pref_side: Side = "Down"
             pref_p = p_down
             target_book = book_down
+            opp_book = book_up
+            trend_label = f"本轮顺势共振偏空 (ΔS={delta_s:+.1f}, P*={p_down:.2f}>=0.50)"
+        else:
+            return _wait(
+                f"v2.2: Standby in early/mid window (tau {tau_s:.0f}s). 前半段走势与概率未共振(ΔS={delta_s:+.1f}, P*(Up)={p_up:.2f})，胜率未明确过半，严禁介入劣势方，防守观望"
+            )
 
-        mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
         if available_cap < size * mwde_max_px:
             return _wait(f"v2.2: Insufficient capital (${available_cap:.2f}) for MWDE entry (${size * mwde_max_px:.2f})")
 
         best_ask = target_book.best_ask
         best_bid = target_book.best_bid
+        opp_ask = opp_book.best_ask
 
-        # 1. Taker Absorption on Preferred Side if ask <= $0.45
-        if best_ask is not None and 0.10 <= best_ask <= mwde_max_px:
-            fee = taker_fee_per_share(best_ask, fee_rate)
-            if pref_p - (best_ask + fee) >= 0.01:
-                return Decision(
-                    action="taker_buy",
-                    side=pref_side,
-                    price=best_ask,
-                    size=size,
-                    utility=round(pref_p - (best_ask + fee), 4),
-                    reason=f"MWDE Taker Absorption: 顺势低吸 {pref_side} ask={best_ask:.2f} <= ${mwde_max_px:.2f} (ΔS={delta_s:+.1f}, P*={pref_p:.2f})"
-                )
-
-        # 2. Dynamic Maker Absorption on Preferred Side if bid <= $0.45
+        # 用户核心准则："不要太早吃单，除非两侧加起来少于0.9，先尝试挂单"
+        # 1. 尝试挂单优先 (Dynamic Maker Absorption on Preferred Side if bid <= $0.45)
         max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
         if quote_attempts < max_quote_attempts and best_bid is not None and 0.05 <= best_bid <= mwde_max_px:
-            # Dynamic pricing: join best_bid or improve inside spread, bounded by $0.45
             maker_px = round(min(mwde_max_px, best_bid), 2)
             if best_ask is not None and best_bid + 0.01 < best_ask and best_bid + 0.01 <= mwde_max_px:
                 maker_px = round(best_bid + 0.01, 2)
+            if opp_ask is not None and maker_px + opp_ask > max_pair_precheck:
+                return _wait(f"v2.2: 对侧补腿盘口过贵 (本侧挂单={maker_px:.2f} + 对侧ask={opp_ask:.2f} > {max_pair_precheck:.2f})，放弃MWDE挂单")
             if 0.10 <= maker_px <= mwde_max_px:
                 return Decision(
                     action="quote",
@@ -259,10 +283,33 @@ def plan_decision(
                     price=maker_px,
                     size=size,
                     utility=round(pref_p - maker_px, 4),
-                    reason=f"MWDE Maker Absorption: 顺势低吸挂单 {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
+                    reason=f"MWDE Maker Absorption: 前半程优先挂单({trend_label}) {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
                 )
 
-        return _wait(f"v2.2: Standby in early/mid window (tau {tau_s:.0f}s), waiting for MWDE discount dip <= ${mwde_max_px:.2f} or LWAA late window")
+        # 2. 吃单限制：不要太早吃单，除非两边价格加起来 < 0.90 (深度折价无风险套利空间) 且顺势侧 ask <= $0.45
+        mwde_max_taker_pair_cost = float(params.get("MWDE_TAKER_PAIR_COST", 0.90))
+        if best_ask is not None and 0.10 <= best_ask <= mwde_max_px:
+            if opp_ask is not None:
+                pair_cost = best_ask + opp_ask
+                if pair_cost < mwde_max_taker_pair_cost:
+                    fee = taker_fee_per_share(best_ask, fee_rate)
+                    if pref_p - (best_ask + fee) >= 0.01:
+                        return Decision(
+                            action="taker_buy",
+                            side=pref_side,
+                            price=best_ask,
+                            size=size,
+                            utility=round(pref_p - (best_ask + fee), 4),
+                            reason=f"MWDE Taker Absorption: 两侧合计极度便宜(本侧ask={best_ask:.2f}+对侧ask={opp_ask:.2f}={pair_cost:.2f} < {mwde_max_taker_pair_cost:.2f})，果断顺势吃单 {pref_side}"
+                        )
+                else:
+                    return _wait(f"v2.2: 前半程暂不吃单 (两侧ask合计={pair_cost:.2f} >= {mwde_max_taker_pair_cost:.2f})，遵循'先挂单、非特价不吃'原则")
+
+        # 3. 严格顺势防护：如果顺势一侧的价格已经过高（> $0.45），宁可等待也不去抄底反向便宜一侧！
+        opp_side = "Down" if pref_side == "Up" else "Up"
+        return _wait(
+            f"v2.2: Standby in early/mid window (tau {tau_s:.0f}s). 上半段严格顺势防守({trend_label})：当前顺势侧 {pref_side} ask/bid 均高于 ${mwde_max_px:.2f}，坚决不追高，且严禁反向抄底便宜侧 {opp_side}，防守等待"
+        )
 
     # -------------------------------------------------------------
     # STAGE 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption)
@@ -293,7 +340,14 @@ def plan_decision(
             best_bid = target_book.best_bid
 
             # Path A: Taker Absorption (Immediate Edge Capture, strictly capped at max_entry_px and hard_chase_ceiling)
+            opp_book_for_hedge = book_down if target_side == "Up" else book_up
+            opp_ask_precheck = opp_book_for_hedge.best_ask
+            max_pair_precheck = float(params.get("MAX_PAIRING_PRECHECK_COST", 1.05))
+
             if best_ask is not None and min_entry_px <= best_ask <= max_entry_px and best_ask <= hard_chase_ceiling:
+                # Pre-check opposite book pairing viability
+                if opp_ask_precheck is not None and best_ask + opp_ask_precheck > max_pair_precheck:
+                    return _wait(f"v2.2: 对侧补腿盘口过贵 (本侧={best_ask:.2f} + 对侧ask={opp_ask_precheck:.2f} > {max_pair_precheck:.2f})，预期无法锁仓，放弃先手吃单")
                 fee = taker_fee_per_share(best_ask, fee_rate)
                 effective_cost = best_ask + fee
                 taker_edge = target_p - effective_cost
@@ -313,6 +367,10 @@ def plan_decision(
                 return _wait(f"v2.2: 已达最大挂单次数 ({quote_attempts}/{max_quote_attempts})，挂不上不再追挂，死扛等待到期", urgent=False)
 
             if best_bid is not None and best_bid >= 0.02:
+                # Anti-airball: if market bid is already beyond hard chase ceiling, do not hang deep dead quote
+                if best_bid > hard_chase_ceiling:
+                    return _wait(f"v2.2: {target_side} bid={best_bid:.2f} 超过追高硬顶 ${hard_chase_ceiling:.2f}，不在深水区悬空挂单")
+
                 # Dynamic pricing: join best_bid or improve inside spread, strictly capped at max_entry_px
                 maker_px = round(min(max_entry_px, best_bid), 2)
                 # If best_bid is sparse or ridiculously low below ask, anchor dynamically near ask
@@ -320,6 +378,9 @@ def plan_decision(
                     maker_px = round(min(max_entry_px, max(min_entry_px, best_ask - 0.02)), 2)
 
                 maker_px = min(maker_px, max_entry_px)
+                if opp_ask_precheck is not None and maker_px + opp_ask_precheck > max_pair_precheck:
+                    return _wait(f"v2.2: 对侧补腿盘口过贵 (本侧挂单={maker_px:.2f} + 对侧ask={opp_ask_precheck:.2f} > {max_pair_precheck:.2f})，放弃先手挂单")
+
                 if min_entry_px <= maker_px <= hard_chase_ceiling:
                     maker_edge = target_p - maker_px
                     if maker_edge >= min_edge:
