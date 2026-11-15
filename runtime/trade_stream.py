@@ -49,6 +49,7 @@ class TradeStreamClient:
 
         self.last_trade_t = 0.0
         self.trade_count = 0
+        self._dropped_unattributed = 0
 
     def set_active_targets(self, slugs: List[str], token_ids: List[str] = None):
         """Update active slugs and token IDs to filter incoming trades."""
@@ -64,16 +65,19 @@ class TradeStreamClient:
             remaining = deque(maxlen=1000)
             while self._pending_trades:
                 tr = self._pending_trades.popleft()
-                match = True
-                if slug and tr.get("slug") and tr.get("slug") != slug:
-                    match = False
+                # A print without a slug cannot be attributed to any window.
+                # The old `tr.get("slug") and ...` guard let those through, so
+                # another window's volume could deplete this window's queue.
+                if slug and tr.get("slug") != slug:
+                    if tr.get("slug"):
+                        remaining.append(tr)   # belongs to another (prewarmed) window
+                    else:
+                        self._dropped_unattributed += 1
+                    continue
                 if token_id and tr.get("token_id") and tr.get("token_id") != token_id:
-                    match = False
-
-                if match:
-                    trades.append(tr)
-                else:
                     remaining.append(tr)
+                    continue
+                trades.append(tr)
             self._pending_trades = remaining
         return trades
 

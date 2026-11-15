@@ -51,6 +51,9 @@ class PaperRunner:
         self.total_pnl = 0.0
         self._settled_slugs = set()
         self._initial_capital = float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0))
+        # Monotonic order ids. The old `int(now*1000) % 1000000` wrapped every
+        # ~16.7 minutes and could reuse a stale queue_ahead entry.
+        self._next_order_id = 0
         self.price_history = []
         self.regime_counts = {}
         self.regime_dwell = {}
@@ -104,11 +107,14 @@ class PaperRunner:
         self.current_slug = slug
         self.window_start = start_t
         self.window_end = end_t
-        self.open_price = open_px
-        self.binance_open_price = binance_open_px or open_px
-        self.last_spot_price = self.binance_open_price
-        self.last_poly_spot = poly_spot or open_px
-        self.poly_open_is_provisional = (open_px == self.binance_open_price and open_px > 0)
+        self.open_price = open_px                                   # official Poly TWAP strike
+        # The two reference chains have different opening prices. Keeping them
+        # separate is what makes return_bps, delta_s and the chart honest.
+        self.binance_open_price = float(binance_open_px or open_px)
+        self.last_spot_price = self.binance_open_price              # real Binance spot
+        self.last_poly_spot = poly_spot or open_px                  # lagging Poly TWAP
+        self.poly_spot_fresh = bool(poly_spot and poly_spot > 0)
+        self.poly_open_is_provisional = bool(binance_open_px and open_px == binance_open_px and open_px > 0)
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
@@ -129,8 +135,9 @@ class PaperRunner:
         self.price_history = [
             {
                 "t": round(start_t, 1),
-                "price": round(self.binance_open_price, 2),
+                "price": round(self.last_spot_price, 2),
                 "poly_price": round(self.last_poly_spot, 2),
+                "poly_stale": not self.poly_spot_fresh,
                 "return_bps": 0.0,
                 "poly_return_bps": 0.0,
                 "prob_up": 0.5,
@@ -141,8 +148,8 @@ class PaperRunner:
         self.last_prob_up = 0.5
         self.last_poly_up = 0.5
         self.last_poly_down = 0.5
-        self.first_60s_high = self.binance_open_price
-        self.first_60s_low = self.binance_open_price
+        self.first_60s_high = self.last_poly_spot
+        self.first_60s_low = self.last_poly_spot
         self.first_60s_range = 0.0
 
     def update_open_price(self, poly_open: float):
@@ -157,7 +164,15 @@ class PaperRunner:
                 o.cancel_at = time.time()
             self.working_orders = []
         if self.price_history:
+            # Keep the two opening anchors distinct but consistent on the first
+            # point: `price` is the Binance kline open, `poly_price` the official
+            # TWAP open. Previously only poly_price was rewritten, so the live
+            # chart (poly_price first) and the history chart (price first)
+            # started at different values and return_bps disagreed by ~13 bps.
             self.price_history[0]["poly_price"] = round(poly_open, 2)
+            self.price_history[0]["price"] = round(self.binance_open_price, 2)
+            self.price_history[0]["return_bps"] = 0.0
+            self.price_history[0]["poly_return_bps"] = 0.0
             for pt in self.price_history:
                 if pt.get("poly_price"):
                     pt["poly_return_bps"] = round(((pt["poly_price"] - poly_open) / poly_open) * 10000.0, 2)
@@ -193,28 +208,50 @@ class PaperRunner:
         book_down: OrderBook,
         net_stats: dict = None,
         trade_prints: list = None,
-        poly_spot: float = None
+        poly_spot: float = None,
+        replay_mode: bool = False
     ):
-        """Execute one evaluation tick: probability, regime, risk gates, matching."""
+        """Execute one evaluation tick: probability, regime, risk gates, matching.
+
+        replay_mode disables the wall-clock dead-man switch: recorded book
+        updates are sparse, so a multi-second gap between two events is normal
+        and must not cancel resting quotes during a replay.
+        """
         tau = max(0.0, self.window_end - now)
         # Single shared chokepoint for live and replay: reconcile the two
         # complementary token books to no-arbitrage before any decision or fill,
         # so inconsistent dual snapshots can never book a sub-$1 pair as profit.
         book_up, book_down = make_complementary(book_up, book_down)
         open_px = getattr(self, "open_price", 0.0)
-        vol_bps = getattr(spot, "realized_vol_bps", 15.0)
+        # A 2-3 bps EWMA reading makes Phi(d) saturate on a few cents of TWAP
+        # basis noise. Floor the model vol at a realistic 5-minute scale.
+        vol_bps = max(
+            float(getattr(spot, "realized_vol_bps", 15.0) or 15.0),
+            float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 8.0)),
+        )
 
-        if poly_spot is not None and poly_spot > 0:
+        # None means the feed's freshness guard rejected its cached TWAP. Never
+        # reuse last_poly_spot for the probability model: a stale 60s TWAP near
+        # expiry saturates Phi(d) and can print p_fair=0.99 for a losing side.
+        poly_fresh = poly_spot is not None and poly_spot > 0
+        self.poly_spot_fresh = poly_fresh
+        if poly_fresh:
             self.last_poly_spot = poly_spot
+        if spot.price and spot.price > 0:
+            self.last_spot_price = spot.price
 
-        self.last_spot_price = spot.price
+        # Keep both the probability model and the directional signal on ONE
+        # reference chain. Fresh: Poly TWAP vs Poly strike. Stale: Binance spot
+        # vs Binance open. Mixing Binance spot with the Poly strike is what made
+        # delta_s and p_fair disagree on the same tick.
+        spot.poly_price = poly_spot if poly_fresh else None
+        spot.open_price = open_px if poly_fresh else self.binance_open_price
+        if not getattr(spot, "binance_open_price", None):
+            spot.binance_open_price = self.binance_open_price
 
-        # Consistent probability estimation: single reference chain shared with
-        # plan_decision's fallback (Poly TWAP vs strike -> Binance vs Binance
-        # open -> spot vs strike).
         p_fair = estimate_p_fair(
             spot, open_px, tau, vol_bps,
-            poly_price=getattr(self, "last_poly_spot", None),
+            poly_price=poly_spot if poly_fresh else None,
         )
         self.last_prob_up = p_fair
 
@@ -223,25 +260,31 @@ class PaperRunner:
         self.last_poly_up = poly_up
         self.last_poly_down = poly_down
 
-        # Calculate return bps for Binance relative to binance_open_price
-        bin_open = getattr(self, "binance_open_price", 0.0) or open_px
-        binance_bps = ((spot.price - bin_open) / bin_open) * 10000.0 if bin_open > 0 else 0.0
+        # Two independent price series used to be collapsed into one: `price`
+        # and `poly_price` were both written from the lagging 60s Poly TWAP,
+        # while the real Binance spot was thrown away. The chart therefore drew
+        # a smoothed TWAP and labelled it "BTC price", lagging the market by
+        # tens of dollars. Keep both sources, each against its OWN opening
+        # anchor, and mark stale TWAP points as missing rather than frozen.
+        bin_px = self.last_spot_price if self.last_spot_price and self.last_spot_price > 0 else 0.0
+        poly_px = float(poly_spot) if poly_fresh else None
+        bin_open = float(getattr(self, "binance_open_price", 0.0) or 0.0)
+        bin_bps = ((bin_px - bin_open) / bin_open) * 10000.0 if (bin_open > 0 and bin_px > 0) else 0.0
+        poly_bps = ((poly_px - open_px) / open_px) * 10000.0 if (poly_px and open_px > 0) else 0.0
 
-        # Calculate return bps for Polymarket relative to open_price (Poly TWAP open)
-        poly_bps = 0.0
-        if open_px > 0 and self.last_poly_spot and self.last_poly_spot > 0:
-            poly_bps = ((self.last_poly_spot - open_px) / open_px) * 10000.0
-
-        if spot.price > 0:
+        ref_px = bin_px or (poly_px or open_px)
+        if ref_px > 0:
             if now - self.window_start <= 60.0:
-                self.first_60s_high = max(getattr(self, "first_60s_high", spot.price), spot.price)
-                self.first_60s_low = min(getattr(self, "first_60s_low", spot.price), spot.price)
+                self.first_60s_high = max(getattr(self, "first_60s_high", ref_px), ref_px)
+                self.first_60s_low = min(getattr(self, "first_60s_low", ref_px), ref_px)
                 self.first_60s_range = round(self.first_60s_high - self.first_60s_low, 2)
             self.price_history.append({
                 "t": round(now, 1),
-                "price": round(spot.price, 2),
-                "poly_price": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
-                "return_bps": round(binance_bps, 2),
+                "price": round(bin_px, 2),                                   # Binance spot, USD
+                "poly_price": round(poly_px, 2) if poly_px else None,       # Chainlink 60s TWAP, USD
+                "spot_price": round(bin_px, 2),
+                "poly_stale": not poly_fresh,
+                "return_bps": round(bin_bps, 2),
                 "poly_return_bps": round(poly_bps, 2),
                 "prob_up": round(p_fair, 4),
                 "poly_up": round(poly_up, 4),
@@ -266,9 +309,21 @@ class PaperRunner:
             now - float(getattr(book_down, "source_t", 0.0) or now),
         ]
         stale_age = max(0.0, max(input_ages))
-        is_deadman_active = stale_age > deadman_timeout or loop_gap > deadman_timeout or spot.price <= 0
+        book_empty = (
+            (book_up.best_ask is None and book_up.best_bid is None)
+            or (book_down.best_ask is None and book_down.best_bid is None)
+        )
+        if replay_mode:
+            # Sparse recorded ticks are not a live feed outage.
+            is_deadman_active = spot.price <= 0
+        else:
+            is_deadman_active = (
+                stale_age > deadman_timeout or loop_gap > deadman_timeout
+                or spot.price <= 0 or book_empty
+            )
         deadman_reason = (
             f"feed age {stale_age:.1f}s / loop gap {loop_gap:.1f}s > {deadman_timeout:.1f}s"
+            + (" / 空盘口(行情流中断)" if book_empty else "")
         )
         self._last_step_time = now
 
@@ -308,10 +363,14 @@ class PaperRunner:
 
         # 3. Evaluate Circuit Breaker & Bankroll
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
-        available_cap = max(10.0, self._initial_capital + self.total_pnl)
+        # No artificial $10 floor: once the bankroll is exhausted the policy
+        # must see the real (possibly negative) balance and stop opening.
+        available_cap = self._initial_capital + self.total_pnl
+        committed_cost = self.pos_up.cash + self.pos_down.cash
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
+            COMMITTED_WINDOW_COST=committed_cost,
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
             PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
@@ -356,7 +415,31 @@ class PaperRunner:
             is_buy = action.action in ("taker_buy", "taker_hedge")
             target_book = book_down if action.side == "Down" else book_up
             filled, vwap = self.matcher.taker_fill(target_book, want, is_buy=is_buy)
-            if filled > 1e-6:
+            # The policy judged the hedge on best_ask, but a taker actually
+            # walks the ladder. Re-check the *real* VWAP before booking what
+            # would otherwise be a falsely "risk-free" sub-$1 pair.
+            reject_reason = None
+            if action.action == "taker_hedge" and filled > 1e-6:
+                held_basis = (self.pos_up.avg_price if action.side == "Down"
+                              else self.pos_down.avg_price)
+                est_fee = taker_fee_per_share(vwap, config.PARAMS["TAKER_FEE_RATE"])
+                est_pair = held_basis + vwap + est_fee
+                if est_pair > 1.00 + 1e-6:
+                    reject_reason = (
+                        f"VWAP 滑点使配对成本 {est_pair:.4f} > $1.00 "
+                        f"(决策价 {action.price:.2f} -> 逐档 VWAP {vwap:.4f})，拒绝伪无风险锁仓"
+                    )
+            if action.action == "taker_buy" and filled > 1e-6:
+                # Mirror the hedge guard for directional entries: the policy
+                # priced its edge off best_ask, but the fill walks the ladder.
+                slip = vwap - float(action.price if action.price is not None else vwap)
+                edge = float(action.utility if action.utility is not None else 1.0) - slip
+                if slip > 0.005 and edge < 0.0:
+                    reject_reason = (
+                        f"VWAP 滑点吞噬全部优势 (决策价 {action.price:.2f} -> "
+                        f"逐档 VWAP {vwap:.4f}, 剩余 edge {edge:.4f})，拒绝负期望吃单"
+                    )
+            if filled > 1e-6 and reject_reason is None:
                 px = round(vwap, 6)
                 fee = round(filled * taker_fee_per_share(px, config.PARAMS["TAKER_FEE_RATE"]), 4)
                 if is_buy:
@@ -366,9 +449,16 @@ class PaperRunner:
                     else:
                         self.pos_up.shares += filled
                         self.pos_up.cash += (filled * px + fee)
-                    pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
-                    if pair_cost > 1.00:
-                        self.insurance_paid += (pair_cost - 1.00) * filled
+                    # Insurance premium is a stock on the *paired* shares, not
+                    # a per-fill flow. The old code accumulated on every buy
+                    # using two averages that are only comparable when both
+                    # legs hold the same number of shares.
+                    paired = min(self.pos_up.shares, self.pos_down.shares)
+                    if paired > 1e-6:
+                        pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
+                        self.insurance_paid = max(0.0, (pair_cost - 1.00) * paired)
+                    else:
+                        self.insurance_paid = 0.0
                 else:
                     if action.side == "Up":
                         self.pos_up.shares -= filled
@@ -395,15 +485,17 @@ class PaperRunner:
                 self.actions.append({
                     "t": round(now, 2), "action": "taker_reject", "side": action.side,
                     "requested": round(want, 4),
-                    "reason": "empty/one-sided book, no visible liquidity"
+                    "reason": reject_reason or "empty/one-sided book, no visible liquidity"
                 })
 
         # 2. Maker quote placement
         elif action and action.action == "quote":
             purpose = "hedge" if abs(self.pos_up.shares - self.pos_down.shares) > 1e-6 else "entry"
+            self._next_order_id += 1
+            oid = self._next_order_id
             new_order = Order(
-                id=int(now * 1000) % 1000000,
-                client_order_id=f"pm_{int(now * 1000)}",
+                id=oid,
+                client_order_id=f"pm_{self.current_slug}_{oid}",
                 side=action.side,
                 price=action.price,
                 size=action.size,
@@ -474,7 +566,8 @@ class PaperRunner:
         # Update atomic live.json
         self._write_live(now, spot, book_up, book_down)
 
-    def close_window(self, close_px: float, official_winner: str = None):
+    def close_window(self, close_px: float, official_winner: str = None,
+                     winner_source: str = "spot_fallback"):
         """Settle session, append summary record, and compress window archive."""
         if self.current_slug and self.current_slug in self._settled_slugs:
             # The journal already holds this window (engine restarted mid-window,
@@ -524,6 +617,7 @@ class PaperRunner:
             "start": self.window_start,
             "end": self.window_end,
             "winner": winner,
+            "winner_source": winner_source if official_winner in ("Up", "Down") else "spot_fallback",
             "open_px": self.open_price,
             "close_px": close_px,
             "net_pnl": net_pnl,
@@ -567,25 +661,36 @@ class PaperRunner:
         # Clear working orders
         self.working_orders = []
 
-    def reconcile_record(self, slug: str, open_px: float, close_px: float, winner: str):
-        """Update summary.jsonl and window detail archive with final official Chainlink TWAP truth."""
+    def reconcile_record(self, slug: str, open_px: float, close_px: float,
+                         winner: str, winner_source: str = "twap"):
+        """Update prices in summary.jsonl and the window archive.
+
+        winner_source="gamma" is authoritative. A later TWAP-derived reconcile
+        may refresh open/close prices, but must never overwrite a winner that
+        was already confirmed by UMA/Gamma resolution.
+        """
         if not self.summary_file.exists():
             return
         lines = self.summary_file.read_text(encoding="utf-8").splitlines()
         updated = []
+        resolved_winner = winner
         for line in lines:
             if not line.strip():
                 continue
             try:
                 r = json.loads(line)
                 if r.get("slug") == slug:
+                    if r.get("winner_source") == "gamma" and winner_source != "gamma":
+                        resolved_winner = r.get("winner", winner)
+                    else:
+                        r["winner_source"] = winner_source
                     r["open_px"] = round(open_px, 2)
                     r["close_px"] = round(close_px, 2)
-                    r["winner"] = winner
+                    r["winner"] = resolved_winner
                     pos_up = float(r.get("pos_up", 0.0))
                     pos_down = float(r.get("pos_down", 0.0))
                     total_cost = float(r.get("total_cost", 0.0))
-                    proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
+                    proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
                     new_pnl = round(proceeds - total_cost, 4)
                     r["proceeds"] = round(proceeds, 4)
                     r["net_pnl"] = new_pnl
@@ -609,11 +714,12 @@ class PaperRunner:
                     detail = json.load(handle)
                 detail["open_px"] = round(open_px, 2)
                 detail["close_px"] = round(close_px, 2)
-                detail["winner"] = winner
+                detail["winner"] = resolved_winner
+                detail["winner_source"] = winner_source
                 pos_up = float(detail.get("pos_up", 0.0))
                 pos_down = float(detail.get("pos_down", 0.0))
                 total_cost = float(detail.get("total_cost", 0.0))
-                proceeds = pos_up * 1.0 if winner == "Up" else pos_down * 1.0
+                proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
                 detail["proceeds"] = round(proceeds, 4)
                 detail["net_pnl"] = round(proceeds - total_cost, 4)
                 detail["result"] = "win" if detail["net_pnl"] > 1e-4 else ("loss" if detail["net_pnl"] < -1e-4 else "flat")
@@ -629,6 +735,12 @@ class PaperRunner:
         # It now reports the classification that actually ran this tick.
         micro_regime = getattr(self, "_last_regime", None) or getattr(spot, "regime", "normal")
         snr = getattr(self, "_last_snr", 0.0)
+        bin_open = float(getattr(self, "binance_open_price", 0.0) or 0.0)
+        bin_px = float(getattr(self, "last_spot_price", 0.0) or 0.0)
+        poly_open = float(getattr(self, "open_price", 0.0) or 0.0)
+        poly_px = float(getattr(self, "last_poly_spot", 0.0) or 0.0)
+        bin_bps = ((bin_px - bin_open) / bin_open * 10000.0) if bin_open > 0 else 0.0
+        poly_bps = ((poly_px - poly_open) / poly_open * 10000.0) if poly_open > 0 else 0.0
         state = {
             "batch_id": config.BATCH_ID,
             "slug": self.current_slug,
@@ -636,18 +748,19 @@ class PaperRunner:
             "end": self.window_end,
             "now": round(now, 2),
             "tau_s": max(0.0, round(self.window_end - now, 1)),
-            "spot": spot.price,
-            "poly_spot": round(self.last_poly_spot, 2) if getattr(self, "last_poly_spot", None) else None,
-            "open_px": getattr(self, "open_price", 0.0),
-            "binance_open_px": getattr(self, "binance_open_price", getattr(self, "open_price", 0.0)),
-            "return_bps": round(((spot.price - getattr(self, "binance_open_price", spot.price)) / getattr(self, "binance_open_price", spot.price)) * 10000.0, 2) if getattr(self, "binance_open_price", 0.0) > 0 else 0.0,
-            "poly_return_bps": round(((self.last_poly_spot - getattr(self, "open_price", self.last_poly_spot)) / getattr(self, "open_price", self.last_poly_spot)) * 10000.0, 2) if (getattr(self, "open_price", 0.0) > 0 and getattr(self, "last_poly_spot", None)) else 0.0,
+            "spot": round(bin_px, 2),                    # real Binance spot
+            "poly_spot": round(poly_px, 2),              # lagging Chainlink TWAP
+            "poly_spot_stale": not getattr(self, "poly_spot_fresh", False),
+            "open_px": poly_open,
+            "binance_open_px": bin_open,
+            "return_bps": round(bin_bps, 2),            # Binance vs Binance open
+            "poly_return_bps": round(poly_bps, 2),      # Poly TWAP vs Poly strike
             "realized_vol_bps": round(getattr(spot, "realized_vol_bps", 15.0), 2),
-            "regime": getattr(spot, "regime", "normal"),
+            "regime": micro_regime,
             "micro_regime": micro_regime,
             "snr": snr,
             "circuit_breaker": self.circuit_breaker.get_status(now),
-            "available_capital": round(max(10.0, self._initial_capital + self.total_pnl), 2),
+            "available_capital": round(self._initial_capital + self.total_pnl, 2),
             "total_pnl": round(self.total_pnl, 4),
             "prob_up": round(getattr(self, "last_prob_up", 0.5), 4),
             "prob_down": round(1.0 - getattr(self, "last_prob_up", 0.5), 4),

@@ -5,6 +5,118 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 
 ---
 
+## [v2.2] - 2026-11-12 (Audit remediation, paper-only)
+
+Patch-level correctness release: `config.VERSION` stays `v2.2` so the running ledger is not silently re-based (same precedent as v1.1.1). No new strategy thesis; these are logic fixes found by a full-chain audit.
+
+### Fixed — chart price was wrong
+- `runtime/runner.py`: `price_history.price` and `poly_price` were both written from the lagging 60s Chainlink TWAP and `live.spot` was overwritten with the same value. The dashboard therefore drew a smoothed TWAP labelled "BTC price" while the real Binance print (e.g. $73,464.72 vs $73,447.13) was discarded. Both sources are now recorded separately, each against its own opening anchor (`binance_open_px` vs `open_px`).
+- `update_open_price()` now rewrites both first-point anchors and zeroes both return series; previously only `poly_price`/`poly_return_bps` changed, producing a ~13 bps contradiction and different starting points on the live vs history charts.
+- `web/static/app.js`, `index.html`: main curve = Binance point price, dashed overlay = lagging TWAP; both price-only and history charts now use price-first ordering. Stats and tooltip expose both values and their sources.
+
+### Fixed — falsified PnL and unbounded risk
+- `sim/matcher.py`: crossed-book matching consumed the same static ladder on every tick (2 visible ask shares produced 5 filled shares with zero trade prints). One fill opportunity per distinct book snapshot.
+- `config.py`, `runtime/runner.py`, `core/policy.py`: restored the account circuit breaker (`ENABLE_CIRCUIT_BREAKER=True`, `$15` daily drawdown, 3-loss cooling), removed the hardcoded `max(10.0, ...)` bankroll floor, and wired `MAX_WINDOW_LOSS_USD` into the live entry gate via `COMMITTED_WINDOW_COST`. `validate_params()` now checks the worst fully-paired cost and rejects a breaker that can never trip.
+- `runtime/market_feed.py`, `runtime/runner.py`: the feed's stale-TWAP guard returned `None` but the runner kept feeding `last_poly_spot` into `p_fair`. Stale ticks now switch to the Binance chain and mark `poly_stale`; `MIN_MODEL_VOL_BPS` stops Phi(d) saturation. `fetch_spot_state()` no longer substitutes the Poly strike for a failed Binance call, and `fetch_order_book()` sets `source_t` plus an empty-book dead-man signal.
+- `sim/matcher.py` ↔ `core/policy.py`: `make_complementary()` forces `ask_up + ask_down >= 1.00`, so the MWDE `< 0.90` taker gate could never fire at runtime (unit tests bypassed the chokepoint). The gate is now an upper bound (`1.02`) on the adjusted pair cost.
+- `runtime/runner.py`: `taker_hedge` is re-checked against the actual ladder VWAP before booking; a "risk-free" lock that slips above $1.00 is rejected.
+- `runtime/pipeline.py`, `runtime/runner.py`: Gamma/UMA resolution is now queried first and recorded as `winner_source`; a later TWAP reconcile can refresh prices but cannot overwrite an official winner. Fallback settlement uses the Binance point print rather than a 60s TWAP.
+
+### Fixed — configuration, attribution and replay
+- `ALLOW_TAKER_UNWIND` is now actually read by the policy (was a dead key); `MWDE_HEDGE_LOCK_COST` is no longer silently overridden by `max(..., 1.00)`; tail freeze applies to hedge/unwind branches too; `MAX_LOTS` aligned with the fixed 1-lot sizing.
+- `core/regime.py` / `config.py`: `MIN_ENTRY_TAU_S` 180s → 15s, so `tail_freeze` no longer swallows 60% of every window's attribution label.
+- `sim/stress.py`: `CircuitBreaker(enabled=...)` now matches the live config instead of silently defaulting to True.
+- `sim/replay.py`: sparse recorded ticks no longer trip the dead-man switch, trade prints are carried across ticks with no oracle row, duplicate-close results are not reused, and the strike availability look-ahead is documented.
+- `core/estimator.py`: tie at the strike resolves Up, matching settlement.
+
+### Follow-up (same day, second pass)
+Closed four remaining engineering defects found on a line-by-line re-audit:
+- `taker_buy` now gets the same ladder-VWAP guard as `taker_hedge`: a fill whose VWAP wipes out the modelled edge is rejected instead of booked at a fictional best price.
+- `insurance_paid` is recomputed from the currently pairable share count (a stock) rather than accumulated on every buy using two averages that only agree when both legs are equal.
+- `TradeStreamClient.drain_trades` no longer lets prints with no slug into the current window's FIFO queue; prints explicitly belonging to another prewarmed window are still retained.
+- Order ids are now monotonic via `_next_order_id`; the old `int(now*1000) % 1000000` wrapped every ~16.7 minutes and could reuse a stale `queue_ahead` entry.
+
+### Tests
+- Added `tests/test_audit_regression.py` (20 cases) covering the snapshot guard, bankroll envelope, dual price sources, stale TWAP fallback, MWDE reachability, unwind switch, tail freeze, hedge threshold, settlement truth, VWAP slippage, insurance accounting, unattributed prints and order ids. Full suite: **100 tests, all passing** (`requests`/`websockets` installed).
+
+### Deliberately left open (needs a product decision, not a patch)
+1. `make_complementary()` still *shifts* real book prices up/down to remove sub-$1 pairs. It is conservative but means backtests can trade at a price that never existed. Replacing it with a "reject the fill, keep the book" design changes every historical result.
+2. The post-shock consensus branch still buys the market-pricier side without checking model edge (a negative-utility `taker_buy` is possible). Adding an edge gate changes strategy behaviour and invalidates existing replay baselines.
+3. Replay still uses the ledger's own `winner` as settlement truth (circular validation) and the final reconciled `open_px` from t=0 (availability look-ahead). `data/1_market/settlements/` contains no independent Gamma truth; `oracle/window_open` events could model the delayed strike but would change replay PnL.
+4. `reconcile_record()` rewrites the whole `summary.jsonl` (read-modify-replace). Current deployment is single-process with a PID lock and a read-only dashboard, so the race is not reachable in practice; adding cross-process locking was judged higher-risk than the residual exposure.
+
+### UI refresh (2026-11-14, front-end only, no strategy or ledger changes)
+Presentation work across all three views. `config.VERSION` stays `v2.2`; static assets bumped to `?v=2.3.2` for cache busting only.
+
+- **Palette**: replaced the all-over blue tinting with neutral slate surfaces (`#f6f7f9` / `#f2f4f7`) and one indigo UI accent (`#1d4fd8`), leaving cyan (`#0ea5e9`) exclusively for the TWAP data series. All canvas hard-coded colours in `app.js` were brought in line. Hairlines 0.5px → 1px, radius 16px → 12px, subtle card shadow added. P&L semantics (profit/UP green, loss/DOWN red) unchanged. Also fixed two `border: 1px solid var(--border)` declarations that were invalid because `--border` holds a length, not a colour.
+- **Density**: sidebar 268→236px, topbar 68→60px, tighter card padding and grid gaps, body text 15→14px. The overview now fits three regime rows plus the recent-rounds table above the fold; chart canvas 400→360px.
+- **Chart declutter**: three boxed stat groups (with redundant `基准/现值/概率` captions) became one flat readout row that keeps all ten values and adds `振幅` (the JS already computed it but no element existed); legend chips lost their pill chrome; the `无在途挂单` pill moved to the orders workspace header; the decision badge and the feed-stale alert now use a soft fill plus a 3px status rail instead of large solid colour blocks. Chart head went from four rows to three.
+- **Responsive**: `minmax(0, 1fr)` on narrow grids (plain `1fr` let mono price text widen columns past the viewport), topbar trims to clock + refresh under 720px, and canvas captions / Y-axis ticks shorten on narrow screens so they no longer clip.
+
+Verified with CDP-forced 390px and 1440px screenshots (`scrollWidth == clientWidth`, no out-of-bounds elements); **100 tests OK**, `node --check` OK, CSS braces balanced. Before/after captures in `.workbuddy/visual-review/`.
+
+### 顶部排版微调 (2026-11-15, 纯前端，不动策略/账本)
+- 头部两行加高：`.topbar-inner` 52→68px、`.telemetry-inner` 32→44px；导航项 28→32px、时钟 30→34px、徽标与遥测字号略增，左右内边距 24→28px，整块更有呼吸感。静态资源 `style.css?v=3.2.1` 破缓存。
+- 当前轮次读数条：三组读数间距 24→40px，并从居中改为右对齐、贴近「进入实时工作区」按钮；倒计时数值与现货/配比数值统一 15.5px，标签与数值间距 1→4px；按钮 34→36px。
+- 响应式兜底：≤1180px 收回读数间距至 24px，≤820px 读数换行左对齐、按钮右浮，避免挤压溢出。
+- 验证：1440/1100/800px headless 截图均无裁切或重叠；`python main.py test` 100 项全绿；CSS 括号 340/340 平衡。截图见 `.workbuddy/visual-review/top_spacing_after_*.png`。
+
+### 左侧边栏：导航与数据源连接归位 (2026-11-15, 纯前端)
+- 新增固定 `.sidebar`（232px）：品牌 + 竖排导航（交易总览/实时工作区/场次记录，沿用 `.sidebar-link[data-tab]` 与快捷键 1/2/3）+ 底部「数据源连接」卡片（服务在线、源正常、Polymarket 盘口 / Chainlink 预言机延迟）+ 页脚。
+- 顶部精简：主导航、连接状态 pill、两个 source-chip 全部移入侧边栏；`topbar-left` 改为页面标题 + 描述；遥测条仅保留当前轮次与吞吐/RTT/累计。所有 JS 依赖的 id 保持唯一，`app.js` 无需改动，导航切换与轮询更新照常。
+- 布局：`body { padding-left: var(--sidebar-w) }`；≤960px 侧边栏转为顶部横向条并保留「服务在线 / 源正常」精简指示；≤1280px 读数条换行、KPI 改两列，避免侧边栏占宽后读数重叠。静态资源 `style.css?v=3.2.2`。
+- 验证：1440/1280/1100/800px headless 截图 + `#market` 页切换截图，连接卡片显示实时延迟（证明 JS 轮询正常）；`python main.py test` 100 项全绿；CSS 括号 378/378 平衡。截图见 `.workbuddy/visual-review/sidebar_final_*.png`。
+
+### 顶部精简为一行 + 网络遥测归入侧边栏 (2026-11-15, 纯前端)
+- 移除第二行 `.telemetry-bar`，固定顶部只剩 68px 一行：页面标题 / 描述 / 当前轮次 badge / 北京时间 / 主题 / 刷新。原第二行左侧的轮次信息并入首行，右侧「吞吐 / RTT / 累计」移入左侧。
+- 侧边栏连接卡片新增「网络遥测」小节，容纳 `side-net-kbps` / `side-net-latency` / `side-net-total`，与两路数据源延迟同卡片展示；≤960px 横条模式隐藏明细，仍保留「服务在线 / 源正常」。所有 JS 依赖 id 未变，`app.js` 无需改动。静态资源 `style.css?v=3.2.3`。
+- 验证：1440/1100/800px + `#market` 截图，顶部单行、侧边栏遥测显示真实数值、页脚仍可见且无裁切；`python main.py test` 100 项全绿；CSS 括号 380/380 平衡。截图见 `.workbuddy/visual-review/oneline_*.png`。
+
+### 侧边栏顶部区块合并 + 导航呼吸感 (2026-11-15, 纯前端)
+- 品牌行与导航项包进同一 `.sidebar-top` 连续区块：移除品牌下边框与「导航」分组标题，两块之间零间隔；仅在区块底部保留一条分隔线。
+- 品牌行与导航按钮统一 44px 行高；导航项间距 4→10px、行高 40→44px，视觉更松弛。≤960px 横条模式仍保持单行紧凑（32px / gap 4px）。
+- `style.css?v=3.2.4`；`app.js` 未改，导航 id/class 与快捷键不变。
+- 验证：1440/800px 截图无重叠、裁切或横向溢出，连接卡片与页脚仍完整；`python main.py test` 100 项全绿；CSS 括号 382/382 平衡。截图见 `.workbuddy/visual-review/nav_group_*.png`。
+
+### 侧边栏头部连体 + 全站去除左侧装饰条 (2026-11-15, 纯前端)
+- 澄清上一轮需求：只把**品牌行与「交易总览」**连成同一圆角连续块（同 44px 行高、同浅底、零间距），其余导航按钮之间保留 10px 间距并加回 1px 细分隔线；选中态改用文字色 + kbd 高亮表示，不再依赖色条。
+- 去除全站所有 `border-left` 彩色装饰条：侧边栏激活项、当前轮次状态卡、决策徽章、挂单状态卡（UP/DN 仍靠底色区分）；顶部标题后的 1px 灰色分隔符保留。≤960px 横条模式重置连体背景与分隔线。
+- 删除左下角 `.sidebar-footer` 描述性文字（BTC 5M 预测市场量化终端 / UTC+8 · 纸面研究）及其样式、窄屏隐藏规则。
+- `style.css?v=3.2.5`；`app.js` 未改。
+- 验证：overview / history / market 三页 × 1440/800px 截图无重叠、裁切或溢出；`python main.py test` 100 项全绿；CSS 括号 387/387，`border-left` 残留 0 处。截图见 `.workbuddy/visual-review/final_{overview,history,market}_*.png`。
+
+### 顶部整行连体 + 导航区拉开间距 (2026-11-15, 纯前端，返工修正)
+- 修正前几轮的理解偏差：用户指的是**顶部整条横带**（品牌 + 页面标题 + 轮次 + 时钟 + 按钮）要连成一体，而非侧边栏内部两个元素。品牌区（左侧 232px）与 `.topbar-inner` 统一 68px 高、共用 `--topbar-bg` 背景、各带一条同 y 位置的 `border-bottom`，形成连续横带；移除贯穿顶部的侧边栏 `border-right`，改用 `.sidebar::before`（`position: fixed; top: 68px`）只在横带以下画竖线。
+- 撤销上一轮「品牌 + 首个导航按钮连体块」的全部 `:first-child` 样式；侧边栏导航区与品牌带拉开 32px，按钮间距 10→16px，按钮之间仍保留 1px 细分隔线。
+- 修复品牌名被挤成两行：侧边栏品牌区补 `white-space: nowrap` 与 `.brand { flex-shrink: 0 }`（原 topbar 有 nowrap，侧边栏没有）。≤960px 横条模式重置品牌带高度/背景并隐藏竖线伪元素。
+- `style.css?v=3.2.6`；`app.js` 未改。
+- 验证：overview / history × 1440/800px 截图无重叠裁切，`python main.py test` 100 项全绿，CSS 括号 385/385。截图见 `.workbuddy/visual-review/band2_*.png`。
+
+### 顶部横带对齐修正 + 去除分割线 (2026-11-15, 纯前端)
+- **根因**：`.sidebar-brand` 被错误嵌套在带 `padding: 32px 14px 14px` 的 `.sidebar-top` 内，品牌行变成缩进的悬浮小块，与右侧 `topbar` 不等高、不对齐。现将品牌行提升为 `.sidebar` 直接子元素：铺满 232px、固定 68px 高，与 `.topbar-inner` 同高、同为 `--surface` 白底、无竖线或横线分隔，顶部真正连成一条完整横带。
+- 清除顶部与侧边栏的所有分割线：`topbar` / 品牌行 / 导航区的 `border-bottom`、导航按钮之间的 `border-top`、连接卡片内 `.conn-row + .conn-row` 与 `.conn-subhead` 的 `border-top`、侧边栏右侧竖线伪元素、顶部标题后的 `brand-divider`；分区改由背景色差与留白表达。
+- 修复窄屏回归：品牌行不再设 `width: 100%`（flex 列布局自动撑满），≤960px 横条模式下品牌、三个导航按钮、连接状态恢复同排显示。
+- `style.css?v=3.2.7`；`app.js` 未改。
+- 验证：overview / history / market × 1440/800px 截图，`python main.py test` 100 项全绿，CSS 括号 381/381。截图见 `.workbuddy/visual-review/clean*.png`。
+
+### 显示口径统一 + 顶部横带分割线 (2026-11-15, 仅前端显示层)
+- 顶部横带下沿加回一条连续分割线：品牌行与 `.topbar` 同 `border-bottom`，`.topbar-inner` 68→67px 保证两侧边框处于同一 y、品牌行与右侧顶部区域等高对齐。
+- 实时工作区上方价格格统一为 Polymarket / Chainlink 口径：标签「Polymarket 现价 / 开盘基准」，现价取 `live.poly_spot`、开盘取 `live.open_px`，「相对开盘偏离幅度」改由两者计算。后端 `return_bps`（Binance 参与）仍驱动模型，未改。
+- 下方价格图只保留 Chainlink 60s TWAP 一条曲线（实线 + 淡面积），移除 Binance 主曲线与图例；价格轴范围、开盘基准线、hover 圆点/tooltip、统计行「最高/最低/振幅」全部改用 `price_history.poly_price`。TWAP 缓存过期点做前向填充，避免归一化回退到 Binance 打印价造成尖峰。模型概率 P*、盘口隐含、定价边际与概率曲线全部保留。
+- 轮次格删除日期与「(北京时间)」小字；「微观风控与形态状态」列 `padding-left: 28px` 右移，≤960px 重置为 0。
+- **严格只改显示**：`core/`、`runtime/`、`sim/`、`web/server.py`、数据采集、概率模型、Binance 参与的计算一律未动；历史复盘弹窗保持原样。
+- `style.css?v=3.2.9`、`app.js?v=3.2.1`。
+- 验证：`node --check app.js` OK、CSS 括号 382/382、`python main.py test` 100 项全绿；market/overview × 1440/800px 截图。截图见 `.workbuddy/visual-review/fin2_market_*.png`。
+
+### 顶部 header 去除描述与当前轮次 (2026-11-15, 纯前端)
+- 按截图红框移除 `.topbar-left` 中「BTC 5M 预测市场量化终端」描述与「当前轮次 xx:xx ~ xx:xx · 剩余 Ns」badge（`#live-slug-badge`）；顶部一行现在只剩页面标题 + 时钟 + 主题/刷新按钮。轮次信息仍由总览状态栏与市场页「北京时间轮次」格提供，去掉的是重复展示。
+- 同步清理死代码：`.topbar-round` / `.telemetry-round-label` / `.page-slug-badge` / `.brand-desc` 四条 CSS 规则，以及 `app.js` 里对 `live-slug-badge` 的赋值（原本有 null guard，删 DOM 不会报错）。`winInfo` / `tau` 仍供 `market-time-range`、`market-tau`、图表徽标使用。
+- 顶部横带分割线、第二行「北京时间轮次」、价格显示口径与图表均保持上一版状态，未改动；策略、计算、采集、账本一律未动。
+- `style.css?v=3.2.10`、`app.js?v=3.2.2`。
+- 验证：`node --check app.js` OK、CSS 括号 378/378、`python main.py test` 100 项全绿；market/overview × 1440/800px 截图无重叠裁切。截图见 `.workbuddy/visual-review/rm_*.png`。
+
+---
+
 ## [v2.1] - 2026-11-11
 ### 双阶段复合做市与吸收引擎 (MWDE + LWAA)
 

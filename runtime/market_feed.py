@@ -338,7 +338,9 @@ class MarketFeed:
         """Fetch current Binance BTC spot, compute 3s velocity, return bps, and rolling volatility."""
         t = now or time.time()
         url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        current_px = open_price
+        # Never fall back to the Poly TWAP strike as if it were a Binance spot
+        # print: that mixes the two reference chains and injects a fake basis.
+        current_px = float(getattr(self, "_last_binance_px", 0.0) or 0.0) or open_price
         t0 = time.perf_counter()
         byte_count = 0
         try:
@@ -346,7 +348,8 @@ class MarketFeed:
             lat_ms = (time.perf_counter() - t0) * 1000.0
             byte_count = len(resp.content)
             if resp.status_code == 200:
-                current_px = float(resp.json().get("price", open_price))
+                current_px = float(resp.json().get("price", current_px))
+                self._last_binance_px = current_px
             self._record_net("binance", lat_ms, byte_count)
         except Exception:
             pass
@@ -431,12 +434,16 @@ class MarketFeed:
                     bids=bids_sorted,
                     asks=asks_sorted,
                     last_trade_price=last_trade_px,
+                    source_t=time.time(),
                     received_at=time.time()
                 )
         except Exception:
             pass
 
-        return OrderBook(bids=[], asks=[], last_trade_price=None, received_at=time.time())
+        # An empty ladder is a feed failure, not a tradable one-sided market.
+        # source_t=0 plus the runner's empty-book check trips the dead-man switch.
+        return OrderBook(bids=[], asks=[], last_trade_price=None,
+                         source_t=0.0, received_at=0.0)
 
     def verify_official_settlement(self, slug: str) -> Optional[dict]:
         """Query Gamma API to obtain officially resolved outcome truth.

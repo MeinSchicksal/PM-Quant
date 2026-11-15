@@ -60,6 +60,19 @@ class QueueMatcher:
     def __init__(self, latency_s: float = 0.30):
         self.latency_s = latency_s
         self.queue_ahead: Dict[int, float] = {}
+        # A crossed book is a *stock* of resting liquidity, not a flow. The
+        # runner calls match_order() on every tick, so without this guard the
+        # same unchanged snapshot was consumed repeatedly: a 2-share ask level
+        # could fill a 5-share resting order with zero trade prints.
+        self._crossed_snapshot: Dict[int, tuple] = {}
+
+    @staticmethod
+    def _snapshot_key(book: OrderBook) -> tuple:
+        """Content fingerprint of the visible ladder (timestamps excluded)."""
+        return (
+            tuple((round(float(px), 6), round(float(sz), 6)) for px, sz in (book.asks or [])),
+            tuple((round(float(px), 6), round(float(sz), 6)) for px, sz in (book.bids or [])),
+        )
 
     def register_order(self, order: Order, book: OrderBook):
         """Register newly placed maker order and record initial queue ahead."""
@@ -71,6 +84,7 @@ class QueueMatcher:
                 ahead = float(sz)
                 break
         self.queue_ahead[order.id] = ahead
+        self._crossed_snapshot.pop(order.id, None)
 
     def on_trade_print(
         self,
@@ -99,6 +113,10 @@ class QueueMatcher:
 
         # Maker bid fills when real trades execute at or below our bid price
         if trade_price <= order.price + 1e-6:
+            # A real print changes the queue, so a later (new) snapshot may be
+            # matched again. The runner's print_touched_ids guard already skips
+            # the stale snapshot on this same tick.
+            self._crossed_snapshot.pop(order.id, None)
             ahead = self.queue_ahead.get(order.id, 0.0)
             if trade_size <= ahead:
                 self.queue_ahead[order.id] = ahead - trade_size
@@ -162,6 +180,13 @@ class QueueMatcher:
         # Physical latency constraint: cannot fill before arrival at matching engine
         if order.live_at is None or now < order.live_at:
             return 0.0
+
+        # One fill opportunity per distinct book snapshot. A static ladder is
+        # not a stream of new sell orders and must never be consumed twice.
+        snap = self._snapshot_key(book)
+        if self._crossed_snapshot.get(order.id) == snap:
+            return 0.0
+        self._crossed_snapshot[order.id] = snap
 
         # Case: Crossed book (market ask is at or below our bid)
         if book.best_ask is None or book.best_ask > order.price + 1e-6:

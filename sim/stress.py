@@ -377,7 +377,10 @@ def simulate_window(
         )
         b_up, b_dn, prints = ms.tick(t, x[max(0, t - mm.lag_s)])
         prints.append(SENTINEL_PRINT)
-        runner.step(now, spot, b_up, b_dn, trade_prints=prints, poly_spot=ppx)
+        # Synthetic one-sided books model liquidity evaporation, not a feed
+        # outage; keep the wall-clock dead-man switch out of the stress loop.
+        runner.step(now, spot, b_up, b_dn, trade_prints=prints,
+                    poly_spot=ppx, replay_mode=True)
 
     poly_close = poly_px(WINDOW_S)
     winner = "Up" if poly_close >= poly_open else "Down"
@@ -447,7 +450,11 @@ def run_scenario(name: str, n: int, seed: int, mm: MarketModel, runner: PaperRun
         runner.circuit_breaker = CircuitBreaker(
             max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.0),
             loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
-            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3)))
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3)),
+            # Match the live engine. Omitting `enabled` silently defaulted to
+            # True here while config had it disabled, making stress results
+            # look safer than the real bankroll behaviour.
+            enabled=bool(config.PARAMS.get("ENABLE_CIRCUIT_BREAKER", True)))
         runner.total_pnl = 0.0
         try:
             path = gen(rng)

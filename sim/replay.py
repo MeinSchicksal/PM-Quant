@@ -173,7 +173,13 @@ def replay_window(
     winner = settlement.get("winner")
     close_px = float(settlement.get("close_px") or 0.0)
 
-    runner.start_window(slug, start, end, open_px)
+    # NOTE: `open_px` comes from the settled ledger (possibly reconciled to the
+    # final official TWAP strike), which the live engine only learns 5-15s into
+    # the window. Replay therefore has a mild availability look-ahead on the
+    # strike; it is intrinsic to this recorded dataset, not a future price.
+    # binance_open_px is unavailable in the oracle recording, so both chains
+    # intentionally share the same anchor here.
+    runner.start_window(slug, start, end, open_px, binance_open_px=open_px)
 
     # Timeline: every recorded book update in either token, restricted to the
     # window. One tick per book update keeps the replay at recording cadence.
@@ -188,6 +194,7 @@ def replay_window(
     isp = ipoly = -1
     last_poly = None
     prev_t = start
+    carry_prints: List[Dict[str, Any]] = []
 
     for t in times:
         while iu < len(events_up) and float(events_up[iu].get("t", 0.0)) <= t:
@@ -201,10 +208,12 @@ def replay_window(
         poly_row, ipoly = _spot_at(poly_rows, ipoly, t)
         if poly_row:
             last_poly = float(poly_row.get("price") or 0.0)
-        if spot_row is None:
-            continue
 
-        prints = []
+        # Always drain the print cursor, even when this tick has no oracle row.
+        # The old `continue` left `prev_t` and `it` untouched, so those prints
+        # were silently dropped and the maker queue never saw their volume.
+        prints = list(carry_prints)
+        carry_prints = []
         while it < len(trades):
             tr = trades[it]
             tr_t = float(tr.get("received_at") or tr.get("timestamp") or 0.0)
@@ -214,6 +223,10 @@ def replay_window(
                 prints.append(tr)
             it += 1
         prev_t = t
+
+        if spot_row is None:
+            carry_prints = prints
+            continue
 
         spot = SpotState(
             timestamp=t,
@@ -225,7 +238,8 @@ def replay_window(
             poly_price=last_poly,
             binance_open_price=open_px,
         )
-        runner.step(t, spot, book_up, book_dn, trade_prints=prints, poly_spot=last_poly)
+        runner.step(t, spot, book_up, book_dn, trade_prints=prints,
+                    poly_spot=last_poly, replay_mode=True)
 
     if not times:
         # No recorded book data for this window: cannot claim any result.
@@ -234,7 +248,8 @@ def replay_window(
             "recorded_pnl": float(settlement.get("net_pnl") or 0.0), "replay_pnl": 0.0,
         }
 
-    runner.close_window(close_px=close_px, official_winner=winner)
+    runner.close_window(close_px=close_px, official_winner=winner,
+                        winner_source="ledger")
     rec = runner.last_record
     return {
         "slug": slug,
@@ -318,10 +333,14 @@ def run_replay(
 
         original_close = runner.close_window
 
-        def _close_and_capture(close_px, official_winner=None):
-            original_close(close_px, official_winner=official_winner)
+        def _close_and_capture(close_px, official_winner=None, winner_source="ledger"):
+            original_close(close_px, official_winner=official_winner,
+                           winner_source=winner_source)
             lines = runner.summary_file.read_text(encoding="utf-8").splitlines()
-            runner.last_record = json.loads(lines[-1]) if lines else {}
+            rec = json.loads(lines[-1]) if lines else {}
+            # A duplicate close returns early; the last journal line then belongs
+            # to the previous window and must not be reused as this window's PnL.
+            runner.last_record = rec if rec.get("slug") == runner.current_slug else {}
         runner.close_window = _close_and_capture
 
         with overridden_params(overrides or {}):

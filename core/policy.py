@@ -74,6 +74,13 @@ def plan_decision(
             poly_price=getattr(spot, "poly_price", None),
         )
 
+    # Tail freeze applies to EVERY branch, including inventory handling. It used
+    # to live only in the flat-inventory path, so a hedge or salvage unwind could
+    # still fire at tau=5s while the dashboard claimed the window was frozen.
+    min_tau = float(params.get("LWAA_MIN_TAU_S", 15.0))
+    if tau_s < min_tau:
+        return _wait(f"v2.2: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
+
     # 2. Check Inventory State: Unpaired / Holding
     if abs(net_gap) >= 1e-4:
         held_side: Side = "Up" if net_gap > 0 else "Down"
@@ -87,9 +94,10 @@ def plan_decision(
         # Check for arbitrage hedge:
         # User constraint: "不着急买入另外一侧止损，就死扛到期"
         # Only take hedge if opposite side is cheap enough to lock guaranteed profit (pair_cost <= max_lock_cost)
-        max_pair_cost = float(params.get("MWDE_HEDGE_LOCK_COST", 0.85))
         if bool(params.get("LWAA_ENABLE_ARBITRAGE_HEDGE", True)):
-            max_pair_cost = max(max_pair_cost, 1.00)
+            max_pair_cost = float(params.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 1.00))
+        else:
+            max_pair_cost = float(params.get("MWDE_HEDGE_LOCK_COST", 0.85))
         hedge_ask = opp_book.best_ask
         if hedge_ask is not None:
             fee = taker_fee_per_share(hedge_ask, fee_rate)
@@ -111,7 +119,8 @@ def plan_decision(
         salvage_tau = float(params.get("DEFENSIVE_SALVAGE_TAU_S", 30.0))
         salvage_prob = float(params.get("DEFENSIVE_SALVAGE_MAX_PROB", 0.12))
         salvage_min_bid = float(params.get("DEFENSIVE_SALVAGE_MIN_BID", 0.06))
-        salvage_enabled = bool(params.get("DEFENSIVE_SALVAGE_ENABLE", True))
+        salvage_enabled = (bool(params.get("DEFENSIVE_SALVAGE_ENABLE", True))
+                           and bool(params.get("ALLOW_TAKER_UNWIND", True)))
 
         if salvage_enabled and tau_s <= salvage_tau and p_fair_held < salvage_prob:
             held_book = book_up if held_side == "Up" else book_down
@@ -155,16 +164,25 @@ def plan_decision(
     available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
     max_shares = lot_size * max_lots
+
+    # Per-window cost envelope. Previously MAX_WINDOW_LOSS_USD was only checked
+    # by the stress harness after the fact, so nothing stopped the live engine
+    # from stacking cost beyond the declared budget.
+    committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
+    window_budget = float(params.get("MAX_WINDOW_LOSS_USD", 5.0))
+    worst_entry_cost = size * float(params.get("LWAA_MAX_ENTRY_PRICE", 0.65))
+    if committed + worst_entry_cost > window_budget + 1e-9:
+        return _wait(
+            f"v2.2: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓",
+            urgent=True
+        )
+
     if u_shares >= max_shares - 1e-4 or d_shares >= max_shares - 1e-4:
         return _wait(f"Max position reached ({max(u_shares, d_shares):.0f} shares), holding to settlement", urgent=True)
 
     # Check Micro-Regime Toxicity
     if getattr(spot, "is_toxic_shock", False):
         return _wait("Adverse spot toxic shock detected", urgent=True)
-
-    min_tau = float(params.get("LWAA_MIN_TAU_S", 15.0))
-    if tau_s < min_tau:
-        return _wait(f"v2.2: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
 
     # -------------------------------------------------------------
     # STAGE 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry)
@@ -174,14 +192,13 @@ def plan_decision(
     mwde_max_tau = float(params.get("MWDE_MAX_TAU_S", 240.0))
     mwde_enabled = bool(params.get("MWDE_ENABLE", True))
 
-    ref_open = getattr(spot, "binance_open_price", None) or spot.open_price
-    delta_s = spot.price - ref_open if ref_open > 0 else 0.0
+    ref_open = spot.open_price
+    ref_spot = getattr(spot, "poly_price", None) or spot.price
+    delta_s = ref_spot - ref_open if (ref_open > 0 and ref_spot > 0) else 0.0
     p_up = p_fair
     p_down = 1.0 - p_fair
 
     if mwde_enabled and mwde_min_tau < tau_s <= mwde_max_tau:
-        consec_up = int(params.get("CONSECUTIVE_UP_ROUNDS", 0))
-        consec_down = int(params.get("CONSECUTIVE_DOWN_ROUNDS", 0))
         prev_move = float(params.get("PREV_ROUND_ABS_MOVE", 0.0))
         post_shock_min_move = float(params.get("POST_SHOCK_MIN_MOVE", 40.0))
         mwde_max_px = float(params.get("MWDE_MAX_ENTRY_PRICE", 0.45))
@@ -268,12 +285,15 @@ def plan_decision(
         opp_ask = opp_book.best_ask
 
         # 用户核心准则："不要太早吃单，除非两侧加起来少于0.9，先尝试挂单"
-        # 1. 尝试挂单优先 (Dynamic Maker Absorption on Preferred Side if bid <= $0.45)
+        # 1. 尝试挂单优先 (Dynamic Maker Absorption on Preferred Side)
         max_quote_attempts = int(params.get("LWAA_MAX_QUOTE_ATTEMPTS", 1))
         if quote_attempts < max_quote_attempts and best_bid is not None and 0.05 <= best_bid <= mwde_max_px:
             maker_px = round(min(mwde_max_px, best_bid), 2)
+            # 若价差充足(best_ask - best_bid >= 0.02)，可提高 1 个 tick (0.01) 优先排队，但绝不超过 mwde_max_px
             if best_ask is not None and best_bid + 0.01 < best_ask and best_bid + 0.01 <= mwde_max_px:
                 maker_px = round(best_bid + 0.01, 2)
+            maker_px = min(maker_px, mwde_max_px)
+
             if opp_ask is not None and maker_px + opp_ask > max_pair_precheck:
                 return _wait(f"v2.2: 对侧补腿盘口过贵 (本侧挂单={maker_px:.2f} + 对侧ask={opp_ask:.2f} > {max_pair_precheck:.2f})，放弃MWDE挂单")
             if 0.10 <= maker_px <= mwde_max_px:
@@ -283,27 +303,28 @@ def plan_decision(
                     price=maker_px,
                     size=size,
                     utility=round(pref_p - maker_px, 4),
-                    reason=f"MWDE Maker Absorption: 前半程优先挂单({trend_label}) {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
+                    reason=f"MWDE Maker Absorption: 前半程动态挂单({trend_label}) {pref_side} bid={maker_px:.2f} <= ${mwde_max_px:.2f}"
                 )
 
         # 2. 吃单限制：不要太早吃单，除非两边价格加起来 < 0.90 (深度折价无风险套利空间) 且顺势侧 ask <= $0.45
-        mwde_max_taker_pair_cost = float(params.get("MWDE_TAKER_PAIR_COST", 0.90))
+        mwde_max_taker_pair_cost = float(params.get("MWDE_TAKER_PAIR_COST", 1.02))
         if best_ask is not None and 0.10 <= best_ask <= mwde_max_px:
             if opp_ask is not None:
                 pair_cost = best_ask + opp_ask
-                if pair_cost < mwde_max_taker_pair_cost:
+                if pair_cost <= mwde_max_taker_pair_cost:
                     fee = taker_fee_per_share(best_ask, fee_rate)
                     if pref_p - (best_ask + fee) >= 0.01:
+                        tag = "两侧合计极度便宜" if pair_cost < 0.90 else "两侧合计成本可接受"
                         return Decision(
                             action="taker_buy",
                             side=pref_side,
                             price=best_ask,
                             size=size,
                             utility=round(pref_p - (best_ask + fee), 4),
-                            reason=f"MWDE Taker Absorption: 两侧合计极度便宜(本侧ask={best_ask:.2f}+对侧ask={opp_ask:.2f}={pair_cost:.2f} < {mwde_max_taker_pair_cost:.2f})，果断顺势吃单 {pref_side}"
+                            reason=f"MWDE Taker Absorption: {tag}(本侧ask={best_ask:.2f}+对侧ask={opp_ask:.2f}={pair_cost:.2f} <= {mwde_max_taker_pair_cost:.2f})，果断顺势吃单 {pref_side}"
                         )
                 else:
-                    return _wait(f"v2.2: 前半程暂不吃单 (两侧ask合计={pair_cost:.2f} >= {mwde_max_taker_pair_cost:.2f})，遵循'先挂单、非特价不吃'原则")
+                    return _wait(f"v2.2: 前半程暂不吃单 (两侧ask合计={pair_cost:.2f} > {mwde_max_taker_pair_cost:.2f})，遵循'先挂单、非特价不吃'原则")
 
         # 3. 严格顺势防护：如果顺势一侧的价格已经过高（> $0.45），宁可等待也不去抄底反向便宜一侧！
         opp_side = "Down" if pref_side == "Up" else "Up"

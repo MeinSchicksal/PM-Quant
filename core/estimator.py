@@ -23,7 +23,9 @@ def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: fl
     """
     if tau_s <= 0.5:
         # Near instant settlement: binary step with small slack
-        return 0.99 if spot > open_price else 0.01
+        # Match the settlement rule in runner.close_window / crypto-price API:
+        # a tie at the strike resolves Up.
+        return 0.99 if spot >= open_price else 0.01
     
     if open_price <= 0 or spot <= 0:
         return 0.50

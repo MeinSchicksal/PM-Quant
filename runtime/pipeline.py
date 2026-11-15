@@ -124,7 +124,13 @@ class PipelineDriver:
                         official_poly = self.feed.fetch_window_settlement_price(p_start)
                         if official_poly:
                             off_open, off_close, off_winner = official_poly
-                            self.runner.reconcile_record(p_slug, off_open, off_close, off_winner)
+                            # These prices/winner come from the TWAP endpoint,
+                            # not from UMA resolution. runner.reconcile_record
+                            # keeps an already-verified Gamma winner intact.
+                            self.runner.reconcile_record(
+                                p_slug, off_open, off_close, off_winner,
+                                winner_source="twap"
+                            )
                             pending_settlements.remove(item)
                             print(f"[Pipeline] Official Chainlink TWAP confirmed for {p_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})\n")
                         elif isinstance(item, dict) and (item["attempts"] >= 30 or (loop_start - item.get("added_at", loop_start)) > 1800):
@@ -134,19 +140,30 @@ class PipelineDriver:
                 # 1. Check Window Rollover / Expiration
                 if last_slug and last_slug != slug:
                     print(f"\n[Pipeline] Window {last_slug} ended. Settling...")
-                    # Try official Polymarket TWAP settlement prices first
+                    # Gamma/UMA resolution is the authoritative winner. Query it
+                    # FIRST, regardless of whether the TWAP endpoint answered;
+                    # previously it was only consulted when TWAP failed, and a
+                    # later TWAP reconcile could overwrite the official result.
+                    official = self.feed.verify_official_settlement(last_slug)
+                    official_winner = official.get("winner") if official else None
+                    winner_source = "gamma" if official else "spot_fallback"
+
                     official_poly = self.feed.fetch_window_settlement_price(last_start_t) if last_start_t else None
                     if official_poly:
                         official_open, official_close, poly_winner = official_poly
                         self.runner.open_price = official_open
                         close_px = official_close
-                        official_winner = poly_winner
+                        if not official:
+                            official_winner = poly_winner
+                            winner_source = "twap"
                     else:
                         close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                        # Prioritize last sampled Polymarket TWAP over raw Binance spot
-                        close_px = getattr(self.runner, "last_poly_spot", None) or (close_spot.price if close_spot.price > 0 else getattr(self.runner, "last_spot_price", self.runner.open_price))
-                        official = self.feed.verify_official_settlement(last_slug)
-                        official_winner = official.get("winner") if official else None
+                        # A 60s smoothed TWAP is a poor proxy for a point-value
+                        # settlement. Use the real Binance point print instead.
+                        close_px = (
+                            getattr(self.runner, "last_spot_price", 0.0)
+                            or (close_spot.price if close_spot.price > 0 else self.runner.open_price)
+                        )
                         if last_start_t:
                             pending_settlements.append({
                                 "slug": last_slug,
@@ -155,7 +172,8 @@ class PipelineDriver:
                                 "added_at": loop_start
                             })
 
-                    self.runner.close_window(close_px, official_winner)
+                    self.runner.close_window(close_px, official_winner,
+                                            winner_source=winner_source)
                     res_tag = f"Official truth: {official_winner}" if official_winner else f"Close px: ${close_px:,.2f}"
                     print(f"[Pipeline] Window {last_slug} settled ({res_tag})! Recorded to summary.jsonl\n")
                     active_tokens = {}

@@ -1,39 +1,125 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="light">
-  <title>PM-Quant · BTC 5分钟量化交易看板</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230052ff'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css">
+  <title>PM-Quant · BTC 5分钟量化交易终端</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.10">
 </head>
 <body data-page="overview">
-  <header class="topbar">
-    <div class="topbar-inner">
+  <!-- LEFT SIDEBAR: navigation + data-source connection status -->
+  <aside class="sidebar" aria-label="主导航与数据源连接状态">
+    <div class="sidebar-brand">
       <a class="brand" href="#overview" aria-label="PM-Quant 总览">
-        <span class="brand-badge">P</span>
-        <span class="brand-copy">
-          <span class="brand-name">PM-QUANT</span>
-          <span class="brand-version" id="page-version">v2.2</span>
+        <span class="brand-badge">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19V5m0 14h16M8 14l3.5-4.5 3.5 2.5 4.5-6"/>
+          </svg>
         </span>
+        <span class="brand-name">PM-QUANT</span>
       </a>
+      <span class="brand-version" id="page-version">v2.2</span>
+    </div>
 
-      <div class="topbar-actions">
-        <div class="wall-clock" aria-label="北京时间">
-          <time id="current-time">--:--:--</time>
-          <span class="clock-zone">北京时间</span>
-          <span id="current-date">----/--/--</span>
-          <span id="current-weekday">--</span>
-        </div>
+    <div class="sidebar-top">
+      <nav class="sidebar-nav" aria-label="看板主导航">
+        <a class="nav-tab sidebar-link active" data-tab="overview" href="#overview">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+            <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+          </svg>
+          <span>交易总览</span>
+          <kbd class="nav-kbd" title="快捷键 1">1</kbd>
+        </a>
+        <a class="nav-tab sidebar-link" data-tab="market" href="#market">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3v18h18M7 15l4-4 3 2.5 5-6.5"/>
+          </svg>
+          <span>实时工作区</span>
+          <kbd class="nav-kbd" title="快捷键 2">2</kbd>
+        </a>
+        <a class="nav-tab sidebar-link" data-tab="history" href="#history">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 8v4l2.5 2.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
+          </svg>
+          <span>场次记录</span>
+          <kbd class="nav-kbd" title="快捷键 3">3</kbd>
+        </a>
+      </nav>
+    </div>
 
-        <div class="control-tray">
-          <div class="status-pill status-ready" id="conn-pill" title="数据源通信就绪">
+    <div class="sidebar-spacer"></div>
+
+    <div class="sidebar-group sidebar-connections">
+      <div class="sidebar-group-label">数据源连接</div>
+      <div class="conn-card">
+        <div class="conn-head">
+          <div class="status-pill status-ready" id="conn-pill" title="数据源通信状态">
             <span class="status-dot"></span>
             <span id="conn-text">服务在线</span>
           </div>
-          <button id="refresh-btn" class="refresh-btn" type="button" aria-label="刷新看板" title="刷新看板">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <span class="telemetry-badge" id="net-count">数据源正常</span>
+        </div>
+        <div class="conn-row">
+          <span class="source-dot"></span>
+          <span class="conn-name">Polymarket 盘口</span>
+          <strong class="source-metric-val" id="src-poly-lat">-- ms</strong>
+        </div>
+        <div class="conn-row">
+          <span class="source-dot"></span>
+          <span class="conn-name">Chainlink 预言机</span>
+          <strong class="source-metric-val" id="src-binance-lat">-- ms</strong>
+        </div>
+
+        <div class="conn-subhead">网络遥测</div>
+        <div class="conn-row">
+          <span class="conn-name">吞吐</span>
+          <strong class="source-metric-val" id="side-net-kbps">0.0 KB/s</strong>
+        </div>
+        <div class="conn-row">
+          <span class="conn-name">RTT</span>
+          <strong class="source-metric-val" id="side-net-latency">-- ms</strong>
+        </div>
+        <div class="conn-row">
+          <span class="conn-name">累计</span>
+          <strong class="source-metric-val" id="side-net-total">0.0 MB</strong>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- TOP COMMAND HEADER -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="topbar-left">
+        <h1 class="topbar-page-title" id="page-title">交易总览</h1>
+      </div>
+
+      <div class="topbar-actions">
+        <div class="wall-clock" aria-label="北京时间">
+          <span class="clock-zone">UTC+8</span>
+          <time id="current-time">--:--:--</time>
+          <span class="clock-sep hide-sm">·</span>
+          <span id="current-date" class="hide-sm">--/--</span>
+          <span id="current-weekday" class="hide-sm">--</span>
+        </div>
+
+        <div class="control-tray">
+          <button id="theme-btn" class="icon-btn" type="button" aria-label="切换明暗主题" title="切换明暗主题 (快捷键 T)">
+            <svg class="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4"/>
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/>
+            </svg>
+            <svg class="icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          <button id="refresh-btn" class="icon-btn refresh-btn" type="button" aria-label="立即刷新数据" title="立即刷新数据 (快捷键 R)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/>
             </svg>
           </button>
@@ -42,215 +128,166 @@
     </div>
   </header>
 
-  <aside class="sidebar">
-    <nav class="sidebar-nav" aria-label="看板主导航">
-      <a class="sidebar-link active" data-tab="overview" href="#overview">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="7" height="7" rx="1.5"/>
-          <rect x="14" y="3" width="7" height="7" rx="1.5"/>
-          <rect x="3" y="14" width="7" height="7" rx="1.5"/>
-          <rect x="14" y="14" width="7" height="7" rx="1.5"/>
-        </svg>
-        <span>交易总览</span>
-      </a>
-      <a class="sidebar-link" data-tab="market" href="#market">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 4v16h16M7 14l4-4 4 3 5-7"/>
-        </svg>
-        <span>实时工作区</span>
-      </a>
-      <a class="sidebar-link" data-tab="history" href="#history">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 11a9 9 0 1 1 2.5 7M3 4v7h7M12 7v5l3 2"/>
-        </svg>
-        <span>场次记录</span>
-      </a>
-    </nav>
-
-    <section class="sidebar-network" aria-label="数据源连接监控">
-      <div class="sidebar-net-head">
-        <span class="sidebar-net-title">数据源与网络</span>
-        <span class="sidebar-net-count" id="net-count">4 正常</span>
-      </div>
-
-      <div class="net-summary-box">
-        <div class="net-summary-item">
-          <span class="net-summary-label">速率</span>
-          <strong class="net-summary-val" id="side-net-kbps">0.0 KB/s</strong>
-        </div>
-        <div class="net-summary-item">
-          <span class="net-summary-label">延迟</span>
-          <strong class="net-summary-val" id="side-net-latency">-- ms</strong>
-        </div>
-        <div class="net-summary-item">
-          <span class="net-summary-label">流量</span>
-          <strong class="net-summary-val" id="side-net-total">0.0 MB</strong>
-        </div>
-      </div>
-
-      <div class="sidebar-sources-list">
-        <div class="source-item" data-state="ok">
-          <div class="source-main">
-            <span class="source-dot"></span>
-            <span class="source-name">Polymarket 盘口</span>
-            <strong class="source-metric-val" id="src-poly-lat">-- ms</strong>
-          </div>
-        </div>
-        <div class="source-item" data-state="ok">
-          <div class="source-main">
-            <span class="source-dot"></span>
-            <span class="source-name">币安现货 BTC</span>
-            <strong class="source-metric-val" id="src-binance-lat">-- ms</strong>
-          </div>
-        </div>
-        <div class="source-item" data-state="ok">
-          <div class="source-main">
-            <span class="source-dot"></span>
-            <span class="source-name">撮合引擎 FIFO</span>
-            <span class="source-metric-val">300ms</span>
-          </div>
-        </div>
-        <div class="source-item" data-state="ok">
-          <div class="source-main">
-            <span class="source-dot"></span>
-            <span class="source-name">UMA 官方结算</span>
-            <span class="source-metric-val">已就绪</span>
-          </div>
-        </div>
-      </div>
-    </section>
-  </aside>
-
+  <!-- MAIN WORKSPACE CONTAINER -->
   <main class="shell">
-    <div class="page-heading">
-      <h1 id="page-title">交易总览</h1>
-      <span class="page-slug-badge" id="live-slug-badge">等待数据</span>
-    </div>
-
-    <!-- VIEW 1: OVERVIEW -->
+    <!-- ====================================================================
+         VIEW 1: TRADING OVERVIEW (交易总览)
+         ==================================================================== -->
     <section class="view-panel" id="view-overview">
-      <!-- Upper Section: Hero Net PnL + Active Window Card -->
-      <div class="overview-top-grid">
-        <section class="panel hero-pnl-card" aria-label="累计已结算净收益">
-          <div class="card-meta-head">
-            <span class="card-meta-label">累计已结算净收益</span>
+      <!-- Row 1: Compact Active 5M Round Live Command Bar -->
+      <section class="panel active-strip-card" aria-label="当前运行轮次状态栏">
+        <div class="active-strip-left">
+          <span class="status-pill status-ready" id="overview-live-status">
+            <span class="status-dot"></span>
+            <span>当前轮次进行中</span>
+          </span>
+          <div class="active-strip-window">
+            <strong class="active-strip-time" id="overview-live-time">--:-- ~ --:--</strong>
+            <span class="active-strip-slug" id="overview-live-date">北京时间 (UTC+8)</span>
+          </div>
+        </div>
+
+        <div class="active-strip-metrics">
+          <div class="active-strip-tau">
+            <div class="active-strip-tau-top">
+              <span class="cap-label">交割倒计时</span>
+              <strong class="mono-val" id="overview-live-tau">-- 秒</strong>
+            </div>
+            <div class="single-progress-track">
+              <div class="single-progress-fill" id="overview-tau-bar" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <div class="active-strip-kv">
+            <span class="cap-label">BTC 实时现货</span>
+            <strong class="cap-val" id="overview-live-spot">$0.00</strong>
+          </div>
+
+          <div class="active-strip-kv">
+            <span class="cap-label">本轮持仓配比</span>
+            <strong class="cap-val" id="overview-live-pos">UP 0.0 / DN 0.0</strong>
+          </div>
+        </div>
+
+        <a class="jump-workspace-btn" href="#market" id="jump-to-market">
+          <span>进入实时工作区</span>
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 10h12m-4-4 4 4-4 4"/>
+          </svg>
+        </a>
+      </section>
+
+      <!-- Row 2: Golden-Ratio 2-Column Hero Grid (Left: Net PnL & Capital Scorecard | Right: Wide Equity Curve) -->
+      <div class="overview-hero-grid">
+        <!-- Card 1: Net PnL & Capital Structure -->
+        <section class="panel pnl-hero-card" aria-label="累计已结算净收益">
+          <div class="card-head">
+            <h2>累计已结算净收益</h2>
             <span class="badge-pill" id="hero-settled-count">0 场已结算</span>
           </div>
-          <div class="hero-pnl-split-row">
-            <div class="hero-pnl-main-col">
-              <strong class="hero-num" id="hero-total-pnl">+$0.00</strong>
+
+          <div class="pnl-primary-block">
+            <strong class="hero-num" id="hero-total-pnl">+$0.00</strong>
+            <span class="roi-pill" id="hero-equity-roi-pill">总回报率 <strong id="kpi-avail-sub">+0.00%</strong></span>
+          </div>
+
+          <!-- Visual Win vs Loss Gross Bar -->
+          <div class="winloss-bar-block">
+            <div class="winloss-labels">
+              <span>盈利累计 <strong class="up" id="hero-won">+$0.00</strong></span>
+              <span>亏损累计 <strong class="down" id="hero-lost">-$0.00</strong></span>
             </div>
-            <div class="hero-won-lost-sub">
-              <div class="split-stat-item">
-                <span class="split-stat-label">盈利总计</span>
-                <strong class="comp-val up" id="hero-won">+$0.00</strong>
-              </div>
-              <div class="split-stat-item">
-                <span class="split-stat-label">亏损总计</span>
-                <strong class="comp-val down" id="hero-lost">-$0.00</strong>
-              </div>
+            <div class="dual-progress-track" aria-hidden="true">
+              <div class="dual-progress-fill up-fill" id="hero-win-bar" style="width: 50%"></div>
             </div>
           </div>
-          <div class="hero-composition-row">
-            <div class="comp-box">
-              <span class="comp-label" title="已结算轮次中实际用于买入份额的总支出成本">实际下注资金</span>
-              <strong class="comp-val" id="hero-turnover">$0.00</strong>
+
+          <div class="capital-grid">
+            <div class="cap-cell">
+              <span class="cap-label" title="账户初始本金 + 累计已结算净收益">当前账户净值</span>
+              <strong class="cap-val" id="kpi-available-cap">$100.00</strong>
             </div>
-            <div class="comp-box">
-              <span class="comp-label" title="累计净收益 ÷ 实际下注资金">下注回报率 (ROI)</span>
-              <strong class="comp-val" id="hero-roi">+0.00%</strong>
+            <div class="cap-cell">
+              <span class="cap-label" title="扣除当前轮次在途占用后的可用资金">可用自由资金</span>
+              <strong class="cap-val" id="hero-free-cap">$100.00</strong>
             </div>
-            <div class="comp-box">
-              <span class="comp-label" title="账户初始本金 + 累计净收益">账户当前资产</span>
-              <strong class="comp-val up" id="hero-free-cap">$100.00</strong>
+            <div class="cap-cell">
+              <span class="cap-label" title="纸面模拟账户起始底仓总额">账户初始本金</span>
+              <strong class="cap-val" id="hero-initial-cap">$100.00</strong>
             </div>
-            <div class="comp-box">
-              <span class="comp-label" title="纸面模拟账户起始底仓总额">账户初始本金</span>
-              <strong class="comp-val" id="hero-initial-cap">$100.00</strong>
+            <div class="cap-cell">
+              <span class="cap-label" title="已结算轮次中实际用于买入份额的总支出成本 / 周转回报率">累计下注 / 周转ROI</span>
+              <div class="cap-inline">
+                <strong class="cap-val" id="hero-turnover">$0.00</strong>
+                <small class="cap-sub" id="hero-roi">+0.00%</small>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="panel hero-active-card" aria-label="当前活动轮次">
-          <div class="card-meta-head">
-            <span class="card-meta-label">当前运行轮次（北京时间）</span>
-            <span class="status-pill status-ready" id="overview-live-status">进行中</span>
+        <!-- Card 2: Wide Interactive Cumulative Equity Curve -->
+        <section class="panel equity-curve-card" aria-label="累计净值收益曲线">
+          <div class="card-head">
+            <div class="card-head-inline">
+              <h2>已结算轮次净值曲线</h2>
+              <span class="card-head-hint">悬停检视单场损益 · 点击节点直接调阅复盘</span>
+            </div>
+            <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
           </div>
-          <div class="hero-active-body">
-            <strong class="hero-time-range" id="overview-live-time">--:-- ~ --:--</strong>
-            <small class="hero-sub-slug" id="overview-live-date">5分钟周期 (UTC+8)</small>
-          </div>
-          <div class="hero-active-stats">
-            <div class="active-stat-item">
-              <span class="comp-label">剩余倒计时</span>
-              <strong class="comp-val" id="overview-live-tau">-- s</strong>
-            </div>
-            <div class="active-stat-item">
-              <span class="comp-label">BTC 现货</span>
-              <strong class="comp-val" id="overview-live-spot">$0.00</strong>
-            </div>
-            <div class="active-stat-item">
-              <span class="comp-label">持仓配比</span>
-              <strong class="comp-val" id="overview-live-pos">看涨 0 / 看跌 0</strong>
-            </div>
+          <div class="equity-canvas-wrap">
+            <canvas id="equity-curve-canvas" height="220"></canvas>
+            <div class="chart-tooltip" id="equity-tooltip" hidden></div>
           </div>
         </section>
       </div>
 
-      <!-- KPI Grid: 4 Core Metrics -->
-      <section class="kpi-grid" aria-label="核心运营指标">
-        <div class="panel kpi-card">
-          <div class="kpi-card-head">
-            <span class="kpi-card-label">有效胜率 (剔除平局)</span>
-            <span class="kpi-sub-badge" id="kpi-winloss">0 胜 0 负 0 平</span>
-          </div>
-          <strong class="kpi-card-value" id="kpi-winrate">0.0%</strong>
+      <!-- Row 3: 4 Core Operational KPIs (Clean Single-Line Headers) -->
+      <section class="kpi-strip" aria-label="核心运营指标">
+        <div class="panel kpi-box">
+          <span class="kpi-box-label">有效胜率 (剔除平局)</span>
+          <strong class="kpi-box-val" id="kpi-winrate">0.0%</strong>
+          <span class="kpi-box-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
         </div>
 
-        <div class="panel kpi-card">
-          <div class="kpi-card-head">
-            <span class="kpi-card-label">平均每场盈亏</span>
-            <span class="kpi-sub-badge" id="kpi-avg-split">均盈 $0.00 / 均亏 $0.00</span>
-          </div>
-          <strong class="kpi-card-value" id="kpi-avg-pnl">$0.00</strong>
+        <div class="panel kpi-box">
+          <span class="kpi-box-label">单场数学期望 (均值)</span>
+          <strong class="kpi-box-val" id="kpi-avg-pnl">$0.00</strong>
+          <span class="kpi-box-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
         </div>
 
-        <div class="panel kpi-card">
-          <div class="kpi-card-head">
-            <span class="kpi-card-label">当前账户净资产</span>
-            <span class="kpi-sub-badge" id="kpi-avail-sub">初始本金 $100.00</span>
-          </div>
-          <strong class="kpi-card-value" id="kpi-available-cap">$100.00</strong>
+        <div class="panel kpi-box">
+          <span class="kpi-box-label">双边对冲配平率</span>
+          <strong class="kpi-box-val" id="kpi-hedge-rate">0.0%</strong>
+          <span class="kpi-box-sub" id="kpi-total-fills">配平 0/0 场 · 共 0 笔成交</span>
         </div>
 
-        <div class="panel kpi-card">
-          <div class="kpi-card-head">
-            <span class="kpi-card-label">完全对冲配平率</span>
-            <span class="kpi-sub-badge" id="kpi-total-fills">累计 0 笔成交</span>
-          </div>
-          <strong class="kpi-card-value" id="kpi-hedge-rate">0.0%</strong>
+        <div class="panel kpi-box">
+          <span class="kpi-box-label">窗口参与率与资金周转</span>
+          <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
+          <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
         </div>
       </section>
 
-      <!-- Market Regime Attribution Matrix Panel -->
-      <section class="panel regime-panel" aria-label="微观行情形态盈亏归因">
-        <div class="panel-head">
-          <div class="panel-title-group">
-            <h2>行情形态策略归因</h2>
-            <small class="panel-subtitle">按开仓时刻的行情形态归因 · 仅统计已成交窗口 · n &lt; 30 标记为样本不足</small>
+      <!-- Row 4: Market Regime Attribution Matrix Panel (Flush Edge-to-Edge Table) -->
+      <section class="panel section-panel table-panel" aria-label="微观行情形态盈亏归因">
+        <div class="section-head">
+          <div class="section-title-group">
+            <h2>行情形态策略归因矩阵</h2>
+            <p class="section-subtitle">按开仓时刻的微观行情形态归因 · 仅统计产生实际成交的窗口 · 样本量 n &lt; 30 标记为样本偏少</p>
           </div>
           <span class="badge-pill" id="regime-sample-badge">可归因 0 场</span>
         </div>
+
         <div class="table-wrap">
-          <table class="history-table regime-table">
+          <table class="data-table regime-table">
             <thead>
               <tr>
-                <th>行情形态</th>
-                <th class="num" title="已成交窗口数（只有成交窗口才产生盈亏）">样本 n</th>
+                <th>微观行情形态 (Regime)</th>
+                <th class="num" title="已成交窗口数（只有成交窗口才产生盈亏）">样本量 n</th>
                 <th class="num" title="剔除平局后的胜率；下方为胜/负场数">有效胜率</th>
                 <th class="num">累计净盈亏</th>
-                <th class="num" title="每场平均净盈亏 = 累计净盈亏 ÷ 样本 n">单窗均值</th>
-                <th class="num" title="单窗均值的 95% 置信区间；区间跨过零则无法区分 edge 与噪音">95% CI</th>
+                <th class="num" title="每场平均净盈亏 = 累计净盈亏 ÷ 样本 n">单窗期望均值</th>
+                <th class="num" title="单窗均值的 95% 置信区间；区间跨过零则无法区分 edge 与噪音">95% 置信区间 (CI)</th>
               </tr>
             </thead>
             <tbody id="regime-attribution-tbody">
@@ -261,25 +298,34 @@
         <div class="regime-coverage" id="regime-coverage" hidden></div>
       </section>
 
-      <!-- Overview Recent Settled Rounds Table -->
-      <section class="panel recent-rounds-panel" aria-label="近期结算轮次">
-        <div class="workspace-head">
-          <h2>近期结算场次</h2>
-          <a class="view-more-link" href="#history" id="view-more-history">查看全部记录 →</a>
+      <!-- Row 5: Recent Settled Rounds Table -->
+      <section class="panel section-panel table-panel" aria-label="近期结算轮次">
+        <div class="section-head">
+          <div class="section-title-group">
+            <h2>近期结算场次</h2>
+            <p class="section-subtitle">展示最近 5 个窗口的交割结果与头寸核算，点击任意行可调阅 5 分钟秒级复盘图与操作明细</p>
+          </div>
+          <a class="btn-link" href="#history" id="view-more-history">
+            <span>查看全部历史账本</span>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 10h12m-4-4 4 4-4 4"/>
+            </svg>
+          </a>
         </div>
+
         <div class="table-wrap">
-          <table class="history-table">
+          <table class="data-table">
             <thead>
               <tr>
                 <th>北京时间轮次</th>
                 <th>胜出方向</th>
-                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开 → 收（涨跌）</th>
+                <th title="Polymarket 该窗口开盘价 → 收盘价，下方为美元涨跌与百分比">开盘 → 收盘 (涨跌)</th>
                 <th class="num" title="看涨（UP）持仓股数">UP 股数</th>
                 <th class="num" title="看跌（DOWN）持仓股数">DN 股数</th>
-                <th class="num">总成本</th>
-                <th class="num">兑现收入</th>
+                <th class="num">投入成本</th>
+                <th class="num">期末兑现</th>
                 <th class="num">净收益</th>
-                <th class="num" title="该窗口成交笔数">笔数</th>
+                <th class="num" title="该窗口成交笔数">成交笔数</th>
               </tr>
             </thead>
             <tbody id="overview-recent-tbody">
@@ -290,151 +336,96 @@
       </section>
     </section>
 
-    <!-- VIEW 2: MARKET WORKSPACE -->
+    <!-- ====================================================================
+         VIEW 2: LIVE MARKET WORKSPACE (实时工作区)
+         ==================================================================== -->
     <section class="view-panel" id="view-market" hidden>
-      <!-- Active Round Status Strip -->
-      <section class="panel active-strip" aria-label="当前轮次行情状态">
-        <div class="strip-item">
-          <span class="strip-label">北京时间轮次</span>
-          <strong class="strip-value" id="market-time-range">--:-- ~ --:--</strong>
-          <small class="sub-slug-text" id="market-slug-small">--</small>
-        </div>
-        <div class="strip-item">
-          <span class="strip-label">距离结算 (Tau)</span>
-          <div class="tau-display">
-            <strong class="strip-value" id="market-tau">--</strong>
-            <span class="unit">s</span>
+      <!-- Top Live Telemetry & Countdown Strip -->
+      <section class="panel market-command-strip" aria-label="当前轮次行情状态">
+        <div class="mc-metrics">
+          <div class="mc-item">
+            <span class="mc-label">北京时间轮次</span>
+            <div class="mc-val-row">
+              <strong class="mc-val" id="market-time-range">--:-- ~ --:--</strong>
+            </div>
           </div>
-        </div>
-        <div class="strip-item">
-          <span class="strip-label">BTC 现货 / 开盘价</span>
-          <div class="spot-display">
-            <strong class="strip-value" id="market-spot">$0.00</strong>
-            <small class="spot-open" id="market-open">基准 $0.00</small>
+
+          <div class="mc-item">
+            <span class="mc-label">距离交割结算 (Tau)</span>
+            <div class="mc-val-row">
+              <strong class="mc-val mc-tau" id="market-tau">--</strong>
+              <span class="mc-unit">秒</span>
+              <span class="chart-sub-tag" id="chart-elapsed-badge">已运行 0s / 300s</span>
+            </div>
           </div>
-        </div>
-        <div class="strip-item">
-          <span class="strip-label">开盘偏离幅度</span>
-          <strong class="strip-value" id="market-bps">+0.00%</strong>
-        </div>
-        <div class="strip-item">
-          <span class="strip-label">微观流动性风险</span>
-          <span class="status-pill status-ready" id="market-risk-pill">
-            <span class="status-dot"></span>
-            <span id="market-risk">流动性正常</span>
-          </span>
+
+          <div class="mc-item">
+            <span class="mc-label">Polymarket 现价 / 开盘基准</span>
+            <div class="mc-val-row">
+              <strong class="mc-val" id="market-spot">$0.00</strong>
+              <small class="mc-sub" id="market-open">基准 $0.00</small>
+            </div>
+          </div>
+
+          <div class="mc-item">
+            <span class="mc-label">相对开盘偏离幅度</span>
+            <div class="mc-val-row">
+              <strong class="mc-val" id="market-bps">+0.00%</strong>
+            </div>
+          </div>
+
+          <div class="mc-item mc-risk-col">
+            <span class="mc-label">微观风控与形态状态</span>
+            <div class="mc-val-row">
+              <span class="status-pill status-ready" id="market-risk-pill">
+                <span class="status-dot"></span>
+                <span id="market-risk">流动性正常</span>
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 
-      <!-- Dual-Sided Position & Quote Panels -->
-      <div class="dual-grid">
-        <!-- UP Panel -->
-        <section class="panel quote-card side-up" id="card-up">
-          <div class="quote-card-head">
-            <div class="side-badge up">UP 买涨</div>
-            <span class="side-settle-pnl" id="pnl-forecast-up">胜出预期: --</span>
-          </div>
-
-          <div class="position-box lead">
-            <div class="pos-item">
-              <span class="pos-label">已成交持仓</span>
-              <strong class="pos-val" id="up-pos-shares">0 股</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">持仓均价</span>
-              <strong class="pos-val" id="up-pos-avg">--</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">累计成本</span>
-              <strong class="pos-val" id="up-pos-cost">$0.00</strong>
-            </div>
-          </div>
-
-          <div class="quote-levels compact">
-            <span class="level-inline">
-              <span class="level-label">买一</span>
-              <strong class="level-price-sm" id="up-bid-px">--</strong>
-            </span>
-            <span class="level-inline">
-              <span class="level-label">卖一</span>
-              <strong class="level-price-sm" id="up-ask-px">--</strong>
-            </span>
-            <small class="level-status" id="up-book-status">--</small>
-          </div>
-        </section>
-
-        <!-- DOWN Panel -->
-        <section class="panel quote-card side-down" id="card-down">
-          <div class="quote-card-head">
-            <div class="side-badge down">DOWN 买跌</div>
-            <span class="side-settle-pnl" id="pnl-forecast-down">胜出预期: --</span>
-          </div>
-
-          <div class="position-box lead">
-            <div class="pos-item">
-              <span class="pos-label">已成交持仓</span>
-              <strong class="pos-val" id="down-pos-shares">0 股</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">持仓均价</span>
-              <strong class="pos-val" id="down-pos-avg">--</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">累计成本</span>
-              <strong class="pos-val" id="down-pos-cost">$0.00</strong>
-            </div>
-          </div>
-
-          <div class="quote-levels compact">
-            <span class="level-inline">
-              <span class="level-label">买一</span>
-              <strong class="level-price-sm" id="down-bid-px">--</strong>
-            </span>
-            <span class="level-inline">
-              <span class="level-label">卖一</span>
-              <strong class="level-price-sm" id="down-ask-px">--</strong>
-            </span>
-            <small class="level-status" id="down-book-status">--</small>
-          </div>
-        </section>
-      </div>
-
       <!-- Live Price Fluctuation & Strategy Arbitration Chart Panel -->
       <section class="panel live-chart-panel" aria-label="本轮价格走势与策略仲裁">
-        <div class="chart-panel-head">
-          <div class="chart-title-group">
-            <div class="chart-title-row">
-              <span class="chart-main-title">本轮行情波动与胜率走势 (BTC/USD)</span>
-              <span class="chart-sub-tag" id="chart-elapsed-badge">第 0 秒 / 300 秒</span>
-              <div class="chart-mode-toggle" id="chart-mode-toggle">
+        <div class="chart-header">
+          <div class="chart-header-top">
+            <div class="chart-title-block">
+              <h2 class="chart-main-title">本轮秒级行情波动与胜率定价轨迹 (BTC/USD)</h2>
+              <div class="chart-legend" id="chart-legend">
+                <span class="legend-chip" id="legend-poly" title="Chainlink 60 秒 TWAP，本图唯一价格序列">
+                  <span class="legend-line twap-sw"></span>Chainlink 60s TWAP
+                </span>
+                <span class="legend-chip" id="legend-model" title="模型计算的 UP 公允胜率">
+                  <span class="legend-line model-sw"></span>模型公允胜率 P*
+                </span>
+              </div>
+            </div>
+
+            <div class="chart-controls">
+              <div class="chart-mode-toggle" id="chart-mode-toggle" role="group" aria-label="图表视图切换">
                 <button type="button" class="mode-btn active" data-mode="dual">双轨联动</button>
                 <button type="button" class="mode-btn" data-mode="price">价格走势</button>
                 <button type="button" class="mode-btn" data-mode="prob">胜率走势</button>
               </div>
             </div>
-            <div class="chart-stats-row">
-              <div class="stat-group">
-                <span class="stat-group-label">基准</span>
-                <span class="chart-stat-item">Poly <strong class="poly-tag" id="chart-stat-open">$0.00</strong></span>
-                <span class="chart-stat-item">币安 <strong id="chart-stat-binance-open">$0.00</strong></span>
-              </div>
-              <div class="stat-group">
-                <span class="stat-group-label">现值</span>
-                <span class="chart-stat-item">Poly <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
-                <span class="chart-stat-item">基差 <strong class="basis-tag" id="chart-stat-basis">±$0.00</strong></span>
-                <span class="chart-stat-item">最高 <strong class="up" id="chart-stat-high">$0.00</strong></span>
-                <span class="chart-stat-item">最低 <strong class="down" id="chart-stat-low">$0.00</strong></span>
-              </div>
-              <div class="stat-group">
-                <span class="stat-group-label">概率</span>
-                <span class="chart-stat-item">盘口 <strong class="prob-tag-up" id="chart-stat-prob-up">看涨 --%</strong></span>
-                <span class="chart-stat-item">模型 <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
-                <span class="chart-stat-item">价差 <strong id="chart-stat-edge">+0.0%</strong></span>
-              </div>
-            </div>
           </div>
-          <div class="chart-status-group">
-            <span class="order-pill" id="working-order-pill">无在途挂单</span>
+
+          <!-- De-duplicated Structured Readout Bar + Strategy Decision Arbitration Banner -->
+          <div class="chart-subbar">
+            <div class="chart-stats-row">
+              <span class="chart-stat-item" hidden><strong id="chart-stat-open">$0.00</strong><strong id="chart-stat-spot">$0.00</strong></span>
+              <span class="chart-stat-item">60s TWAP <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
+              <span class="stat-sep" aria-hidden="true"></span>
+              <span class="chart-stat-item">最高 <strong class="up" id="chart-stat-high">$0.00</strong></span>
+              <span class="chart-stat-item">最低 <strong class="down" id="chart-stat-low">$0.00</strong></span>
+              <span class="chart-stat-item">振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
+              <span class="stat-sep" aria-hidden="true"></span>
+              <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
+              <span class="chart-stat-item">模型 P* <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
+              <span class="chart-stat-item">定价边际 <strong id="chart-stat-edge">+0.0%</strong></span>
+            </div>
+
             <div class="decision-badge" id="decision-badge">
               <span class="decision-dot"></span>
               <span id="decision-reason">策略评估中...</span>
@@ -442,34 +433,119 @@
           </div>
         </div>
 
-        <div class="chart-legend" id="chart-legend">
-          <span class="legend-chip" id="legend-poly"><span class="legend-sw" style="background:#0ea5e9"></span>Polymarket 官方 / 盘口</span>
-          <span class="legend-chip" id="legend-binance"><span class="legend-sw legend-sw-dir"></span>币安现货 (涨绿 / 跌红)</span>
-          <span class="legend-chip" id="legend-model"><span class="legend-sw" style="background:#f59e0b"></span>模型公允胜率</span>
-          <span class="legend-hint">悬停图表查看任意秒取值</span>
-        </div>
-
         <div class="canvas-container">
-          <canvas id="live-price-canvas" height="400"></canvas>
+          <canvas id="live-price-canvas" height="390"></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
         </div>
       </section>
 
-      <!-- Live Order Feed -->
-      <section class="panel orders-workspace">
-        <div class="workspace-head">
-          <h2>本轮挂单与撮合流水</h2>
-          <span class="order-count-pill" id="live-action-count">0 笔动作</span>
-        </div>
+      <!-- Dual-Sided Position & Orderbook Panels -->
+      <div class="dual-grid">
+        <!-- UP Panel -->
+        <section class="panel quote-card side-up" id="card-up">
+          <div class="quote-card-head">
+            <div class="side-badge up">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
+              <span>UP 看涨头寸与盘口</span>
+            </div>
+            <span class="side-settle-pnl" id="pnl-forecast-up">胜出预期: --</span>
+          </div>
 
-        <!-- Live Active Working Orders Queue Dashboard -->
-        <div id="live-working-orders-box" class="working-orders-box">
-          <div class="queue-status-card idle">
-            <span class="queue-status-dot"></span>
-            <span class="queue-status-title">当前无在途排队挂单</span>
-            <span class="queue-status-desc">等待策略判定或持仓中</span>
+          <div class="position-box">
+            <div class="pos-item">
+              <span class="pos-label">已成交持仓</span>
+              <strong class="pos-val" id="up-pos-shares">0.0 股</strong>
+            </div>
+            <div class="pos-item">
+              <span class="pos-label">持仓成交均价</span>
+              <strong class="pos-val" id="up-pos-avg">--</strong>
+            </div>
+            <div class="pos-item">
+              <span class="pos-label">累计投入成本</span>
+              <strong class="pos-val" id="up-pos-cost">$0.00</strong>
+            </div>
+          </div>
+
+          <div class="quote-book-block">
+            <div class="quote-levels-grid">
+              <div class="level-box bid-box">
+                <span class="level-label">买一报价 (Best Bid)</span>
+                <strong class="level-price-sm up" id="up-bid-px">--</strong>
+              </div>
+              <div class="level-box ask-box">
+                <span class="level-label">卖一报价 (Best Ask)</span>
+                <strong class="level-price-sm" id="up-ask-px">--</strong>
+              </div>
+            </div>
+            <div class="quote-depth-row">
+              <div class="level-bar-wrap" aria-hidden="true">
+                <div class="level-bar-fill up-bar" id="up-prob-bar" style="width: 50%"></div>
+              </div>
+              <small class="level-status" id="up-book-status">--</small>
+            </div>
+          </div>
+        </section>
+
+        <!-- DOWN Panel -->
+        <section class="panel quote-card side-down" id="card-down">
+          <div class="quote-card-head">
+            <div class="side-badge down">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
+              <span>DOWN 看跌头寸与盘口</span>
+            </div>
+            <span class="side-settle-pnl" id="pnl-forecast-down">胜出预期: --</span>
+          </div>
+
+          <div class="position-box">
+            <div class="pos-item">
+              <span class="pos-label">已成交持仓</span>
+              <strong class="pos-val" id="down-pos-shares">0.0 股</strong>
+            </div>
+            <div class="pos-item">
+              <span class="pos-label">持仓成交均价</span>
+              <strong class="pos-val" id="down-pos-avg">--</strong>
+            </div>
+            <div class="pos-item">
+              <span class="pos-label">累计投入成本</span>
+              <strong class="pos-val" id="down-pos-cost">$0.00</strong>
+            </div>
+          </div>
+
+          <div class="quote-book-block">
+            <div class="quote-levels-grid">
+              <div class="level-box bid-box">
+                <span class="level-label">买一报价 (Best Bid)</span>
+                <strong class="level-price-sm down" id="down-bid-px">--</strong>
+              </div>
+              <div class="level-box ask-box">
+                <span class="level-label">卖一报价 (Best Ask)</span>
+                <strong class="level-price-sm" id="down-ask-px">--</strong>
+              </div>
+            </div>
+            <div class="quote-depth-row">
+              <div class="level-bar-wrap" aria-hidden="true">
+                <div class="level-bar-fill down-bar" id="down-prob-bar" style="width: 50%"></div>
+              </div>
+              <small class="level-status" id="down-book-status">--</small>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Live Order Queue & Execution Feed -->
+      <section class="panel section-panel orders-workspace">
+        <div class="section-head">
+          <div class="section-title-group">
+            <h2>本轮在途挂单与撮合流水</h2>
+            <p class="section-subtitle">实时展示 FIFO 撮合队列排队进度与本窗口内全部报单、撤单及成交动作</p>
+          </div>
+          <div class="workspace-head-actions">
+            <span class="order-pill" id="working-order-pill">当前无在途排队挂单</span>
+            <span class="badge-pill" id="live-action-count">0 笔动作</span>
           </div>
         </div>
+
+        <div id="live-working-orders-box" class="working-orders-box" hidden></div>
 
         <ol class="action-feed" id="live-action-feed">
           <li class="action-empty">等待撮合引擎输出...</li>
@@ -477,27 +553,41 @@
       </section>
     </section>
 
-    <!-- VIEW 3: HISTORY RECORDS -->
+    <!-- ====================================================================
+         VIEW 3: HISTORY LEDGER (场次记录)
+         ==================================================================== -->
     <section class="view-panel" id="view-history" hidden>
-      <section class="panel history-table-card">
-        <div class="workspace-head">
-          <h2>5 分钟轮次历史账本</h2>
-          <span class="order-count-pill" id="history-count">0 场记录</span>
+      <section class="panel section-panel table-panel history-table-card">
+        <div class="section-head">
+          <div class="section-title-group">
+            <h2>5 分钟轮次历史结算账本</h2>
+            <p class="section-subtitle">完整记录每一轮交割基准价、多空持仓配比、兑现收入及净损益，点击任意场次可调阅秒级复盘图与操作归因表</p>
+          </div>
+          <div class="history-controls">
+            <div class="filter-group" id="history-filter-group" role="group" aria-label="场次筛选">
+              <button type="button" class="filter-btn active" data-filter="all">全部场次</button>
+              <button type="button" class="filter-btn" data-filter="traded">仅已成交</button>
+              <button type="button" class="filter-btn" data-filter="win">盈利</button>
+              <button type="button" class="filter-btn" data-filter="loss">亏损</button>
+            </div>
+            <span class="badge-pill" id="history-count">0 场记录</span>
+          </div>
         </div>
+
         <div class="table-wrap">
-          <table class="history-table">
+          <table class="data-table">
             <thead>
               <tr>
                 <th>北京时间轮次</th>
-                <th>方向</th>
-                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开 → 收（涨跌）</th>
+                <th>交割方向</th>
+                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开盘 → 收盘 (涨跌)</th>
                 <th class="num" title="看涨（UP）持仓股数">UP 股</th>
                 <th class="num" title="看跌（DOWN）持仓股数">DN 股</th>
                 <th class="num">总成本</th>
-                <th class="num">兑现</th>
+                <th class="num">兑现收入</th>
                 <th class="num">净收益</th>
                 <th class="num" title="该窗口成交笔数">笔数</th>
-                <th class="num" title="为对冲裸头寸支付的保险成本">保险</th>
+                <th class="num" title="为对冲裸头寸支付的保险成本">保险成本</th>
               </tr>
             </thead>
             <tbody id="history-tbody">
@@ -509,25 +599,30 @@
     </section>
   </main>
 
-  <!-- Round Detail Review Modal Dialog -->
+  <!-- ======================================================================
+       ROUND DETAIL REVIEW MODAL (5分钟轮次全景复盘弹窗)
+       ====================================================================== -->
   <div id="round-detail-modal" class="modal-backdrop" hidden>
-    <div class="modal-dialog">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-round-title">
       <div class="modal-header">
         <div class="modal-header-left">
           <h2 class="modal-title" id="modal-round-title">5 分钟轮次复盘详情</h2>
           <span class="badge-pill" id="modal-round-slug">--</span>
-          <span class="winner-pill" id="modal-round-winner">--</span>
+          <span class="winner-pill pending" id="modal-round-winner">--</span>
         </div>
-        <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)">✕</button>
+        <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
       </div>
       <div class="modal-body" id="modal-round-body">
-        <div style="text-align:center; padding:36px; color:#6b7280;">
-          ⏳ 正在加载 5 分钟微观行情与交易复盘数据...
-        </div>
+        <div class="action-empty">正在加载 5 分钟微观行情与交易复盘数据...</div>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <!-- Interactive Toast Feedback -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script src="/static/app.js?v=3.2.2"></script>
 </body>
 </html>
