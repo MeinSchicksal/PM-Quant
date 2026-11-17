@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.28">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.31">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -19,7 +19,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v2.3</span>
+      <span class="brand-version" id="page-version">v2.4</span>
     </div>
 
     <div class="sidebar-top">
@@ -380,13 +380,13 @@
         <div class="chart-header">
           <div class="chart-header-top">
             <div class="chart-title-block">
-              <h2 class="chart-main-title">本轮秒级行情波动与胜率定价轨迹 (BTC/USD)</h2>
+              <h2 class="chart-main-title">本轮秒级行情波动与盘口隐含概率轨迹 (BTC/USD)</h2>
               <div class="chart-legend" id="chart-legend">
-                <span class="legend-chip" id="legend-poly" title="Chainlink 60 秒 TWAP，本图唯一价格序列">
+                <span class="legend-chip" id="legend-poly" title="Chainlink 60 秒 TWAP，本图价格轨迹序列">
                   <span class="legend-line twap-sw"></span>Chainlink 60s TWAP
                 </span>
-                <span class="legend-chip" id="legend-model" title="模型计算的 UP 公允胜率">
-                  <span class="legend-line model-sw"></span>模型公允胜率 P*
+                <span class="legend-chip" id="legend-prob" title="Polymarket 订单簿 UP 买卖中间价隐含概率">
+                  <span class="legend-line prob-sw"></span>UP 市场概率 (%)
                 </span>
               </div>
             </div>
@@ -395,7 +395,7 @@
               <div class="chart-mode-toggle" id="chart-mode-toggle" role="group" aria-label="图表视图切换">
                 <button type="button" class="mode-btn active" data-mode="dual">双轨联动</button>
                 <button type="button" class="mode-btn" data-mode="price">价格走势</button>
-                <button type="button" class="mode-btn" data-mode="prob">胜率走势</button>
+                <button type="button" class="mode-btn" data-mode="prob">盘口隐含</button>
               </div>
             </div>
           </div>
@@ -411,14 +411,12 @@
               <span class="chart-stat-item">振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
               <span class="stat-sep" aria-hidden="true"></span>
               <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
-              <span class="chart-stat-item">模型 P* <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
-              <span class="chart-stat-item">定价边际 <strong id="chart-stat-edge">+0.0%</strong></span>
             </div>
           </div>
         </div>
 
         <div class="canvas-container">
-          <canvas id="live-price-canvas" height="390"></canvas>
+          <canvas id="live-price-canvas" height="500"></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
         </div>
       </section>
@@ -453,12 +451,18 @@
           <div class="quote-book-block">
             <div class="quote-levels-grid">
               <div class="level-box bid-box">
-                <span class="level-label">买一报价 (Best Bid)</span>
-                <strong class="level-price-sm up" id="up-bid-px">--</strong>
+                <span class="level-label">买一 (Bid)</span>
+                <span class="level-val-pair">
+                  <strong class="level-price-sm up" id="up-bid-px">--</strong>
+                  <small class="level-size-tag" id="up-bid-sz">-- 股</small>
+                </span>
               </div>
               <div class="level-box ask-box">
-                <span class="level-label">卖一报价 (Best Ask)</span>
-                <strong class="level-price-sm" id="up-ask-px">--</strong>
+                <span class="level-label">卖一 (Ask)</span>
+                <span class="level-val-pair">
+                  <strong class="level-price-sm" id="up-ask-px">--</strong>
+                  <small class="level-size-tag" id="up-ask-sz">-- 股</small>
+                </span>
               </div>
             </div>
             <div class="quote-depth-row">
@@ -498,12 +502,18 @@
           <div class="quote-book-block">
             <div class="quote-levels-grid">
               <div class="level-box bid-box">
-                <span class="level-label">买一报价 (Best Bid)</span>
-                <strong class="level-price-sm down" id="down-bid-px">--</strong>
+                <span class="level-label">买一 (Bid)</span>
+                <span class="level-val-pair">
+                  <strong class="level-price-sm down" id="down-bid-px">--</strong>
+                  <small class="level-size-tag" id="down-bid-sz">-- 股</small>
+                </span>
               </div>
               <div class="level-box ask-box">
-                <span class="level-label">卖一报价 (Best Ask)</span>
-                <strong class="level-price-sm" id="down-ask-px">--</strong>
+                <span class="level-label">卖一 (Ask)</span>
+                <span class="level-val-pair">
+                  <strong class="level-price-sm" id="down-ask-px">--</strong>
+                  <small class="level-size-tag" id="down-ask-sz">-- 股</small>
+                </span>
               </div>
             </div>
             <div class="quote-depth-row">
@@ -775,6 +785,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.26"></script>
+  <script src="/static/app.js?v=3.2.32"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-# PM-Quant 总体设计与工程规划 (`v2.2`)
+# PM-Quant 总体设计与工程规划 (`v2.3`)
 
 ## 1. 总体目标
 
@@ -10,7 +10,7 @@
 
 ## 2. 版本与数据治理
 
-采用语义化版本 `v<Major>.<Minor>`。主版本（如 `v2.0`）对应核心架构升级、概率/效用模型重构或从纸面切换至实盘引擎；次版本（如 `v2.1`、`v2.2`）对应策略参数调整、撮合队列校准与报价阈值优化。每次变更策略行为、撮合规则或核心参数，必须递增版本号并生成独立账本 `data/2_ledgers/<VERSION>/`，严禁混写或污染历史成绩。执行 `python main.py seal` 自动将该版本的 `config.py` 与 `core/` 打包为 `code_snapshot.zip`，并生成含参数快照的 `manifest.json`。
+采用语义化版本 `v<Major>.<Minor>`。主版本（如 `v2.0`）对应核心架构升级、概率/效用模型重构或从纸面切换至实盘引擎；次版本（如 `v2.1`、`v2.2`、`v2.3`）对应策略参数调整、撮合队列校准与报价阈值优化。每次变更策略行为、撮合规则或核心参数，必须递增版本号并生成独立账本 `data/2_ledgers/<VERSION>/`，严禁混写或污染历史成绩。执行 `python main.py seal` 自动将该版本的 `config.py` 与 `core/` 打包为 `code_snapshot.zip`，并生成含参数快照的 `manifest.json`。
 
 数据按四层冷热分离存放于 `data/`：`1_market/` 是只读、只追加的原始市场录制资产（`events/` 盘口与成交流、`oracle/` Chainlink/Binance 秒级参考价与窗口锚定开盘价、`settlements/` Gamma/UMA 官方结算真值）；`2_ledgers/` 是按版本隔离的运行账本（`live.json` 当前窗口实时状态、`summary.jsonl` 已结算窗口单行汇总、`windows/*.json.gz` 单窗完整轨迹归档、`manifest.json` 与 `code_snapshot.zip` 封存元数据）；`3_reports/` 是研究层校准与压力测试报告；`4_runtime/` 是进程 PID 与运行日志。
 

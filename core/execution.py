@@ -54,12 +54,18 @@ def plan_order_actions(
     working_orders: List[Order],
     decision: Decision,
     now: float,
-    max_queue_wait_s: float = 15.0
+    max_queue_wait_s: float = 15.0,
+    preferred_side: Optional[Side] = None,
+    book_up: Optional[object] = None,
+    book_down: Optional[object] = None,
+    min_requote_age_s: float = 2.5,
+    bid_retreat_ticks: float = 0.029,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
-    Applies quoting hysteresis and avoids canceling resting safe quotes on
-    transient 1-second 'no edge' blips unless toxic shock or tail freeze occurs.
+    Applies quoting hysteresis and protects resting safe quotes from 1-second
+    noise, while immediately pulling quotes if toxic shock, tail freeze,
+    objective direction reversal, or >= 3-tick bid retreat occurs.
     
     Returns:
         (orders_to_cancel, action_to_execute)
@@ -74,12 +80,22 @@ def plan_order_actions(
         
         for o in working_orders:
             if o.cancel_at is None and o.remaining > 1e-6:
-                # Cancel immediately if urgent, or if order has rested past max queue wait time
                 order_age = now - (o.placed_at or now)
                 if is_urgent_cancel:
                     o.cancel_reason = "急剧变盘/紧急避险撤单"
                     to_cancel.append(o)
-                elif order_age >= max_queue_wait_s:
+                    continue
+                if preferred_side is not None and o.side != preferred_side:
+                    o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
+                    to_cancel.append(o)
+                    continue
+                tb = book_up if o.side == "Up" else book_down
+                tb_bid = getattr(tb, "best_bid", None) if tb is not None else None
+                if order_age >= 1.0 and tb_bid is not None and (o.price - tb_bid) >= bid_retreat_ticks:
+                    o.cancel_reason = f"盘口买一退守撤单(挂单=${o.price:.2f}, 现买一=${tb_bid:.2f})"
+                    to_cancel.append(o)
+                    continue
+                if order_age >= max_queue_wait_s:
                     o.cancel_reason = f"排队超时撤单(已排队{order_age:.1f}s)"
                     to_cancel.append(o)
         return to_cancel, None
@@ -101,7 +117,11 @@ def plan_order_actions(
         reusable_order = None
         for o in working_orders:
             if o.cancel_at is None and o.remaining > 1e-6:
+                order_age = now - (o.placed_at or now)
                 if not is_order_diff_significant(o, target_side, target_px, target_sz):
+                    reusable_order = o
+                elif o.side == target_side and abs(o.price - target_px) < 0.035 and order_age < min_requote_age_s:
+                    # Protect resting quote from <3-tick ping-pong within cooldown window
                     reusable_order = o
                 else:
                     o.cancel_reason = f"盘口调价重挂 (${o.price:.2f} → ${target_px:.2f})"

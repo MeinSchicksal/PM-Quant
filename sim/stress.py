@@ -45,8 +45,11 @@ from core.types import OrderBook, SpotState
 from core.estimator import (
     calculate_dynamic_realized_vol,
     calculate_adaptive_spread_params,
-    normal_cdf,
 )
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 from core.execution import taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from runtime.runner import PaperRunner
@@ -275,7 +278,7 @@ class MarketSim:
         mm, rng = self.mm, self.rng
         tau = WINDOW_S - t
         sig = mm.sigma_bps / 1e4 * math.sqrt(max(tau, 1) / WINDOW_S)
-        fair = normal_cdf((mkt_x / 1e4) / sig)
+        fair = _normal_cdf((mkt_x / 1e4) / sig)
         self.noise = mm.noise_ar * self.noise + rng.gauss(0.0, mm.noise_sd)
         mid = min(0.98, max(0.02, fair + self.noise))
         self.mid_hist.append(mid)

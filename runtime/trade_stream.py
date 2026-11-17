@@ -30,8 +30,9 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 class TradeStreamClient:
-    def __init__(self, record_raw: bool = True):
+    def __init__(self, record_raw: bool = True, proxy: Optional[str] = None):
         self.record_raw = record_raw
+        self.proxy = proxy
         self.running = False
         self.connected = False
         self._thread: Optional[threading.Thread] = None
@@ -49,6 +50,9 @@ class TradeStreamClient:
 
         self.last_trade_t = 0.0
         self.trade_count = 0
+        self.reconnect_count = 0
+        self.last_error = ""
+        self._last_err_log_t = 0.0
         self._dropped_unattributed = 0
 
     def set_active_targets(self, slugs: List[str], token_ids: List[str] = None):
@@ -112,11 +116,16 @@ class TradeStreamClient:
         import websockets
         while self.running:
             try:
+                connect_kwargs = {
+                    "ping_interval": 15,
+                    "ping_timeout": 10,
+                    "open_timeout": 5.0,
+                }
+                if self.proxy:
+                    connect_kwargs["proxy"] = self.proxy
                 async with websockets.connect(
                     WS_URL,
-                    ping_interval=15,
-                    ping_timeout=10,
-                    open_timeout=5.0
+                    **connect_kwargs
                 ) as ws:
                     self.connected = True
                     # Subscribe to global trades activity stream
@@ -146,8 +155,14 @@ class TradeStreamClient:
 
                         self._ingest(payload)
 
-            except Exception:
+            except Exception as exc:
                 self.connected = False
+                self.reconnect_count += 1
+                self.last_error = str(exc)
+                now_t = time.time()
+                if now_t - self._last_err_log_t >= 30.0:
+                    self._last_err_log_t = now_t
+                    print(f"\n[TradeStream] WebSocket disconnected ({exc}); reconnecting...")
                 if self.running:
                     await asyncio.sleep(2.0)
 

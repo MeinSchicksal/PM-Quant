@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 import config
 from core.types import OrderBook, Position, SpotState
-from core.estimator import estimate_fair_prob
+from core.estimator import compute_objective_lead
 from core.execution import quantize_lots
 
 
@@ -86,19 +86,18 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(decision.action, "wait")
         self.assertIn("Max position reached", decision.reason)
 
-    def test_probability_monotonicity_and_bounds(self):
-        """Invariant 5: Fair probability is strictly in [0.01, 0.99] and monotonic with spot."""
+    def test_objective_lead_monotonicity_and_zero_symmetry(self):
+        """Invariant 5: Pure arithmetic lead is zero at strike and monotonic with spot."""
         open_px = 75000.0
-        p_equal = estimate_fair_prob(open_px, open_px, tau_s=150.0, vol_bps=15.0)
-        self.assertAlmostEqual(p_equal, 0.50, places=2)
-        
-        p_higher = estimate_fair_prob(open_px + 50.0, open_px, tau_s=150.0, vol_bps=15.0)
-        p_lower = estimate_fair_prob(open_px - 50.0, open_px, tau_s=150.0, vol_bps=15.0)
-        
-        self.assertGreater(p_higher, 0.50)
-        self.assertLess(p_lower, 0.50)
-        self.assertTrue(0.01 <= p_lower <= 0.99)
-        self.assertTrue(0.01 <= p_higher <= 0.99)
+        lead_eq, delta_eq, _ = compute_objective_lead(SpotState(1000.0, open_px, open_px), open_px, tau_s=150.0)
+        self.assertEqual(lead_eq, 0.0)
+        self.assertEqual(delta_eq, 0.0)
+
+        lead_hi, _, _ = compute_objective_lead(SpotState(1000.0, open_px + 50.0, open_px), open_px, tau_s=150.0)
+        lead_lo, _, _ = compute_objective_lead(SpotState(1000.0, open_px - 50.0, open_px), open_px, tau_s=150.0)
+        self.assertGreater(lead_hi, 0.0)
+        self.assertLess(lead_lo, 0.0)
+        self.assertAlmostEqual(lead_hi, -lead_lo, places=3)
 
     def test_quote_price_never_zero_or_crosses_book(self):
         """Invariant 6: Passive quotes must strictly satisfy 0.02 <= price <= 0.98 and never cross opposite ask."""
@@ -255,14 +254,13 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(last_rec["winner"], "Up")
         self.assertEqual(last_rec["proceeds"], 5.00)
 
-    def test_consistent_basis_fair_probability_in_plan_decision(self):
+    def test_consistent_basis_lead_in_plan_decision(self):
         """Invariant 11: plan_decision must maintain consistent basis and avoid exchange spread distortion."""
         from core.policy import plan_decision
         import config
 
-        # Scenario: Binance spot is $75,200 (Binance open is $75,200, return = 0 bps)
-        # Polymarket open is $75,000 (a $200 basis difference)
-        # Polymarket live TWAP is $75,000 (Poly return = 0 bps)
+        # Binance spot is $75,200 (Binance open is $75,200 -> 0 bps), Poly open is $75,000, basis_ema is $200.
+        # cl_est = 75200 - 200 = 75000 == Poly open -> 0.0 bps lead -> must WAIT!
         pos_up = Position(0.0, 0.0)
         pos_down = Position(0.0, 0.0)
         book_up = OrderBook(bids=[(0.48, 10.0)], asks=[(0.52, 10.0)])
@@ -273,14 +271,10 @@ class TestMathematicalInvariants(unittest.TestCase):
             price=75200.0,
             open_price=75000.0,
             binance_open_price=75200.0,
-            poly_price=75000.0,
+            basis_ema=200.0,
             realized_vol_bps=15.0
         )
-        # Without p_fair explicitly passed, plan_decision must detect poly_price vs open_price (75000 / 75000 = 1.0 -> p_fair = 0.50)
-        # If it incorrectly mixed spot.price (75200) with open_price (75000), p_fair would be > 0.80 and bias decisions.
         dec = plan_decision(pos_up, pos_down, book_up, book_down, spot, tau_s=200.0, params=config.PARAMS)
-        # Consistent basis (poly 75000 / open 75000) -> p_fair = 0.50; ask 0.52 is
-        # above the $0.45 MWDE discount cap, so the engine stands by.
         self.assertEqual(dec.action, "wait")
 
     def test_drift_snr_and_micro_regime_classification(self):
@@ -372,7 +366,7 @@ class TestMathematicalInvariants(unittest.TestCase):
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
         
         # entries_count = 1 (an entry already filled this round)
-        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, p_fair=0.50, entries_count=1)
+        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, entries_count=1)
         self.assertEqual(dec_locked.action, "wait")
         self.assertIn("Max entries per window reached", dec_locked.reason)
 

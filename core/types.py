@@ -62,6 +62,9 @@ class SpotState:
     spot_source: str = "binance"
     is_stale: bool = False
     velocity_bps: float = 0.0
+    ret_change_15s_bps: float = 0.0     # 15-second spot return momentum (bps)
+    up_mid_change_15s: float = 0.0      # 15-second Up orderbook mid momentum
+    min_opp_ask_seen: Optional[float] = None  # Lowest opposite ask observed since Leg-1 fill
 
 
 @dataclass

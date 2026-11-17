@@ -75,7 +75,7 @@ class TestRiskEnvelope(unittest.TestCase):
         dec = plan_decision(
             Position(0, 0), Position(0, 0),
             _book(0.40, 0.45), _book(0.40, 0.50),
-            spot, 60.0, params, p_fair=0.95
+            spot, 60.0, params
         )
         self.assertEqual(dec.action, "wait")
         self.assertIn("Insufficient capital", dec.reason)
@@ -87,7 +87,7 @@ class TestRiskEnvelope(unittest.TestCase):
         dec = plan_decision(
             Position(0, 0), Position(0, 0),
             _book(0.40, 0.45), _book(0.40, 0.50),
-            spot, 60.0, params, p_fair=0.95
+            spot, 60.0, params
         )
         self.assertEqual(dec.action, "wait")
         self.assertIn("单窗成本包络", dec.reason)
@@ -136,7 +136,7 @@ class TestPriceSeries(unittest.TestCase):
         last = r.price_history[-1]
         self.assertIsNone(last["poly_price"])
         self.assertTrue(last["poly_stale"])
-        self.assertGreater(r.last_prob_up, 0.5)
+        self.assertNotIn("prob_up", last)
 
     def test_open_price_calibration_keeps_series_consistent(self):
         r = _runner()
@@ -166,20 +166,20 @@ class TestPolicyDeadBranches(unittest.TestCase):
                          poly_price=100100.0)
         dec = plan_decision(
             Position(0, 0), Position(0, 0), cu, cd, spot, 200.0,
-            dict(config.PARAMS, PREV_ROUND_ABS_MOVE=0.0),
-            p_fair=0.60, quote_attempts=1
+            dict(config.PARAMS, PREV_ROUND_ABS_MOVE=0.0, MWDE_TAKER_PAIR_COST=1.02),
+            quote_attempts=1
         )
         self.assertEqual(dec.action, "taker_buy")
 
     def test_allow_taker_unwind_false_really_disables_salvage(self):
         params = dict(config.PARAMS, ALLOW_TAKER_UNWIND=False,
-                      DEFENSIVE_SALVAGE_ENABLE=True)
-        spot = SpotState(timestamp=1.0, price=100000.0, open_price=100000.0,
-                         poly_price=100000.0)
+                      DEFENSIVE_SALVAGE_ENABLE=True, ENABLE_ARBITRAGE_HEDGE=False)
+        spot = SpotState(timestamp=1.0, price=99900.0, open_price=100000.0,
+                         poly_price=99900.0)
         dec = plan_decision(
             Position(5.0, 2.25), Position(0, 0),
             _book(0.10, 0.99), _book(0.55, 0.99),
-            spot, 25.0, params, p_fair=0.02
+            spot, 25.0, params
         )
         self.assertNotEqual(dec.action, "taker_unwind")
 
@@ -189,20 +189,20 @@ class TestPolicyDeadBranches(unittest.TestCase):
         dec = plan_decision(
             Position(5.0, 2.25), Position(0, 0),
             _book(0.40, 0.45), _book(0.40, 0.40),
-            spot, 5.0, dict(config.PARAMS), p_fair=0.99
+            spot, 5.0, dict(config.PARAMS)
         )
         self.assertEqual(dec.action, "wait")
         self.assertIn("Tail freeze", dec.reason)
 
     def test_hedge_lock_threshold_is_not_silently_overridden(self):
-        params = dict(config.PARAMS, LWAA_ENABLE_ARBITRAGE_HEDGE=False,
-                      MWDE_HEDGE_LOCK_COST=0.85)
+        params = dict(config.PARAMS, ENABLE_ARBITRAGE_HEDGE=False,
+                      ARBITRAGE_HEDGE_MAX_PAIR_COST=0.85)
         spot = SpotState(timestamp=1.0, price=100000.0, open_price=100000.0,
                          poly_price=100000.0)
         dec = plan_decision(
             Position(5.0, 2.25), Position(0, 0),
             _book(0.40, 0.99), _book(0.40, 0.44),
-            spot, 100.0, params, p_fair=0.50
+            spot, 100.0, params
         )
         self.assertNotEqual(dec.action, "taker_hedge")
 

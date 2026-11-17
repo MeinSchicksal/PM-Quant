@@ -1,65 +1,23 @@
-"""Mathematical Estimation & Microstructure Metrics.
+"""Objective Microstructure Metrics & Physical Lead Arithmetic.
 
-Handles continuous settlement-probability estimation, EWMA realized volatility,
-volatility-adaptive spread parameters and drift signal-to-noise statistics.
+Computes realized volatility (EWMA), drift signal-to-noise ratio (SNR),
+and pure arithmetic spot/60s-TWAP displacement from window strike.
+No parametric probability estimation (no Black-Scholes / normal CDF) is used.
 """
 import math
 from typing import Tuple, List, Optional
 
 
-def normal_cdf(x: float) -> float:
-    """Standard Normal Cumulative Distribution Function using error function."""
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+def compute_objective_lead(spot, open_px: float, tau_s: float) -> Tuple[float, float, float]:
+    """Compute pure arithmetic lead (bps, USD, effective price) relative to strike.
 
+    Uses basis-adjusted Chainlink spot estimate when official strike and basis
+    are calibrated, and incorporates the already-locked 60s TWAP average during
+    the final 60 seconds. Falls back strictly to the single Binance chain when
+    basis calibration is unavailable.
 
-def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: float) -> float:
-    """Estimate risk-neutral settlement probability p_fair for Up winning (S_T > S_0).
-    
-    Args:
-        spot: Current BTC/USD spot or oracle reference price.
-        open_price: Price of BTC/USD at window opening (strike price).
-        tau_s: Seconds remaining until settlement (tau = T - t).
-        vol_bps: Realized volatility in basis points per 5-minute window.
-    """
-    if tau_s <= 0.5:
-        # Near instant settlement: binary step with small slack
-        # Match the settlement rule in runner.close_window / crypto-price API:
-        # a tie at the strike resolves Up.
-        return 0.99 if spot >= open_price else 0.01
-    
-    if open_price <= 0 or spot <= 0:
-        return 0.50
-
-    # Annualized volatility converted to tau scaling (5-min base: 300s)
-    # sigma_tau = (vol_bps / 10000.0) * sqrt(tau / 300)
-    sigma_tau = max(1e-5, (vol_bps / 10000.0) * math.sqrt(tau_s / 300.0))
-    d = math.log(spot / open_price) / sigma_tau
-    prob = normal_cdf(d)
-    
-    # Mathematical realistic boundary: prediction markets are never 0% or 100% until closed
-    return max(0.01, min(0.99, round(prob, 4)))
-
-
-def estimate_p_fair(
-    spot,
-    open_px: float,
-    tau_s: float,
-    vol_bps: float,
-    poly_price: Optional[float] = None
-) -> float:
-    """Estimate probability that Chainlink 60s TWAP settles >= window strike `open_px`.
-
-    v2.3 Architecture (Zero Lag-Mixing + Asian TWAP):
-    - Never feed the 60s-lagging `poly_price` (trailing TWAP) directly into Phi(Z)
-      as if it were instantaneous spot price.
-    - When `spot.basis_ema` is available alongside the official Chainlink strike
-      `open_px`, compute live Chainlink spot estimate `cl_est = spot.price - basis_ema`.
-    - Adjust variance for the 60s Chainlink TWAP settlement payoff:
-      * tau > 60s: variance of 60s terminal average scales as (tau - 40)/300.
-      * tau <= 60s: incorporate already-realized `[end-60, t]` average
-        (`spot.twap_realized_60s`) and remaining `(tau/60) * sqrt((tau/300)/3)` std.
-    - When `basis_ema` is unavailable, stay strictly on the single Binance chain
-      (`spot.price` vs `spot.binance_open_price`) to avoid cross-source basis error.
+    Returns:
+        (lead_bps, delta_usd, effective_price)
     """
     spot_px = float(getattr(spot, "price", 0.0) or 0.0)
     basis_ema = getattr(spot, "basis_ema", None)
@@ -67,28 +25,24 @@ def estimate_p_fair(
 
     if basis_ema is not None and spot_px > 0 and open_px > 0:
         cl_est = max(1e-6, spot_px - float(basis_ema))
-        if tau_s <= 0.5:
-            final_est = float(realized_60) if (realized_60 and realized_60 > 0) else cl_est
-            return 0.99 if final_est >= open_px else 0.01
-        if tau_s <= 60.0:
-            u = 60.0 - tau_s
-            avg_realized = float(realized_60) if (realized_60 and realized_60 > 0) else cl_est
-            expected_close = (u * avg_realized + tau_s * cl_est) / 60.0
-            sigma_5m = vol_bps / 10000.0
-            std_close = max(1e-5, sigma_5m * math.sqrt((tau_s / 300.0) / 3.0) * (tau_s / 60.0))
-            prob = normal_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
-            return max(0.01, min(0.99, round(prob, 4)))
-        eff_tau = max(10.0, tau_s - 40.0)
-        return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps)
+        if tau_s <= 60.0 and realized_60 and float(realized_60) > 0:
+            u = max(0.0, 60.0 - max(0.0, tau_s))
+            rem = max(0.0, min(60.0, tau_s))
+            eff_px = (u * float(realized_60) + rem * cl_est) / 60.0
+        else:
+            eff_px = cl_est
+        delta_usd = eff_px - open_px
+        lead_bps = (delta_usd / open_px) * 10000.0
+        return round(lead_bps, 4), round(delta_usd, 2), round(eff_px, 2)
 
     bin_open = getattr(spot, "binance_open_price", None)
-    if bin_open and bin_open > 0 and spot_px > 0:
-        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
-        return estimate_fair_prob(spot_px, float(bin_open), eff_tau, vol_bps)
-    if open_px > 0 and spot_px > 0:
-        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
-        return estimate_fair_prob(spot_px, open_px, eff_tau, vol_bps)
-    return 0.50
+    ref_open = float(bin_open) if (bin_open and float(bin_open) > 0) else float(open_px or 0.0)
+    if ref_open > 0 and spot_px > 0:
+        delta_usd = spot_px - ref_open
+        lead_bps = (delta_usd / ref_open) * 10000.0
+        return round(lead_bps, 4), round(delta_usd, 2), round(spot_px, 2)
+
+    return 0.0, 0.0, spot_px
 
 
 def calculate_dynamic_realized_vol(

@@ -47,13 +47,18 @@ class MarketFeed:
         self._last_binance_t = 0.0
         self._last_spot_source = "binance_vision"
         self._thread_local = threading.local()
-        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pm_feed")
+        self._net_lock = threading.Lock()
+        self._poly_lock = threading.Lock()
+        self._record_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_feed")
+        self.last_open_is_official = False
 
         # Polymarket official real-time Chainlink price cache & poller state
         self._last_poly_btc = None
         self._last_poly_btc_t = 0.0
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
+        self._poly_session = None
 
         # Real-time network speed, latency, and traffic accounting
         self.net_stats = {
@@ -69,22 +74,29 @@ class MarketFeed:
 
     def _record_net(self, source: str, lat_ms: float, byte_count: int):
         now = time.time()
-        if source == "poly":
-            self.net_stats["poly_latency_ms"] = round(lat_ms, 1)
-        elif source == "binance":
-            self.net_stats["binance_latency_ms"] = round(lat_ms, 1)
+        lock = getattr(self, "_net_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            if source == "poly":
+                self.net_stats["poly_latency_ms"] = round(lat_ms, 1)
+            elif source == "binance":
+                self.net_stats["binance_latency_ms"] = round(lat_ms, 1)
 
-        self.net_stats["total_bytes"] += byte_count
-        self.net_stats["bytes_window"] += byte_count
-        self.net_stats["msgs_window"] += 1
+            self.net_stats["total_bytes"] += byte_count
+            self.net_stats["bytes_window"] += byte_count
+            self.net_stats["msgs_window"] += 1
 
-        dt = now - self.net_stats["last_calc_t"]
-        if dt >= 1.0:
-            self.net_stats["downstream_kbps"] = round((self.net_stats["bytes_window"] / 1024.0) / dt, 1)
-            self.net_stats["msg_rate"] = round(self.net_stats["msgs_window"] / dt, 1)
-            self.net_stats["bytes_window"] = 0
-            self.net_stats["msgs_window"] = 0
-            self.net_stats["last_calc_t"] = now
+            dt = now - self.net_stats["last_calc_t"]
+            if dt >= 1.0:
+                self.net_stats["downstream_kbps"] = round((self.net_stats["bytes_window"] / 1024.0) / dt, 1)
+                self.net_stats["msg_rate"] = round(self.net_stats["msgs_window"] / dt, 1)
+                self.net_stats["bytes_window"] = 0
+                self.net_stats["msgs_window"] = 0
+                self.net_stats["last_calc_t"] = now
+        finally:
+            if lock is not None:
+                lock.release()
 
     def get_net_summary(self) -> dict:
         poly_lat = self.net_stats.get("poly_latency_ms", 0.0)
@@ -131,8 +143,15 @@ class MarketFeed:
             target_dir = config.MARKET_DIR / category / today
             target_dir.mkdir(parents=True, exist_ok=True)
             target_file = target_dir / f"{category}_{today}.jsonl"
-            with open(target_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            lock = getattr(self, "_record_lock", None)
+            if lock is not None:
+                with lock:
+                    with open(target_file, "a", encoding="utf-8") as f:
+                        f.write(line)
+            else:
+                with open(target_file, "a", encoding="utf-8") as f:
+                    f.write(line)
         except Exception as e:
             # Data recording should never crash the engine
             print(f"[MarketFeed] Raw data recording warning ({category}): {e}")
@@ -204,6 +223,7 @@ class MarketFeed:
         """
         poly_open = 0.0
         binance_open = 0.0
+        poly_is_official = False
 
         # 1. Primary: Polymarket official Chainlink BTC/USD TWAP
         try:
@@ -218,16 +238,17 @@ class MarketFeed:
                 "twapEnabled": "true",
                 "twapLookbackSeconds": "60"
             }
-            resp = self.session.get(poly_url, params=params, timeout=3.5)
+            resp = self.session.get(poly_url, params=params, timeout=(1.2, 1.8))
             if resp.status_code == 200:
                 body = resp.json()
                 open_px = body.get("openPrice")
                 if open_px and float(open_px) > 0:
                     poly_open = float(open_px)
+                    poly_is_official = True
         except Exception:
             pass
 
-        # 1b. If poly_open still 0, stitch from previous round's closePrice (mathematically identical to start_t TWAP)
+        # 1b. If poly_open still 0, stitch from previous round's official closePrice as provisional anchor
         if poly_open <= 0:
             prev_settlement = self.fetch_window_settlement_price(start_t - 300)
             if prev_settlement and prev_settlement[1] > 0:
@@ -241,7 +262,7 @@ class MarketFeed:
         ):
             url = f"{base_url}?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
             try:
-                resp = self.session.get(url, timeout=3.0)
+                resp = self.session.get(url, timeout=(1.2, 1.8))
                 if resp.status_code == 200:
                     klines = resp.json()
                     if klines and len(klines) > 0:
@@ -251,16 +272,19 @@ class MarketFeed:
             except Exception:
                 pass
 
+        self.last_open_is_official = poly_is_official
+
         # Fallback cross-assignment if either is missing
         if poly_open <= 0 and binance_open > 0:
             poly_open = binance_open
         if binance_open <= 0 and poly_open > 0:
             binance_open = poly_open
 
-        # Record raw open events
+        # Record raw open events with true source provenance
         if poly_open > 0:
             self.record_raw_event("oracle", {
-                "t": time.time(), "kind": "window_open", "source": "polymarket_chainlink_twap",
+                "t": time.time(), "kind": "window_open",
+                "source": "polymarket_chainlink_twap" if poly_is_official else "provisional_fallback",
                 "start_t": start_t, "open_price": poly_open
             })
         if binance_open > 0:
@@ -285,7 +309,7 @@ class MarketFeed:
                 "twapEnabled": "true",
                 "twapLookbackSeconds": "60"
             }
-            resp = self.session.get(poly_url, params=params, timeout=3.5)
+            resp = self.session.get(poly_url, params=params, timeout=(1.2, 2.0))
             if resp.status_code == 200:
                 body = resp.json()
                 if body.get("completed") and body.get("closePrice") is not None:
@@ -301,20 +325,24 @@ class MarketFeed:
         """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously.
 
         Returns None when the cached TWAP is stale: a dead poller must not keep
-        feeding an old price into p_fair while Binance keeps moving.
+        feeding an old price into basis_ema while Binance keeps moving.
         """
         current_t = now or time.time()
         if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
             self._poly_btc_poller_active = True
             import threading
             def _worker():
-                # Dedicated session: requests.Session is not thread-safe and this
-                # worker runs concurrently with the pipeline's own requests.
-                session = None
                 try:
-                    session = requests.Session()
-                    session.headers.update(self.session.headers)
-                    session.proxies = dict(self.session.proxies)
+                    # Reuse a dedicated persistent Session owned exclusively by this single-flight poller
+                    # to avoid repeating TLS handshakes every 0.8s while keeping requests thread-safe.
+                    if getattr(self, "_poly_session", None) is None:
+                        sess = requests.Session()
+                        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
+                        sess.mount("https://", adapter)
+                        sess.mount("http://", adapter)
+                        sess.headers.update(self.session.headers)
+                        sess.proxies = dict(self.session.proxies)
+                        self._poly_session = sess
                     now_iso = datetime.datetime.fromtimestamp(current_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                     url = "https://polymarket.com/api/crypto/crypto-price"
                     params = {
@@ -324,35 +352,45 @@ class MarketFeed:
                         "twapEnabled": "true",
                         "twapLookbackSeconds": "60"
                     }
-                    resp = session.get(url, params=params, timeout=3.0)
+                    resp = self._poly_session.get(url, params=params, timeout=(1.2, 1.8))
                     if resp.status_code == 200:
                         body = resp.json()
                         px = body.get("openPrice")
                         if px and float(px) > 0:
-                            self._last_poly_btc = float(px)
-                            self._last_poly_btc_t = time.time()
+                            lock = getattr(self, "_poly_lock", None)
+                            if lock:
+                                lock.acquire()
+                            try:
+                                self._last_poly_btc = float(px)
+                                self._last_poly_btc_t = time.time()
+                            finally:
+                                if lock:
+                                    lock.release()
                             self.record_raw_event("oracle", {
-                                "t": time.time(), "kind": "poly_twap_live", "price": self._last_poly_btc
+                                "t": time.time(), "kind": "poly_twap_live", "price": float(px)
                             })
                 except Exception:
                     pass
                 finally:
-                    if session is not None:
-                        try:
-                            session.close()
-                        except Exception:
-                            pass
                     self._last_poly_poll_t = time.time()
                     self._poly_btc_poller_active = False
 
             t = threading.Thread(target=_worker, daemon=True)
             t.start()
 
-        px = getattr(self, "_last_poly_btc", None)
+        lock = getattr(self, "_poly_lock", None)
+        if lock:
+            lock.acquire()
+        try:
+            px = getattr(self, "_last_poly_btc", None)
+            ts = getattr(self, "_last_poly_btc_t", 0.0)
+        finally:
+            if lock:
+                lock.release()
         if px is None:
             return None
         max_age = float(config.PARAMS.get("POLY_PRICE_MAX_AGE_S", 10.0))
-        if (time.time() - getattr(self, "_last_poly_btc_t", 0.0)) > max_age:
+        if (time.time() - ts) > max_age:
             return None
         return px
 
@@ -370,10 +408,15 @@ class MarketFeed:
         return sess
 
     def close(self):
-        """Shut down background executor cleanly."""
+        """Shut down background executor and persistent poller session cleanly."""
         if getattr(self, "_executor", None) is not None:
             try:
                 self._executor.shutdown(wait=False)
+            except Exception:
+                pass
+        if getattr(self, "_poly_session", None) is not None:
+            try:
+                self._poly_session.close()
             except Exception:
                 pass
 
@@ -392,7 +435,7 @@ class MarketFeed:
         for src, url in endpoints:
             t0 = time.perf_counter()
             try:
-                resp = http.get(url, timeout=2.0)
+                resp = http.get(url, timeout=(1.0, 1.5))
                 lat_ms = (time.perf_counter() - t0) * 1000.0
                 byte_count = len(resp.content)
                 if resp.status_code == 200:
@@ -502,7 +545,7 @@ class MarketFeed:
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
         t0 = time.perf_counter()
         try:
-            resp = http.get(url, timeout=2.0)
+            resp = http.get(url, timeout=(1.0, 1.5))
             lat_ms = (time.perf_counter() - t0) * 1000.0
             byte_count = len(resp.content)
             if resp.status_code == 200:

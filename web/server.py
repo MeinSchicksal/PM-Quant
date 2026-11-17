@@ -50,7 +50,6 @@ def _clean_action(raw):
         "kind": raw.get("kind", "maker"),
         "poly_up": _num(raw.get("poly_up")) if raw.get("poly_up") is not None else None,
         "poly_down": _num(raw.get("poly_down")) if raw.get("poly_down") is not None else None,
-        "prob_up": _num(raw.get("prob_up")) if raw.get("prob_up") is not None else None,
         "spot_price": _num(raw.get("spot_price")) if raw.get("spot_price") is not None else None,
         "tau_s": _num(raw.get("tau_s")) if raw.get("tau_s") is not None else None,
         "reason": raw.get("reason", ""),
@@ -325,7 +324,7 @@ class QuantHandler(BaseHTTPRequestHandler):
                 if (item.get("poly_up") is None or item.get("spot_price") is None) and fills:
                     closest_f = min(fills, key=lambda f: abs(_num(f.get("t")) - t_val), default=None)
                     if closest_f and abs(_num(closest_f.get("t")) - t_val) < 2.0:
-                        for k in ("poly_up", "poly_down", "prob_up", "spot_price", "tau_s"):
+                        for k in ("poly_up", "poly_down", "spot_price", "tau_s"):
                             if closest_f.get(k) is not None:
                                 item[k] = closest_f[k]
                 enriched.append(item)

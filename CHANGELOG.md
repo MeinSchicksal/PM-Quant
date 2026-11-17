@@ -5,6 +5,38 @@ Versions strictly follow semantic versioning **`v<Major>.<Minor>`** (e.g., `v1.0
 
 ---
 
+## [v2.4] - 2026-11-17 (Model-Free Objective Dual-Stage Architecture & Dashboard Cleanup)
+
+### Removed — Model Win Probability (`p_fair` / `P*` / Normal CDF)
+- **Complete removal of parametric probability estimation**: Stripped `normal_cdf`, `estimate_fair_prob`, and `estimate_p_fair` from `core/estimator.py`, `core/policy.py`, `core/execution.py`, `core/regime.py`, and `runtime/runner.py`.
+- **Dashboard & API cleanup (`web/server.py`, `web/static/index.html`, `web/static/app.js`, `web/static/style.css`)**: Completely removed `prob_up` / `prob_down` / `p_model`, the `模型公允胜率 P*` legend, `模型 P*` and `定价边际` stats, the purple `P*` chart curve, and all `P*` tooltip rows across live and historical modal charts.
+
+### Added — Pure Objective Physical Strategy (`v2.4`)
+- **Pure Arithmetic Lead (`core/estimator.py`)**: Replaced probabilistic estimation with `compute_objective_lead()`, calculating exact basis-adjusted spot / locked 60s-TWAP displacement (`lead_bps`, `delta_usd`) from the window strike.
+- **Objective Dual-Stage Policy (`core/policy.py`, `config.py`)**:
+  - **MWDE (`120s < tau <= 240s`)**: Trend-aligned discount quoting (`<= $0.45`) with minimum `1.5 bps` displacement filter (filtering zero-noise chop) and post-shock consensus handling (`>= $40` prior move).
+  - **LWAA (`15s <= tau <= 120s`)**: High-conviction entry requiring objective lead `>= 5.0 bps` (Maker) or `>= 8.0 bps` (Taker IOC) aligned with market consensus (`mid >= 0.52`) in `[$0.20, $0.65]` (hard ceiling `$0.70`).
+  - **Pure Arithmetic Exit**: Enabled deep risk-free pair lock only at `pair_cost <= 0.90` (`ENABLE_ARBITRAGE_HEDGE=True`); tail defensive salvage triggers on objective bid collapse (`best_bid <= 0.15` & adverse spot at `tau <= 30s`).
+- **Objective Order Protection (`core/execution.py`)**: Replaced model-edge resting order checks with objective direction reversal cancellation (`preferred_side` flip) and `>= 2-tick` market bid retreat protection.
+
+---
+
+## [v2.3] - 2026-11-17 (Unified Net-Edge + Basis-Adjusted Asian TWAP Engine & Logic Audit Fixes)
+
+### Strategy & Pricing Architecture (`v2.3`)
+- **Basis-Adjusted Asian TWAP Estimator (`core/estimator.py`, `runtime/runner.py`)**: Never feeds the 60s-lagging `poly_spot` directly into $\Phi(d)$ as instantaneous spot. Estimates live Chainlink spot via `cl_est = spot.price - basis_ema`, scales variance by effective horizon $\tau_{\text{eff}} = \max(10, \tau - 40)$ for $\tau > 60\text{s}$, and blends locked realized average `twap_realized_60s` with decaying terminal variance for $\tau \le 60\text{s}$.
+- **Positive Convexity Restoration (`core/policy.py`, `config.py`)**: Disabled default `pair_cost <= 1.00` profit-capping hedge (`ENABLE_ARBITRAGE_HEDGE=False`) which previously capped average wins at `+$0.16` against `-$2.66` losses in `v2.2`. Leg-1 positions now hold to settlement by default, with extreme tail defensive salvage (`tau <= 30s`, `P* < 0.12`).
+- **Realism Hardening (`runtime/market_feed.py`, `runtime/runner.py`, `sim/matcher.py`)**: Multi-source spot failover (`binance.vision` -> `binance.com` -> `okx`) preserving stale timestamp to trip dead-man switch; dual-horizon (20s/300s) EWMA volatility; strict book consistency (`STRICT_BOOK_CONSISTENCY=True`) rejecting inconsistent snapshots without artificial price shifting; post-300ms live IOC limit check (`TAKER_REAL_DELAY_CHECK=True`).
+
+### Fixed — Internal Logic Conflicts (2026-11-17 Audit)
+- **Provisional strike cross-source mismatch (`runtime/runner.py`)**: When `poly_open_is_provisional=True` (during the initial 5-15s before Polymarket's official Chainlink TWAP `openPrice` finishes computing, or on Binance fallback), `basis_ready` now stays `False` so `estimate_p_fair` compares Binance live spot against `binance_open_price` on the same reference chain instead of subtracting `basis_ema` from Binance spot against an unadjusted Binance open price.
+- **Stale / edge-decayed resting Maker quote protection (`core/execution.py`, `runtime/runner.py`, `config.py`)**: Fixed a paradox where mild probability drops re-quoted Maker orders lower, but severe probability drops (`P* < ENTRY_MIN_PROB` or no executable net-edge) returned `wait (urgent=False)` and left stale Maker bids sitting exposed at the top of the book. `plan_order_actions` now immediately cancels resting Maker orders whenever `p_side < ENTRY_MIN_PROB`, `(p_side - order.price) < MIN_RESTING_EDGE (0.02)`, or the market `best_bid` retreats $\ge 2\text{ ticks}$ below `order.price`.
+- **Partial-fill queue preservation (`core/policy.py`)**: A partially filled Maker entry (`0 < held_shares < max_shares`) no longer sets `urgent_cancel=True` in calm conditions, preserving front-of-queue priority for the remaining shares of the lot while still pulling immediately on toxic shocks or tail freeze.
+- **Wide-spread Maker guard & penny-jump edge threshold (`core/policy.py`, `config.py`)**: Enforced `tb.spread <= MAX_ORDERBOOK_SPREAD (0.06)` on Maker quoting to prevent bidding into illiquid vacuums, and required `p_side - (bid + 0.01) >= PENNY_JUMP_MIN_EDGE (0.06)` before stepping 1 tick ahead of `best_bid`.
+- **Tests**: Added 4 regression tests in `tests/test_v2_3_realism.py`; **104 unit tests passing**.
+
+---
+
 ## [v2.2] - 2026-11-12 (Audit remediation, paper-only)
 
 Patch-level correctness release: `config.VERSION` stays `v2.2` so the running ledger is not silently re-based (same precedent as v1.1.1). No new strategy thesis; these are logic fixes found by a full-chain audit.

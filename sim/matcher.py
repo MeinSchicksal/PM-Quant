@@ -130,7 +130,8 @@ class QueueMatcher:
             return 0.0
 
         # Maker bid fills when real trades execute at or below our bid price
-        if trade_price <= order.price + 1e-6:
+        # (1e-4 slack absorbs Polymarket CLOB merge/mint float rounding like 0.120000014)
+        if trade_price <= order.price + 1e-4:
             # A real print changes the queue, so a later (new) snapshot may be
             # matched again. The runner's print_touched_ids guard already skips
             # the stale snapshot on this same tick.

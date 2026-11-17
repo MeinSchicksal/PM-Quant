@@ -120,15 +120,27 @@ def _load_date_batch(date_dir: Path, settlements: Dict[str, Dict[str, Any]]):
     hi = max((s for s in starts if s), default=0) + 320
     spot_rows: List[Dict[str, Any]] = []
     poly_rows: List[Dict[str, Any]] = []
-    oracle_dir = date_dir.parents[1] / "oracle" / date_dir.name
-    for path in sorted(oracle_dir.glob("*.jsonl")):
-        for row in _iter_jsonl(path):
-            t = float(row.get("t", 0.0))
-            kind = row.get("kind")
-            if kind == "spot" and lo <= t <= hi:
-                spot_rows.append(row)
-            elif kind == "poly_twap_live" and lo <= t <= hi:
-                poly_rows.append(row)
+    oracle_root = date_dir.parents[1] / "oracle"
+    oracle_dirs = []
+    try:
+        from datetime import datetime, timedelta
+        d_obj = datetime.strptime(date_dir.name, "%Y-%m-%d")
+        prev_day = (d_obj - timedelta(days=1)).strftime("%Y-%m-%d")
+        oracle_dirs.append(oracle_root / prev_day)
+    except ValueError:
+        pass
+    oracle_dirs.append(oracle_root / date_dir.name)
+    for oracle_dir in oracle_dirs:
+        if not oracle_dir.exists():
+            continue
+        for path in sorted(oracle_dir.glob("*.jsonl")):
+            for row in _iter_jsonl(path):
+                t = float(row.get("t", 0.0))
+                kind = row.get("kind")
+                if kind == "spot" and lo <= t <= hi:
+                    spot_rows.append(row)
+                elif kind == "poly_twap_live" and lo <= t <= hi:
+                    poly_rows.append(row)
     spot_rows.sort(key=lambda r: float(r.get("t", 0.0)))
     poly_rows.sort(key=lambda r: float(r.get("t", 0.0)))
     return trades_by_slug, token_map, events_by_token, spot_rows, poly_rows
