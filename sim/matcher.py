@@ -21,6 +21,24 @@ def _clamp_px(px: float) -> float:
     return min(0.99, max(0.01, px))
 
 
+def is_books_consistent(book_up: OrderBook, book_down: OrderBook) -> bool:
+    """Strictly verify dual-token orderbook consistency without fabricating prices.
+
+    In v2.3 (STRICT_BOOK_CONSISTENCY=True), inconsistent or crossed snapshots
+    are rejected rather than artificially shifted to prevent trading at prices
+    that never existed on the venue.
+    """
+    au, ad = book_up.best_ask, book_down.best_ask
+    bu, bd = book_up.best_bid, book_down.best_bid
+    if au is None or ad is None or bu is None or bd is None:
+        return False
+    if bu >= au or bd >= ad:
+        return False
+    if au + ad < 0.995 or bu + bd > 1.005:
+        return False
+    return True
+
+
 def make_complementary(book_up: OrderBook, book_down: OrderBook) -> Tuple[OrderBook, OrderBook]:
     """Enforce no-arbitrage consistency between the two complementary token books.
 
@@ -158,6 +176,25 @@ class QueueMatcher:
         the book; the returned VWAP is the true cost of walking the ladder.
         """
         levels = book.asks if is_buy else book.bids
+        return self.walk_levels(levels, size)
+
+    def taker_ioc_fill(
+        self,
+        book: OrderBook,
+        size: float,
+        limit_price: float,
+        is_buy: bool = True,
+    ) -> Tuple[float, float]:
+        """Depth-aware IOC limit execution against the visible book.
+
+        Only consumes levels at or better than `limit_price` (<= limit_price for
+        buys, >= limit_price for sells), matching real exchange IOC limit behavior
+        when an order arrives after network transit delay.
+        """
+        if is_buy:
+            levels = [(px, sz) for px, sz in (book.asks or []) if px <= limit_price + 1e-6]
+        else:
+            levels = [(px, sz) for px, sz in (book.bids or []) if px >= limit_price - 1e-6]
         return self.walk_levels(levels, size)
 
     def match_order(

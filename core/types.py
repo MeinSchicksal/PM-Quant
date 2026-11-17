@@ -57,6 +57,11 @@ class SpotState:
     regime: str = "normal"              # "calm" (<5 bps), "normal" (5-30 bps), "volatile" (>30 bps)
     poly_price: Optional[float] = None
     binance_open_price: Optional[float] = None
+    basis_ema: Optional[float] = None   # Live rolling (Binance_60s_avg - Chainlink_60s_TWAP)
+    twap_realized_60s: Optional[float] = None  # Estimated Chainlink average already locked in [end-60, t]
+    spot_source: str = "binance"
+    is_stale: bool = False
+    velocity_bps: float = 0.0
 
 
 @dataclass

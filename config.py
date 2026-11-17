@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth.
+"""PM-Quant Configuration & Single Source of Truth (v2.3).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -6,7 +6,7 @@ No version logic or branching should exist in downstream modules.
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.2"
+VERSION = "v2.3"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -16,80 +16,82 @@ ROOT = Path(__file__).resolve().parent
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
-    "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares, baseline sizing)
-    "MAX_LOTS": 1,                    # v2.2 policy always sizes exactly 1 lot; keep the cap aligned with the implementation
-    "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll (single source for runner/dashboard/reset)
-    "LATENCY_S": 0.30,                # Estimated round-trip wire + engine order insertion delay
-    "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: fee = shares * rate * p * (1-p); makers pay zero
+    "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares)
+    "MAX_LOTS": 1,                    # Fixed 1-lot sizing per window
+    "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll
+    "LATENCY_S": 0.30,                # Round-trip wire + engine order insertion delay (s)
+    "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: rate * p * (1-p); makers pay zero
 
-    # 2. Continuous Dynamic Dual Absorption (消除时间断层，动态市价调价)
-    # Stage 1: 前半程顺势低吸 (Mid-Window Trend-Biased Discount Entry, 60s ~ 180s)
-    "MWDE_ENABLE": True,               # Enable Stage 1: Mid-window trend-biased dip-buying
-    "MWDE_MIN_TAU_S": 120.0,           # Seamless handoff at tau=120s (zero gap!)
-    "MWDE_MAX_TAU_S": 240.0,           # Active scanning starts after first 60s observation
-    "MWDE_MAX_ENTRY_PRICE": 0.45,      # Maximum buying price for dip entry (放宽到 $0.45)
-    # NOTE: make_complementary() enforces ask_up + ask_down >= 1.00 before the
-    # policy sees the books. A `< 0.90` taker gate could therefore never fire at
-    # runtime (only in unit tests that bypassed the chokepoint). The gate is now
-    # an upper bound on the *adjusted* pair cost, not an impossible lower one.
-    "MWDE_TAKER_PAIR_COST": 1.02,      # 前半程吃单门槛: 校正后两侧 ask 合计不得超过 $1.02
-    "MWDE_HEDGE_LOCK_COST": 0.85,      # Leg 2 lock when arbitrage hedging is OFF
-    "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00,  # Leg 2 lock when LWAA_ENABLE_ARBITRAGE_HEDGE is ON
-    "POST_SHOCK_MIN_MOVE": 40.0,       # 大涨/大跌门槛 ($40.0): 超过此幅度后警惕单边延续，优先买入高价侧
+    # 2. v2.3 Unified Net-Edge + Basis-Adjusted Asian TWAP Engine
+    "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)
+    "ENTRY_MAX_TAU_S": 240.0,         # Entry active window: tau in [15s, 240s] (elapsed 60s ~ 285s)
+    "ENTRY_MIN_PROB": 0.50,           # Never buy a side with modelled win probability < 50%
+    "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets
+    "ENTRY_MAX_PRICE": 0.75,          # Avoid extreme negative-skew high-price bets
+    "MIN_MAKER_EDGE": 0.04,           # Minimum modelled edge for zero-fee Maker bids (p_fair - maker_px >= 0.04)
+    "MIN_TAKER_EDGE": 0.08,           # Minimum net edge after fee for Taker IOC (p_fair - ask - fee >= 0.08)
+    "MAX_QUOTE_ATTEMPTS": 3,          # Max maker quote attempts per window (protected by 2-tick hysteresis)
+    "MAX_QUEUE_WAIT_S": 15.0,         # Passive queue waiting timeout (s) before cancelling
+    "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s Binance spot move >= 2.5 bps
+    "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
-    # Stage 2: 尾盘高确信吸收 (Late-Window Asymmetric Absorption, 180s ~ 285s)
-    "LWAA_MAX_TAU_S": 120.0,           # Seamless handoff from Stage 1 (tau <= 120s)
-    "LWAA_MIN_TAU_S": 15.0,            # Tail freeze cutoff (tau < 15s)
-    "LWAA_MIN_PROB": 0.80,             # High-conviction threshold: 80%
-    "LWAA_MIN_EDGE": 0.02,             # Minimum net profit edge demanded (2.0 ticks)
-    "LWAA_MAX_ENTRY_PRICE": 0.65,      # Maximum acceptable entry price (最高限价 $0.65)
-    "LWAA_HARD_CHASE_CEILING": 0.70,   # Hard chase ceiling (超过 $0.70 绝不追高)
-    "LWAA_MIN_ENTRY_PRICE": 0.35,      # Minimum entry price for high-prob outcome
-    "LWAA_MAX_QUOTE_ATTEMPTS": 1,      # Maximum maker quote attempts per window
-    "LWAA_ENABLE_ARBITRAGE_HEDGE": True, # Always lock both sides when opp ask drops (pair_cost <= 1.00)
-    "ALLOW_TAKER_UNWIND": True,        # 仅允许 DEFENSIVE_SALVAGE 在胜率坍塌时出清残值; 恐慌性平仓仍由 policy 禁止
-    "MAX_QUEUE_WAIT_S": 15.0,          # Passive queue waiting timeout (15s) to fill before canceling
-    "DYNAMIC_QUOTING_ENABLE": True,    # 结合实时盘口买一/买卖价差动态定价，防深水悬空挂单
-    "MAX_PAIRING_PRECHECK_COST": 1.05, # 开第一腿前校验对侧卖价：若 my_px + opp_ask + fee > 1.05 则禁止开仓
-    "DEFENSIVE_SALVAGE_ENABLE": True,  # 尾盘最后30s胜率坍塌时市价出清残值防守
-    "DEFENSIVE_SALVAGE_TAU_S": 30.0,   # 尾盘残值防守触发时间 (剩余 30s 以内)
-    "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,# 胜率跌破 12% 触发出清
-    "DEFENSIVE_SALVAGE_MIN_BID": 0.06, # 最低残值变现门槛 ($0.06)
+    # 3. Position Holding & Defensive Exit
+    # v2.2 proved that capping winners at pair_cost <= 1.00 created negative convexity
+    # (+$0.16 average win vs -$2.66 average loss). Disabled by default in v2.3.
+    "ENABLE_ARBITRAGE_HEDGE": False,  # Disabled by default; if enabled, only lock deep risk-free pairs
+    "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
+    "ALLOW_TAKER_UNWIND": True,       # Only extreme tail defensive salvage is allowed
+    "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry to recover residual cash
+    "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
+    "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,
+    "DEFENSIVE_SALVAGE_MIN_BID": 0.06,
 
-    # 3. Lifecycle & Account-Level Watchdog Boundaries
-    "ENABLE_CIRCUIT_BREAKER": True,   # 账户级看门狗必须启用; 关闭会让累计亏损无上限
-    "MAX_ENTRIES_PER_WINDOW": 1,      # Maximum Leg-1 entry attempts allowed per 5m window
-    "MAX_WINDOW_LOSS_USD": 5.00,      # Hard per-window cost envelope (5 shares x $1.00 max paired cost)
-    "MAX_DAILY_DRAWDOWN_USD": 15.00,  # Account-level daily drawdown circuit breaker
-    "LOSS_STREAK_COOLING": 3,         # Consecutive losing rounds triggering cooling mode
-    "COOLING_ROUNDS": 3,              # Number of rounds to cool off when loss streak triggers
-    "DEADMAN_TIMEOUT_S": 3.0,         # Dead-man switch: cancel resting orders if market feed drops for > 3.0s
-    "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Polymarket TWAP older than this (fall back to Binance spot basis)
-    "MIN_MODEL_VOL_BPS": 8.0,         # Floor for Phi(d): a 2-3bps EWMA reading saturates p_fair on TWAP basis noise
+    # 4. Realism & Data Integrity Guards (Zero Self-Deception)
+    "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
+    "TAKER_REAL_DELAY_CHECK": True,   # Wait LATENCY_S and re-fetch live book before IOC taker fill in live paper
+    "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
+    "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
+    "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
+    "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated to empirical 5-min BTC std (~13.8 bps); stops Phi(d) saturation
 
-    # 4. Market-Regime Classification (attribution / dashboard only; not a v2.2 entry gate)
-    "MIN_ENTRY_TAU_S": 15.0,          # Only the real tail freeze (tau < 15s) is labelled tail_freeze for attribution
-    "TOXICITY_SHOCK_BPS": 3.5,        # 3-second rapid price shock threshold indicating informed toxicity
-    "SNR_TREND_THRESHOLD": 1.8,       # Signal-to-Noise Ratio threshold to classify momentum trend (p < 0.05)
-    "SNR_RANGE_THRESHOLD": 1.2,       # SNR threshold to classify normal oscillation regime
-    "SNR_RANGE_CONFIDENT": 1.0,       # High-confidence mean-reverting range threshold
-    "MAX_RANGE_DISPLACEMENT_BPS": 8.0,# Max displacement from strike to qualify for range-bound regime
-    "MAX_ORDERBOOK_SPREAD": 0.06,     # Max book spread (0.06 = 6 cents) before declaring wide-spread regime
+    # 5. Lifecycle & Account-Level Watchdog Boundaries
+    "ENABLE_CIRCUIT_BREAKER": True,
+    "MAX_ENTRIES_PER_WINDOW": 1,
+    "MAX_WINDOW_LOSS_USD": 5.00,      # Hard per-window cost envelope (5 shares x $1.00)
+    "MAX_DAILY_DRAWDOWN_USD": 15.00,
+    "LOSS_STREAK_COOLING": 3,
+    "COOLING_ROUNDS": 3,
+    "DEADMAN_TIMEOUT_S": 3.0,
+
+    # 6. Market-Regime Classification (attribution / dashboard only; not an entry gate)
+    "MIN_ENTRY_TAU_S": 15.0,
+    "TOXICITY_SHOCK_BPS": 3.5,
+    "SNR_TREND_THRESHOLD": 1.8,
+    "SNR_RANGE_THRESHOLD": 1.2,
+    "SNR_RANGE_CONFIDENT": 1.0,
+    "MAX_RANGE_DISPLACEMENT_BPS": 8.0,
+    "MAX_ORDERBOOK_SPREAD": 0.06,
     "ALLOW_INCREASED_RANGE_SIZE": False,
-    "MIN_FAIR_PROB_ENTRY": 0.42,      # Regime classifier balanced-odds lower bound (attribution)
-    "MAX_FAIR_PROB_ENTRY": 0.58,      # Regime classifier balanced-odds upper bound (attribution)
+    "MIN_FAIR_PROB_ENTRY": 0.42,
+    "MAX_FAIR_PROB_ENTRY": 0.58,
+
+    # Compatibility keys for stress/replay overrides (alias to v2.3 bounds)
+    "LWAA_MIN_TAU_S": 15.0,
+    "LWAA_MAX_TAU_S": 240.0,
+    "LWAA_MIN_PROB": 0.50,
+    "LWAA_MIN_EDGE": 0.04,
+    "LWAA_MAX_ENTRY_PRICE": 0.75,
 }
+
 
 def validate_params(params=None):
     """Fail fast when risk parameters contradict each other."""
     p = PARAMS if params is None else params
     errors = []
-    max_px = p.get("LWAA_MAX_ENTRY_PRICE", 0.65)
+    max_px = p.get("ENTRY_MAX_PRICE", p.get("LWAA_MAX_ENTRY_PRICE", 0.75))
     lot_size = p["LOT_SIZE"]
     budget = p["MAX_WINDOW_LOSS_USD"]
     min_lot_cost = lot_size * max_px * p["MIN_LOTS"]
-    # Worst case is a fully paired position: every share costs up to $1.00 in
-    # aggregate (Up + Down). Validate against MAX_LOTS, not just MIN_LOTS.
     max_pair_cost = lot_size * p["MAX_LOTS"] * 1.00
     if budget + 1e-9 < min_lot_cost:
         errors.append(
@@ -114,6 +116,8 @@ def validate_params(params=None):
         )
     if p["MIN_LOTS"] > p["MAX_LOTS"]:
         errors.append("MIN_LOTS exceeds MAX_LOTS")
+    if p["ENTRY_MIN_PRICE"] > p["ENTRY_MAX_PRICE"]:
+        errors.append("ENTRY_MIN_PRICE exceeds ENTRY_MAX_PRICE")
     if errors:
         raise ValueError("Inconsistent risk parameters: " + "; ".join(errors))
     return True
@@ -128,6 +132,5 @@ REPORTS_DIR = DATA_DIR / "3_reports"
 RUNTIME_DIR = DATA_DIR / "4_runtime"
 LOGS_DIR = RUNTIME_DIR / "logs"
 
-# Ensure runtime directories exist
 for _p in (CURRENT_LEDGER_DIR, RUNTIME_DIR, LOGS_DIR, REPORTS_DIR):
     _p.mkdir(parents=True, exist_ok=True)

@@ -521,8 +521,9 @@ def run_stress(n_paths: int = 150, seed: int = 7, sensitivity: bool = True, sequ
     out(f"# PM-Quant 合成行情压力测试报告 ({config.VERSION})")
     out(f"\n- 每场景 {n_paths} 条路径 (seed={seed})，真实 `PaperRunner.step` 链路，严格成交模型(仅真实打印+穿价)")
     out(f"- 市场模型: lag={mm.lag_s}s, σ_mkt={mm.sigma_bps}bps, 流量 {mm.flow_per_token_s}/s/token, 价差1tick")
-    out(f"- 参数: MWDE tau∈({config.PARAMS.get('MWDE_MIN_TAU_S'):.0f},{config.PARAMS.get('MWDE_MAX_TAU_S'):.0f}]s 顺势低吸, "
-        f"LWAA tau∈[{config.PARAMS.get('LWAA_MIN_TAU_S'):.0f},{config.PARAMS.get('LWAA_MAX_TAU_S'):.0f}]s 且 P*≥{config.PARAMS.get('LWAA_MIN_PROB')} 高确信吸收, "
+    out(f"- 参数: 统一 Net-Edge 引擎 tau∈[{config.PARAMS.get('ENTRY_MIN_TAU_S', 15.0):.0f},{config.PARAMS.get('ENTRY_MAX_TAU_S', 240.0):.0f}]s, "
+        f"Maker优势≥{config.PARAMS.get('MIN_MAKER_EDGE', 0.04)}, Taker优势≥{config.PARAMS.get('MIN_TAKER_EDGE', 0.08)}, "
+        f"vol下限={config.PARAMS.get('MIN_MODEL_VOL_BPS', 14.0)}bps, "
         f"首腿 {config.PARAMS['LOT_SIZE']*config.PARAMS['MIN_LOTS']:.0f} 份, 单窗亏损包络 ${config.PARAMS.get('MAX_WINDOW_LOSS_USD')}")
     out("\n> 注意: 这是鲁棒性/风险包络测试，不是实盘盈利证明。PnL 取决于 MarketModel 假设，见下方敏感性分析。\n")
 

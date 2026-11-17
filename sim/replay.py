@@ -173,13 +173,13 @@ def replay_window(
     winner = settlement.get("winner")
     close_px = float(settlement.get("close_px") or 0.0)
 
-    # NOTE: `open_px` comes from the settled ledger (possibly reconciled to the
-    # final official TWAP strike), which the live engine only learns 5-15s into
-    # the window. Replay therefore has a mild availability look-ahead on the
-    # strike; it is intrinsic to this recorded dataset, not a future price.
-    # binance_open_px is unavailable in the oracle recording, so both chains
-    # intentionally share the same anchor here.
-    runner.start_window(slug, start, end, open_px, binance_open_px=open_px)
+    # Use first recorded Binance spot near window start as binance_open_px (zero look-ahead)
+    first_bin = next(
+        (float(r.get("price") or 0.0) for r in spot_rows
+         if start <= float(r.get("t", 0.0)) <= end and float(r.get("price") or 0.0) > 0),
+        open_px,
+    )
+    runner.start_window(slug, start, end, open_px, binance_open_px=first_bin)
 
     # Timeline: every recorded book update in either token, restricted to the
     # window. One tick per book update keeps the replay at recording cadence.
@@ -195,6 +195,15 @@ def replay_window(
     last_poly = None
     prev_t = start
     carry_prints: List[Dict[str, Any]] = []
+    lat_s = max(float(config.PARAMS.get("LATENCY_S", 0.30)), 0.50)
+
+    def _book_at_time(evs: List[Dict[str, Any]], start_idx: int, target_t: float) -> Optional[OrderBook]:
+        if not evs:
+            return None
+        j = max(0, start_idx - 1)
+        while j + 1 < len(evs) and float(evs[j + 1].get("t", 0.0)) <= target_t:
+            j += 1
+        return _book_from_event(evs[j])
 
     for t in times:
         while iu < len(events_up) and float(events_up[iu].get("t", 0.0)) <= t:
@@ -210,8 +219,6 @@ def replay_window(
             last_poly = float(poly_row.get("price") or 0.0)
 
         # Always drain the print cursor, even when this tick has no oracle row.
-        # The old `continue` left `prev_t` and `it` untouched, so those prints
-        # were silently dropped and the maker queue never saw their volume.
         prints = list(carry_prints)
         carry_prints = []
         while it < len(trades):
@@ -228,18 +235,38 @@ def replay_window(
             carry_prints = prints
             continue
 
+        cur_px = float(spot_row.get("price") or 0.0)
+        # Compute 2-3s velocity from recorded spot_rows for accurate anti-toxicity parity
+        vel_bps = 0.0
+        if isp > 0 and cur_px > 0:
+            for k in range(isp - 1, max(-1, isp - 10), -1):
+                old_t = float(spot_rows[k].get("t", 0.0))
+                old_px = float(spot_rows[k].get("price") or 0.0)
+                if (t - old_t) >= 2.0 and old_px > 0:
+                    vel_bps = ((cur_px - old_px) / old_px) * 10000.0
+                    break
+
+        def _delayed_replay_book(side_name: str, _t=t, _iu=iu, _idn=idn):
+            target_t = _t + lat_s
+            if side_name == "Up":
+                return _book_at_time(events_up, _iu, target_t)
+            return _book_at_time(events_dn, _idn, target_t)
+
         spot = SpotState(
             timestamp=t,
-            price=float(spot_row.get("price") or 0.0),
+            price=cur_px,
             open_price=open_px,
             return_bps=float(spot_row.get("return_bps") or 0.0),
             realized_vol_bps=float(spot_row.get("realized_vol_bps") or 15.0),
+            is_toxic_shock=(abs(vel_bps) >= float(config.PARAMS.get("TOXICITY_SHOCK_BPS", 3.5))),
             regime=str(spot_row.get("regime") or "normal"),
             poly_price=last_poly,
-            binance_open_price=open_px,
+            binance_open_price=first_bin,
+            velocity_bps=round(vel_bps, 3),
         )
         runner.step(t, spot, book_up, book_dn, trade_prints=prints,
-                    poly_spot=last_poly, replay_mode=True)
+                    poly_spot=last_poly, replay_mode=True,
+                    delayed_book_fetcher=_delayed_replay_book)
 
     if not times:
         # No recorded book data for this window: cannot claim any result.

@@ -12,6 +12,9 @@ import time
 import json
 import datetime
 import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
 from collections import deque
 from pathlib import Path
 from typing import Optional, Tuple
@@ -22,20 +25,29 @@ if str(ROOT) not in sys.path:
 
 import config
 from core.types import OrderBook, SpotState
-from core.estimator import calculate_dynamic_realized_vol, calculate_adaptive_spread_params
+from core.estimator import calculate_dual_horizon_vol, calculate_adaptive_spread_params
 
 
 class MarketFeed:
     def __init__(self, proxy: str = None):
         self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=12, pool_maxsize=12)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        
+
         # Configure proxy fallback
         self.proxy = proxy if proxy is not None else os.environ.get("PM_PROXY", "http://127.0.0.1:7897")
         self._test_connectivity()
-        
+
         self.slug_cache = {}
-        self.spot_history = deque(maxlen=60)  # (timestamp, price) history for velocity & volatility
+        # 30-minute rolling spot buffer (~3600 ticks at 0.5s cadence) for dual-horizon volatility
+        self.spot_history = deque(maxlen=3600)
+        self._last_binance_px = 0.0
+        self._last_binance_t = 0.0
+        self._last_spot_source = "binance_vision"
+        self._thread_local = threading.local()
+        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pm_feed")
 
         # Polymarket official real-time Chainlink price cache & poller state
         self._last_poly_btc = None
@@ -88,23 +100,29 @@ class MarketFeed:
         }
 
     def _test_connectivity(self):
-        """Verify whether proxy or direct connection works best."""
-        test_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+        """Verify whether direct connection or proxy works best for both spot & CLOB."""
+        spot_test = "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"
+        clob_test = "https://clob.polymarket.com/time"
+        # Prefer direct connection if both endpoints succeed without proxy (lowest latency)
+        try:
+            r1 = self.session.get(spot_test, timeout=2.5)
+            r2 = self.session.get(clob_test, timeout=2.5)
+            if r1.status_code == 200 and r2.status_code == 200:
+                self.session.proxies = {}
+                return
+        except Exception:
+            pass
         if self.proxy:
             try:
-                r = self.session.get(test_url, proxies={"http": self.proxy, "https": self.proxy}, timeout=2.5)
-                if r.status_code == 200:
-                    self.session.proxies = {"http": self.proxy, "https": self.proxy}
+                px_cfg = {"http": self.proxy, "https": self.proxy}
+                r1 = self.session.get(spot_test, proxies=px_cfg, timeout=3.0)
+                r2 = self.session.get(clob_test, proxies=px_cfg, timeout=3.0)
+                if r1.status_code == 200 and r2.status_code == 200:
+                    self.session.proxies = px_cfg
                     return
             except Exception:
                 pass
-        # Fallback to direct connection
-        try:
-            r = self.session.get(test_url, timeout=3.0)
-            if r.status_code == 200:
-                self.session.proxies = {}
-        except Exception:
-            pass
+        self.session.proxies = {}
 
     def record_raw_event(self, category: str, record: dict):
         """Append an immutable record to data/1_market/<category>/<date>/."""
@@ -168,6 +186,10 @@ class MarketFeed:
                             "resolved": bool(m.get("closed") or m.get("umaResolutionStatus") == "resolved")
                         }
                         self.slug_cache[slug] = meta
+                        if len(self.slug_cache) > 50:
+                            oldest = next(iter(self.slug_cache))
+                            if oldest != slug:
+                                self.slug_cache.pop(oldest, None)
                         return meta
         except Exception as e:
             print(f"[MarketFeed] Token resolution warning for {slug}: {e}")
@@ -211,17 +233,23 @@ class MarketFeed:
             if prev_settlement and prev_settlement[1] > 0:
                 poly_open = float(prev_settlement[1])
 
-        # 2. Binance Spot 5m Kline Open
+        # 2. Binance Spot 5m Kline Open (prefer data-api.binance.vision to bypass HTTP 451 geo-blocks)
         start_ms = int(start_t * 1000)
-        url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
-        try:
-            resp = self.session.get(url, timeout=3.0)
-            if resp.status_code == 200:
-                klines = resp.json()
-                if klines and len(klines) > 0:
-                    binance_open = float(klines[0][1])
-        except Exception:
-            pass
+        for base_url in (
+            "https://data-api.binance.vision/api/v3/klines",
+            "https://api.binance.com/api/v3/klines",
+        ):
+            url = f"{base_url}?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
+            try:
+                resp = self.session.get(url, timeout=3.0)
+                if resp.status_code == 200:
+                    klines = resp.json()
+                    if klines and len(klines) > 0:
+                        binance_open = float(klines[0][1])
+                        if binance_open > 0:
+                            break
+            except Exception:
+                pass
 
         # Fallback cross-assignment if either is missing
         if poly_open <= 0 and binance_open > 0:
@@ -276,7 +304,7 @@ class MarketFeed:
         feeding an old price into p_fair while Binance keeps moving.
         """
         current_t = now or time.time()
-        if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 1.8):
+        if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
             self._poly_btc_poller_active = True
             import threading
             def _worker():
@@ -328,62 +356,119 @@ class MarketFeed:
             return None
         return px
 
-    def fetch_spot_state(
+    def _get_worker_session(self) -> requests.Session:
+        """Return a thread-local requests.Session for safe concurrent HTTP fetching."""
+        sess = getattr(self._thread_local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            adapter = HTTPAdapter(pool_connections=6, pool_maxsize=6)
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+            sess.headers.update(self.session.headers)
+            sess.proxies = dict(self.session.proxies)
+            self._thread_local.session = sess
+        return sess
+
+    def close(self):
+        """Shut down background executor cleanly."""
+        if getattr(self, "_executor", None) is not None:
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
+
+    def _fetch_live_spot_price(self, sess: requests.Session = None) -> Tuple[Optional[float], str, float, int]:
+        """Fetch live BTC/USDT spot price with multi-source failover.
+
+        Returns:
+            (price, source_name, latency_ms, byte_count) or (None, 'stale', 0.0, 0)
+        """
+        http = sess or self.session
+        endpoints = (
+            ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
+            ("binance_com", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+            ("okx", "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"),
+        )
+        for src, url in endpoints:
+            t0 = time.perf_counter()
+            try:
+                resp = http.get(url, timeout=2.0)
+                lat_ms = (time.perf_counter() - t0) * 1000.0
+                byte_count = len(resp.content)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    px = None
+                    if src.startswith("binance"):
+                        px = float(data.get("price", 0.0) or 0.0)
+                    elif src == "okx":
+                        rows = data.get("data") or []
+                        if rows:
+                            px = float(rows[0].get("last", 0.0) or 0.0)
+                    if px and px > 0:
+                        return px, src, lat_ms, byte_count
+            except Exception:
+                continue
+        return None, "stale", 0.0, 0
+
+    def _build_spot_state(
         self,
         open_price: float,
-        now: float = None,
+        t: float,
+        live_px: Optional[float],
+        src: str,
+        lat_ms: float,
+        byte_count: int,
         binance_open_price: float = None,
-        poly_spot: float = None
+        poly_spot: float = None,
     ) -> SpotState:
-        """Fetch current Binance BTC spot, compute 3s velocity, return bps, and rolling volatility."""
-        t = now or time.time()
-        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        # Never fall back to the Poly TWAP strike as if it were a Binance spot
-        # print: that mixes the two reference chains and injects a fake basis.
-        current_px = float(getattr(self, "_last_binance_px", 0.0) or 0.0) or open_price
-        t0 = time.perf_counter()
-        byte_count = 0
-        try:
-            resp = self.session.get(url, timeout=2.0)
-            lat_ms = (time.perf_counter() - t0) * 1000.0
-            byte_count = len(resp.content)
-            if resp.status_code == 200:
-                current_px = float(resp.json().get("price", current_px))
-                self._last_binance_px = current_px
+        is_stale = False
+        spot_ts = t
+
+        if live_px is not None and live_px > 0:
+            current_px = live_px
+            self._last_binance_px = current_px
+            self._last_binance_t = t
+            self._last_spot_source = src
             self._record_net("binance", lat_ms, byte_count)
-        except Exception:
-            pass
+            self.spot_history.append((t, current_px))
+        else:
+            is_stale = True
+            current_px = float(getattr(self, "_last_binance_px", 0.0) or 0.0)
+            spot_ts = float(getattr(self, "_last_binance_t", 0.0) or 0.0)
+            src = "stale"
 
-        self.spot_history.append((t, current_px))
-
-        # Calculate 3-second rapid shift velocity in bps
+        # Calculate 2-3s rapid shift velocity in bps
         velocity_3s = 0.0
-        for old_t, old_px in reversed(self.spot_history):
-            if (t - old_t) >= 2.5:
-                if old_px > 0:
-                    velocity_3s = ((current_px - old_px) / old_px) * 10000.0
-                break
+        if current_px > 0:
+            for old_t, old_px in reversed(self.spot_history):
+                if (t - old_t) >= 2.0:
+                    if old_px > 0:
+                        velocity_3s = ((current_px - old_px) / old_px) * 10000.0
+                    break
 
-        # Calculate return in bps from window open (strictly Binance vs Binance open baseline)
         bin_open = binance_open_price or open_price
         return_bps = 0.0
-        if bin_open > 0:
+        if bin_open > 0 and current_px > 0:
             return_bps = ((current_px - bin_open) / bin_open) * 10000.0
 
-        is_shock = abs(velocity_3s) >= config.PARAMS["TOXICITY_SHOCK_BPS"]
+        toxic_thresh = float(config.PARAMS.get("TOXICITY_SHOCK_BPS", 3.5))
+        is_shock = abs(velocity_3s) >= toxic_thresh
 
-        # Calculate high-frequency dynamic realized volatility (EWMA over rolling 60s)
-        realized_vol_bps = calculate_dynamic_realized_vol(list(self.spot_history), baseline_vol_bps=15.0)
+        realized_vol_bps = calculate_dual_horizon_vol(
+            list(self.spot_history),
+            baseline_vol_bps=float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0)),
+        )
         _, _, regime = calculate_adaptive_spread_params(realized_vol_bps)
 
-        # Record raw spot price to data/1_market/oracle/
-        self.record_raw_event("oracle", {
-            "t": round(t, 2), "kind": "spot", "price": current_px, "return_bps": round(return_bps, 2),
-            "realized_vol_bps": realized_vol_bps, "regime": regime
-        })
+        if not is_stale and current_px > 0:
+            self.record_raw_event("oracle", {
+                "t": round(t, 2), "kind": "spot", "price": current_px,
+                "source": src, "return_bps": round(return_bps, 2),
+                "realized_vol_bps": realized_vol_bps, "regime": regime
+            })
 
         return SpotState(
-            timestamp=t,
+            timestamp=spot_ts,
             price=current_px,
             open_price=open_price,
             return_bps=return_bps,
@@ -391,18 +476,35 @@ class MarketFeed:
             is_toxic_shock=is_shock,
             regime=regime,
             poly_price=poly_spot,
-            binance_open_price=binance_open_price
+            binance_open_price=binance_open_price,
+            spot_source=src,
+            is_stale=is_stale,
+            velocity_bps=round(velocity_3s, 3),
         )
 
-    def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:
-        """Fetch Polymarket CLOB order book and last_trade_price."""
+    def fetch_spot_state(
+        self,
+        open_price: float,
+        now: float = None,
+        binance_open_price: float = None,
+        poly_spot: float = None
+    ) -> SpotState:
+        """Fetch live BTC/USDT spot, compute velocity, return bps, and dual-horizon volatility."""
+        t = now or time.time()
+        live_px, src, lat_ms, byte_count = self._fetch_live_spot_price()
+        return self._build_spot_state(
+            open_price, t, live_px, src, lat_ms, byte_count,
+            binance_open_price=binance_open_price, poly_spot=poly_spot,
+        )
+
+    def _fetch_order_book_raw(self, token_id: str, sess: requests.Session = None) -> Tuple[Optional[OrderBook], float, int, Optional[dict]]:
+        http = sess or self.session
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
         t0 = time.perf_counter()
         try:
-            resp = self.session.get(url, timeout=2.0)
+            resp = http.get(url, timeout=2.0)
             lat_ms = (time.perf_counter() - t0) * 1000.0
             byte_count = len(resp.content)
-            self._record_net("poly", lat_ms, byte_count)
             if resp.status_code == 200:
                 data = resp.json()
                 raw_bids = data.get("bids", [])
@@ -410,40 +512,86 @@ class MarketFeed:
                 last_trade_str = data.get("last_trade_price")
                 last_trade_px = float(last_trade_str) if last_trade_str is not None else None
 
-                bids = [(float(b["price"]), float(b["size"])) for b in raw_bids if float(b["size"]) > 0]
-                asks = [(float(a["price"]), float(a["size"])) for a in raw_asks if float(a["size"]) > 0]
-
-                # Bids sorted descending (highest bid first)
-                bids_sorted = sorted(bids, key=lambda x: x[0], reverse=True)
-                # Asks sorted ascending (lowest ask first)
-                asks_sorted = sorted(asks, key=lambda x: x[0])
-
-                # Record raw order book event to data/1_market/events/
-                self.record_raw_event("events", {
-                    "t": round(time.time(), 2),
+                bids_sorted = sorted(
+                    [(float(b["price"]), float(b["size"])) for b in raw_bids if float(b["size"]) > 0],
+                    key=lambda x: x[0], reverse=True,
+                )
+                asks_sorted = sorted(
+                    [(float(a["price"]), float(a["size"])) for a in raw_asks if float(a["size"]) > 0],
+                    key=lambda x: x[0],
+                )
+                now_t = time.time()
+                raw_ev = {
+                    "t": round(now_t, 2),
                     "token_id": token_id,
-                    "outcome": outcome_name,
                     "best_bid": bids_sorted[0][0] if bids_sorted else None,
                     "best_ask": asks_sorted[0][0] if asks_sorted else None,
                     "bid_depth": bids_sorted[:5],
                     "ask_depth": asks_sorted[:5],
-                    "last_trade_price": last_trade_px
-                })
-
-                return OrderBook(
+                    "last_trade_price": last_trade_px,
+                }
+                book = OrderBook(
                     bids=bids_sorted,
                     asks=asks_sorted,
                     last_trade_price=last_trade_px,
-                    source_t=time.time(),
-                    received_at=time.time()
+                    source_t=now_t,
+                    received_at=now_t,
                 )
+                return book, lat_ms, byte_count, raw_ev
+            return None, lat_ms, byte_count, None
         except Exception:
-            pass
+            return None, 0.0, 0, None
 
-        # An empty ladder is a feed failure, not a tradable one-sided market.
-        # source_t=0 plus the runner's empty-book check trips the dead-man switch.
+    def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:
+        """Fetch Polymarket CLOB order book and last_trade_price."""
+        book, lat_ms, byte_count, raw_ev = self._fetch_order_book_raw(token_id)
+        if lat_ms > 0:
+            self._record_net("poly", lat_ms, byte_count)
+        if book is not None and raw_ev is not None:
+            raw_ev["outcome"] = outcome_name
+            self.record_raw_event("events", raw_ev)
+            return book
         return OrderBook(bids=[], asks=[], last_trade_price=None,
                          source_t=0.0, received_at=0.0)
+
+    def fetch_tick_bundle(
+        self,
+        open_price: float,
+        binance_open_price: float,
+        token_up: str,
+        token_down: str,
+        now: float = None,
+        poly_spot: float = None,
+    ) -> Tuple[SpotState, OrderBook, OrderBook]:
+        """Concurrently fetch BTC spot + Up book + Down book (1x RTT instead of 3x RTT)."""
+        t = now or time.time()
+        f_spot = self._executor.submit(lambda: self._fetch_live_spot_price(self._get_worker_session()))
+        f_up = self._executor.submit(lambda: self._fetch_order_book_raw(token_up, self._get_worker_session()))
+        f_dn = self._executor.submit(lambda: self._fetch_order_book_raw(token_down, self._get_worker_session()))
+
+        live_px, src, spot_lat, spot_bytes = f_spot.result()
+        up_book, up_lat, up_bytes, up_ev = f_up.result()
+        dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result()
+
+        spot = self._build_spot_state(
+            open_price, t, live_px, src, spot_lat, spot_bytes,
+            binance_open_price=binance_open_price, poly_spot=poly_spot,
+        )
+
+        def _finalize_book(book, lat_ms, byte_count, raw_ev, outcome):
+            if lat_ms > 0:
+                self._record_net("poly", lat_ms, byte_count)
+            if book is not None and raw_ev is not None:
+                raw_ev["outcome"] = outcome
+                self.record_raw_event("events", raw_ev)
+                return book
+            return OrderBook(bids=[], asks=[], last_trade_price=None, source_t=0.0, received_at=0.0)
+
+        return (
+            spot,
+            _finalize_book(up_book, up_lat, up_bytes, up_ev, "Up"),
+            _finalize_book(dn_book, dn_lat, dn_bytes, dn_ev, "Down"),
+        )
 
     def verify_official_settlement(self, slug: str) -> Optional[dict]:
         """Query Gamma API to obtain officially resolved outcome truth.

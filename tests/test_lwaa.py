@@ -1,214 +1,129 @@
-"""Unit tests for the PM-Quant v2.2 dual-stage absorption strategy (MWDE + LWAA).
-
-Verifies the mathematical invariants and execution behavior:
-1. Early-window standby and MWDE discount-only entry (no chase above $0.45).
-2. Late-window high-confidence detection (LWAA tau in [15s, 120s], P* >= 0.80).
-3. Taker absorption on mispriced asks (P* - ask - fee >= 0.02, within [0.35, 0.65]).
-4. Maker absorption on bids when the ask is expensive.
-5. Strict anti-panic hold-to-expiration (taker unwinds disabled).
-6. Risk-free arbitrage lock when pair_cost <= 1.00.
-7. Tail freeze when tau < 15s.
-8. End-to-end PaperRunner execution and settlement PnL.
-"""
+"""Unit tests for v2.3 Entry Window, Tail Freeze, Quote Attempts, and Lifecycle."""
 import unittest
-import sys
 import tempfile
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
-from core.types import OrderBook, Position, SpotState, Decision
+from core.types import OrderBook, Position, SpotState
 from core.policy import plan_decision
 from runtime.runner import PaperRunner
 
 
-class TestLWAAStrategy(unittest.TestCase):
+class TestV23EntryAndLifecycle(unittest.TestCase):
     def setUp(self):
-        self.params = dict(config.PARAMS)
+        self.params = dict(
+            config.PARAMS,
+            ENTRY_MIN_TAU_S=15.0,
+            ENTRY_MAX_TAU_S=240.0,
+            ENTRY_MIN_PROB=0.50,
+            ENTRY_MIN_PRICE=0.20,
+            ENTRY_MAX_PRICE=0.75,
+            MIN_MAKER_EDGE=0.04,
+            MIN_TAKER_EDGE=0.08,
+            MAX_QUOTE_ATTEMPTS=1,
+            ENABLE_ARBITRAGE_HEDGE=False,
+        )
 
-    def test_early_window_standby(self):
-        """Invariant 1: MWDE window stands by when the book offers no discount <= $0.45."""
+    def test_observation_period_standby(self):
+        """First 60s (tau > 240s) stays in observation standby."""
         pos = Position(0.0, 0.0)
-        book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
-        spot = SpotState(timestamp=1000.0, price=75100.0, open_price=75000.0)
-
-        # tau = 200s is inside MWDE (120, 240], but bid/ask 0.48/0.50 exceed the $0.45 dip cap
-        dec = plan_decision(pos, pos, book, book, spot, tau_s=200.0, params=self.params, p_fair=0.92)
+        book_up = OrderBook(bids=[(0.50, 50.0)], asks=[(0.52, 50.0)])
+        book_dn = OrderBook(bids=[(0.47, 50.0)], asks=[(0.49, 50.0)])
+        spot = SpotState(timestamp=1020.0, price=75200.0, open_price=75000.0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=260.0, params=self.params, p_fair=0.92)
         self.assertEqual(dec.action, "wait")
-        self.assertIn("Standby in early/mid window", dec.reason)
+        self.assertTrue(dec.urgent_cancel)
 
-    def test_tail_freeze(self):
-        """Invariant 2: Tail freeze (tau < 15s) freezes entry and pulls resting orders."""
+    def test_tail_freeze_standby(self):
+        """Tail window (tau < 15s) freezes all new entries and pulls quotes."""
         pos = Position(0.0, 0.0)
-        book = OrderBook(bids=[(0.85, 50.0)], asks=[(0.87, 50.0)])
-        spot = SpotState(timestamp=1290.0, price=75100.0, open_price=75000.0)
-
-        # tau = 10s (< LWAA_MIN_TAU_S = 15s)
-        dec = plan_decision(pos, pos, book, book, spot, tau_s=10.0, params=self.params, p_fair=0.95)
+        book_up = OrderBook(bids=[(0.40, 50.0)], asks=[(0.42, 50.0)])
+        book_dn = OrderBook(bids=[(0.57, 50.0)], asks=[(0.59, 50.0)])
+        spot = SpotState(timestamp=1290.0, price=75200.0, open_price=75000.0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=10.0, params=self.params, p_fair=0.95)
         self.assertEqual(dec.action, "wait")
         self.assertIn("Tail freeze", dec.reason)
         self.assertTrue(dec.urgent_cancel)
 
-    def test_late_window_uncertain_outcome(self):
-        """Invariant 3: Late window with uncertain odds (P* < 0.80) does not gamble."""
+    def test_inconsistent_book_rejected_strictly(self):
+        """Crossed or sub-$1 ask sums are rejected rather than shifted."""
         pos = Position(0.0, 0.0)
-        book = OrderBook(bids=[(0.52, 50.0)], asks=[(0.55, 50.0)])
-        spot = SpotState(timestamp=1260.0, price=75005.0, open_price=75000.0)
-
-        # tau = 40s, p_fair = 0.54 (uncertain)
-        dec = plan_decision(pos, pos, book, book, spot, tau_s=40.0, params=self.params, p_fair=0.54)
+        book_up = OrderBook(bids=[(0.52, 50.0)], asks=[(0.55, 50.0)])
+        book_dn = OrderBook(bids=[(0.52, 50.0)], asks=[(0.55, 50.0)])
+        spot = SpotState(timestamp=1260.0, price=75010.0, open_price=75000.0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.54)
         self.assertEqual(dec.action, "wait")
-        self.assertIn("Outcome uncertain", dec.reason)
+        self.assertIn("Inconsistent book", dec.reason)
 
-    def test_late_window_taker_absorption_up(self):
-        """Invariant 4: When P*(Up) >= 0.80 and ask has net positive edge within max_entry_px (<= 0.65), immediate taker buy Up."""
+    def test_taker_buy_up_and_down(self):
+        """Taker IOC executes on either Up or Down when net edge >= MIN_TAKER_EDGE."""
         pos = Position(0.0, 0.0)
-        book_up = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)])
-        book_dn = OrderBook(bids=[(0.38, 20.0)], asks=[(0.40, 20.0)])
-        spot = SpotState(timestamp=1260.0, price=75150.0, open_price=75000.0)
+        book_up = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)])
+        book_dn = OrderBook(bids=[(0.38, 50.0)], asks=[(0.41, 50.0)])
+        spot_up = SpotState(timestamp=1260.0, price=75150.0, open_price=75000.0)
+        dec_up = plan_decision(pos, pos, book_up, book_dn, spot_up, tau_s=40.0, params=self.params, p_fair=0.94)
+        self.assertEqual(dec_up.action, "taker_buy")
+        self.assertEqual(dec_up.side, "Up")
 
-        # tau = 40s, p_fair = 0.94
-        # ask = 0.60 <= 0.65, fee = 0.07 * 0.60 * 0.40 = 0.0168, net cost = 0.6168
-        # edge = 0.94 - 0.6168 = 0.3232 >= 0.02
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.94)
-        self.assertEqual(dec.action, "taker_buy")
-        self.assertEqual(dec.side, "Up")
-        self.assertAlmostEqual(dec.price, 0.60)
-        self.assertEqual(dec.size, 5.0)
-        self.assertIn("LWAA Taker Absorption", dec.reason)
+        book_up2 = OrderBook(bids=[(0.35, 50.0)], asks=[(0.37, 50.0)])
+        book_dn2 = OrderBook(bids=[(0.62, 50.0)], asks=[(0.64, 50.0)])
+        spot_dn = SpotState(timestamp=1260.0, price=74850.0, open_price=75000.0)
+        dec_dn = plan_decision(pos, pos, book_up2, book_dn2, spot_dn, tau_s=40.0, params=self.params, p_fair=0.05)
+        self.assertEqual(dec_dn.action, "taker_buy")
+        self.assertEqual(dec_dn.side, "Down")
 
-    def test_late_window_taker_absorption_down(self):
-        """Invariant 5: When P*(Down) >= 0.80 and ask has net positive edge within max_entry_px (<= 0.65), immediate taker buy Down."""
+    def test_maker_quote_when_ask_lacks_taker_edge(self):
+        """When ask offers < 0.08 net edge but bid offers >= 0.04 maker edge, quote as maker."""
         pos = Position(0.0, 0.0)
-        book_up = OrderBook(bids=[(0.38, 20.0)], asks=[(0.40, 20.0)])
-        book_dn = OrderBook(bids=[(0.56, 20.0)], asks=[(0.58, 20.0)])
-        spot = SpotState(timestamp=1260.0, price=74850.0, open_price=75000.0)
-
-        # tau = 40s, p_fair_up = 0.05 -> p_fair_down = 0.95
-        # ask_down = 0.58 <= 0.65, fee = 0.07 * 0.58 * 0.42 = 0.017, net cost = 0.597
-        # edge = 0.95 - 0.597 = 0.353 >= 0.02
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.05)
-        self.assertEqual(dec.action, "taker_buy")
-        self.assertEqual(dec.side, "Down")
-        self.assertAlmostEqual(dec.price, 0.58)
-        self.assertEqual(dec.size, 5.0)
-        self.assertIn("LWAA Taker Absorption", dec.reason)
-
-    def test_maker_absorption_when_ask_expensive(self):
-        """Invariant 6: When ask is outside entry corridor (> 0.65), maker bid is placed at or below 0.65 at zero fee."""
-        pos = Position(0.0, 0.0)
-        # Ask is 0.75 (> max_entry_px 0.65), but bid is 0.60 with ample edge
-        book_up = OrderBook(bids=[(0.60, 20.0)], asks=[(0.75, 20.0)])
-        book_dn = OrderBook(bids=[(0.20, 20.0)], asks=[(0.25, 20.0)])
-        spot = SpotState(timestamp=1260.0, price=75120.0, open_price=75000.0)
-
-        # tau = 40s, p_fair = 0.92
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.92)
+        # p_fair=0.80: ask=0.74+fee=0.7535 (edge=0.046 < 0.08); bid=0.70 -> improve to 0.71 (edge=0.09 >= 0.04)
+        book_up = OrderBook(bids=[(0.70, 50.0)], asks=[(0.74, 50.0)])
+        book_dn = OrderBook(bids=[(0.25, 50.0)], asks=[(0.27, 50.0)])
+        spot = SpotState(timestamp=1260.0, price=75100.0, open_price=75000.0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.80)
         self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")
-        self.assertAlmostEqual(dec.price, 0.60)
-        self.assertIn("LWAA Maker Absorption", dec.reason)
+        self.assertAlmostEqual(dec.price, 0.71)
 
-    def test_single_leg_holding_strictly_never_unwinds(self):
-        """Invariant 7: Once entered, single-leg position is held to settlement. Zero panic unwinds."""
-        pos_up = Position(shares=5.0, cash=4.25) # 5 Up bought @ 0.85
-        pos_dn = Position(0.0, 0.0)
-        # Market temporarily shows a 0.10 bid and 0.85 ask on Down
-        book_up = OrderBook(bids=[(0.10, 50.0)], asks=[(0.20, 50.0)])
-        book_dn = OrderBook(bids=[(0.75, 50.0)], asks=[(0.85, 50.0)])
-        spot = SpotState(timestamp=1270.0, price=74990.0, open_price=75000.0)
+    def test_max_quote_attempts_respected_without_urgent_cancel(self):
+        """Once quote_attempts hits MAX_QUOTE_ATTEMPTS, stop new quotes but keep resting quote alive."""
+        pos = Position(0.0, 0.0)
+        book_up = OrderBook(bids=[(0.70, 50.0)], asks=[(0.74, 50.0)])
+        book_dn = OrderBook(bids=[(0.25, 50.0)], asks=[(0.27, 50.0)])
+        spot = SpotState(timestamp=1260.0, price=75100.0, open_price=75000.0)
 
-        # v2.2 never panic-sells at the 0.10 floor; it holds the single leg to settlement.
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=30.0, params=self.params, p_fair=0.40)
-        self.assertNotEqual(dec.action, "taker_unwind")
-        self.assertEqual(dec.action, "wait")
-        self.assertIn("Holding 5 Up", dec.reason)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.80, quote_attempts=0)
+        self.assertEqual(dec.action, "quote")
 
-    def test_arbitrage_lock_when_pair_cost_under_1(self):
-        """Invariant 8: If arbitrage hedge is enabled and opposite ask locks pair_cost <= 1.00, taker hedge executes."""
-        pos_up = Position(shares=5.0, cash=4.25) # 5 Up @ 0.85 basis
-        pos_dn = Position(0.0, 0.0)
-        # Down ask is 0.12: pair_cost = 0.85 + 0.12 + 0.007 = 0.977 <= 1.00!
-        book_up = OrderBook(bids=[(0.84, 50.0)], asks=[(0.88, 50.0)])
-        book_dn = OrderBook(bids=[(0.10, 50.0)], asks=[(0.12, 50.0)])
-        spot = SpotState(timestamp=1270.0, price=75150.0, open_price=75000.0)
+        dec2 = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=39.0, params=self.params, p_fair=0.80, quote_attempts=1)
+        self.assertEqual(dec2.action, "wait")
+        self.assertFalse(dec2.urgent_cancel)
 
-        hedge_params = dict(self.params, LWAA_ENABLE_ARBITRAGE_HEDGE=True)
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=30.0, params=hedge_params, p_fair=0.94)
-        self.assertEqual(dec.action, "taker_hedge")
-        self.assertEqual(dec.side, "Down")
-        self.assertAlmostEqual(dec.price, 0.12)
-        self.assertIn("Arbitrage lock", dec.reason)
-
-    def test_end_to_end_runner_lwaa_trade_and_settlement(self):
-        """Invariant 9: Full lifecycle - standby early, taker buy in late window, hold, settlement win."""
+    def test_end_to_end_runner_v23_lifecycle(self):
+        """Full lifecycle: early standby -> edge taker buy -> hold -> settlement win."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             runner = PaperRunner(ledger_dir=tmp_dir)
-            runner.live_file = Path(tmp_dir) / "live.json"
-            runner.summary_file = Path(tmp_dir) / "summary.jsonl"
-            runner.windows_dir = Path(tmp_dir) / "windows"
-            runner.windows_dir.mkdir(parents=True, exist_ok=True)
+            runner.start_window("btc-updown-5m-1000", 1000.0, 1300.0, open_px=75000.0, binance_open_px=75000.0)
 
-            start_t = 1000.0
-            end_t = 1300.0
-            open_px = 75000.0
-            runner.start_window("test_lwaa_window", start_t, end_t, open_px=open_px)
-
-            book_up = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)], source_t=1150.0)
-            book_dn = OrderBook(bids=[(0.38, 20.0)], asks=[(0.40, 20.0)], source_t=1150.0)
-
-            # Tick 1: tau = 200s (MWDE), book 0.58/0.60 above the $0.45 dip cap -> Standby, no trades
-            spot_early = SpotState(timestamp=1100.0, price=75150.0, open_price=open_px, realized_vol_bps=15.0)
-            runner._last_step_time = 1100.0
-            runner.step(1100.0, spot_early, book_up, book_dn, poly_spot=75150.0)
+            book_up = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)], source_t=1020.0)
+            book_dn = OrderBook(bids=[(0.39, 50.0)], asks=[(0.41, 50.0)], source_t=1020.0)
+            spot_early = SpotState(timestamp=1020.0, price=75010.0, open_price=75000.0, realized_vol_bps=14.0, binance_open_price=75000.0)
+            runner.step(1020.0, spot_early, book_up, book_dn)
             self.assertEqual(len(runner.fills), 0)
 
-            # Tick 2: Late window (tau = 40s) -> High confidence P* >= 0.80 -> Taker Buy 5 shares Up @ 0.60
-            book_up.source_t = 1260.0
-            book_dn.source_t = 1260.0
-            spot_late = SpotState(timestamp=1260.0, price=75150.0, open_price=open_px, realized_vol_bps=15.0)
-            runner._last_step_time = 1260.0
-            runner.step(1260.0, spot_late, book_up, book_dn, poly_spot=75150.0)
+            book_up_late = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)], source_t=1260.0)
+            book_dn_late = OrderBook(bids=[(0.39, 50.0)], asks=[(0.41, 50.0)], source_t=1260.0)
+            spot_late = SpotState(timestamp=1260.0, price=75200.0, open_price=75000.0, realized_vol_bps=14.0, binance_open_price=75000.0)
+            runner.step(1260.0, spot_late, book_up_late, book_dn_late, replay_mode=True)
             self.assertEqual(len(runner.fills), 1)
-            fill = runner.fills[0]
-            self.assertEqual(fill["side"], "Up")
-            self.assertEqual(fill["kind"], "taker")
-            self.assertEqual(fill["size"], 5.0)
-            self.assertAlmostEqual(fill["price"], 0.60)
+            self.assertEqual(runner.pos_up.shares, 5.0)
 
-            # Tick 3: Tail freeze (tau = 10s) -> Holding position, no new fills
-            book_up.source_t = 1290.0
-            book_dn.source_t = 1290.0
-            spot_tail = SpotState(timestamp=1290.0, price=75140.0, open_price=open_px, realized_vol_bps=15.0)
-            runner._last_step_time = 1290.0
-            runner.step(1290.0, spot_tail, book_up, book_dn, poly_spot=75140.0)
-            self.assertEqual(len(runner.fills), 1)
-
-            # Settlement: Close at 75140.0 (> 75000.0), Up wins!
-            runner.close_window(close_px=75140.0, official_winner="Up")
-            self.assertGreater(runner.total_pnl, 0.0)
-            self.assertAlmostEqual(runner.total_pnl, 5.00 - runner.pos_up.cash, places=3)
-
-    def test_max_entry_price_ceiling_and_single_quote_attempt(self):
-        """Invariant 10: Strict ceiling at $0.65 (never chase > $0.70) and stop re-quoting if quote fails."""
-        pos = Position(0.0, 0.0)
-        # Ask is 0.72 (> 0.70 hard chase ceiling)
-        book_up = OrderBook(bids=[(0.68, 20.0)], asks=[(0.72, 20.0)])
-        book_dn = OrderBook(bids=[(0.25, 20.0)], asks=[(0.28, 20.0)])
-        spot = SpotState(timestamp=1260.0, price=75150.0, open_price=75000.0)
-
-        # 1. Ask 0.72 is above max_entry_px 0.65 -> taker_buy rejected, maker bid clamped to <= 0.65
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.92, quote_attempts=0)
-        self.assertEqual(dec.action, "quote")
-        self.assertLessEqual(dec.price, 0.65)
-
-        # 2. If already attempted quote once (quote_attempts >= 1), "挂不上也不要再挂了" -> wait
-        dec2 = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, p_fair=0.92, quote_attempts=1)
-        self.assertEqual(dec2.action, "wait")
-        self.assertIn("已达最大挂单次数", dec2.reason)
+            runner.close_window(close_px=75150.0, official_winner="Up")
+            self.assertGreater(runner.total_pnl, 1.5)
 
 
 if __name__ == "__main__":

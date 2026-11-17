@@ -56,20 +56,16 @@ class TestMathematicalInvariants(unittest.TestCase):
         self.assertEqual(taker_fee_per_share(1.0, rate), 0.0)
 
         # Taker hedge must book the official fee into position cash
-        runner = PaperRunner()
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp_dir:
-            runner.live_file = Path(tmp_dir) / "live.json"
-            runner.summary_file = Path(tmp_dir) / "summary.jsonl"
-            runner.windows_dir = Path(tmp_dir) / "windows"
-            runner.windows_dir.mkdir()
+            runner = PaperRunner(ledger_dir=tmp_dir)
             runner.start_window("test_fee", 1000.0, 1300.0, open_px=75000.0)
             runner.pos_up = Position(shares=10.0, cash=3.80)
-            # Complementary books (ask_up + ask_down == 1.00) so the hedge is a
-            # genuine lock; the runner reconciles inconsistent snapshots first.
-            book_up = OrderBook(bids=[(0.38, 50.0)], asks=[(0.40, 50.0)])
-            book_down = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)])
+            book_up = OrderBook(bids=[(0.38, 50.0)], asks=[(0.40, 50.0)], source_t=1260.0)
+            book_down = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)], source_t=1260.0)
             spot = SpotState(timestamp=1260.0, price=74700.0, open_price=75000.0, realized_vol_bps=15.0)
-            runner.step(1260.0, spot, book_up, book_down, poly_spot=74700.0)
+            with patch.dict(config.PARAMS, {"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00}):
+                runner.step(1260.0, spot, book_up, book_down, poly_spot=74700.0)
             expected_fee = round(10.0 * rate * 0.60 * 0.40, 4)
             self.assertEqual(runner.pos_down.shares, 10.0)
             self.assertAlmostEqual(runner.pos_down.cash, 10.0 * 0.60 + expected_fee, places=4)

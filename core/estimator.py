@@ -47,21 +47,47 @@ def estimate_p_fair(
     vol_bps: float,
     poly_price: Optional[float] = None
 ) -> float:
-    """Probability that Up settles above the window strike `open_px`.
+    """Estimate probability that Chainlink 60s TWAP settles >= window strike `open_px`.
 
-    Single source of truth for the reference chain. The runner and the policy
-    used to carry two slightly different chains (Poly TWAP vs Poly strike,
-    Binance spot vs Binance open, spot vs strike), which could disagree on the
-    same tick. `open_px` is always the window strike; `poly_price` is the live
-    Polymarket TWAP when available.
+    v2.3 Architecture (Zero Lag-Mixing + Asian TWAP):
+    - Never feed the 60s-lagging `poly_price` (trailing TWAP) directly into Phi(Z)
+      as if it were instantaneous spot price.
+    - When `spot.basis_ema` is available alongside the official Chainlink strike
+      `open_px`, compute live Chainlink spot estimate `cl_est = spot.price - basis_ema`.
+    - Adjust variance for the 60s Chainlink TWAP settlement payoff:
+      * tau > 60s: variance of 60s terminal average scales as (tau - 40)/300.
+      * tau <= 60s: incorporate already-realized `[end-60, t]` average
+        (`spot.twap_realized_60s`) and remaining `(tau/60) * sqrt((tau/300)/3)` std.
+    - When `basis_ema` is unavailable, stay strictly on the single Binance chain
+      (`spot.price` vs `spot.binance_open_price`) to avoid cross-source basis error.
     """
-    if poly_price and poly_price > 0 and open_px > 0:
-        return estimate_fair_prob(poly_price, open_px, tau_s, vol_bps)
+    spot_px = float(getattr(spot, "price", 0.0) or 0.0)
+    basis_ema = getattr(spot, "basis_ema", None)
+    realized_60 = getattr(spot, "twap_realized_60s", None)
+
+    if basis_ema is not None and spot_px > 0 and open_px > 0:
+        cl_est = max(1e-6, spot_px - float(basis_ema))
+        if tau_s <= 0.5:
+            final_est = float(realized_60) if (realized_60 and realized_60 > 0) else cl_est
+            return 0.99 if final_est >= open_px else 0.01
+        if tau_s <= 60.0:
+            u = 60.0 - tau_s
+            avg_realized = float(realized_60) if (realized_60 and realized_60 > 0) else cl_est
+            expected_close = (u * avg_realized + tau_s * cl_est) / 60.0
+            sigma_5m = vol_bps / 10000.0
+            std_close = max(1e-5, sigma_5m * math.sqrt((tau_s / 300.0) / 3.0) * (tau_s / 60.0))
+            prob = normal_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
+            return max(0.01, min(0.99, round(prob, 4)))
+        eff_tau = max(10.0, tau_s - 40.0)
+        return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps)
+
     bin_open = getattr(spot, "binance_open_price", None)
-    if bin_open and bin_open > 0 and getattr(spot, "price", 0.0) > 0:
-        return estimate_fair_prob(spot.price, bin_open, tau_s, vol_bps)
-    if open_px > 0 and getattr(spot, "price", 0.0) > 0:
-        return estimate_fair_prob(spot.price, open_px, tau_s, vol_bps)
+    if bin_open and bin_open > 0 and spot_px > 0:
+        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
+        return estimate_fair_prob(spot_px, float(bin_open), eff_tau, vol_bps)
+    if open_px > 0 and spot_px > 0:
+        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
+        return estimate_fair_prob(spot_px, open_px, eff_tau, vol_bps)
     return 0.50
 
 
@@ -127,6 +153,22 @@ def calculate_dynamic_realized_vol(
     
     # Bounded between 2.0 bps and 80.0 bps
     return max(2.0, min(80.0, round(vol_bps, 2)))
+
+
+def calculate_dual_horizon_vol(
+    spot_history: List[Tuple[float, float]],
+    baseline_vol_bps: float = 14.0,
+    fast_half_life_s: float = 20.0,
+    slow_half_life_s: float = 300.0,
+) -> float:
+    """Combine fast (20s) and slow (5m over 30m buffer) EWMA realized volatility.
+
+    Takes the conservative maximum so sudden jumps are priced immediately while
+    brief 30-60s pauses inside a volatile session do not collapse model vol.
+    """
+    fast = calculate_dynamic_realized_vol(spot_history, baseline_vol_bps=baseline_vol_bps, half_life_s=fast_half_life_s)
+    slow = calculate_dynamic_realized_vol(spot_history, baseline_vol_bps=baseline_vol_bps, half_life_s=slow_half_life_s)
+    return round(max(fast, slow), 2)
 
 
 def calculate_adaptive_spread_params(

@@ -269,7 +269,11 @@ class QuantHandler(BaseHTTPRequestHandler):
             self.send_json({"batches": available, "current_batch": config.BATCH_ID})
         elif path == "/api/live":
             active = _read_live()
-            self.send_json(active or {"status": "idle", "message": "当前没有进行中的轮次"})
+            if active:
+                payload = dict(active, server_time=time.time())
+            else:
+                payload = {"status": "idle", "batch_id": config.BATCH_ID, "server_time": time.time(), "message": "当前没有进行中的轮次"}
+            self.send_json(payload)
         elif path == "/api/window":
             qs = parse_qs(parsed.query)
             slug = qs.get("slug", [""])[0]

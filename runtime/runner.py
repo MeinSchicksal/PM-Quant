@@ -20,7 +20,7 @@ from core.policy import plan_decision
 from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
-from sim.matcher import QueueMatcher, make_complementary
+from sim.matcher import QueueMatcher, make_complementary, is_books_consistent
 
 
 class PaperRunner:
@@ -46,6 +46,9 @@ class PaperRunner:
         self.working_orders = []
         self.fills = []
         self.decisions = []
+        self.decision_timeline = []
+        self._last_timeline_key = None
+        self._last_timeline_t = 0.0
         self.actions = []
         self.insurance_paid = 0.0
         self.total_pnl = 0.0
@@ -63,6 +66,10 @@ class PaperRunner:
         self._last_step_time = None
         self.consecutive_up = 0
         self.consecutive_down = 0
+        self._spot_buf = []
+        self._basis_ema = None
+        self._basis_updated_t = 0.0
+        self._basis_sample_count = 0
         self._load_ledger_history()
 
     def _load_ledger_history(self):
@@ -120,6 +127,9 @@ class PaperRunner:
         self.working_orders = []
         self.fills = []
         self.decisions = []
+        self.decision_timeline = []
+        self._last_timeline_key = None
+        self._last_timeline_t = 0.0
         self.actions = []
         self.insurance_paid = 0.0
         self.entries_count = 0
@@ -209,7 +219,8 @@ class PaperRunner:
         net_stats: dict = None,
         trade_prints: list = None,
         poly_spot: float = None,
-        replay_mode: bool = False
+        replay_mode: bool = False,
+        delayed_book_fetcher=None
     ):
         """Execute one evaluation tick: probability, regime, risk gates, matching.
 
@@ -218,36 +229,53 @@ class PaperRunner:
         and must not cancel resting quotes during a replay.
         """
         tau = max(0.0, self.window_end - now)
-        # Single shared chokepoint for live and replay: reconcile the two
-        # complementary token books to no-arbitrage before any decision or fill,
-        # so inconsistent dual snapshots can never book a sub-$1 pair as profit.
-        book_up, book_down = make_complementary(book_up, book_down)
+        if not bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True)):
+            book_up, book_down = make_complementary(book_up, book_down)
         open_px = getattr(self, "open_price", 0.0)
-        # A 2-3 bps EWMA reading makes Phi(d) saturate on a few cents of TWAP
-        # basis noise. Floor the model vol at a realistic 5-minute scale.
         vol_bps = max(
             float(getattr(spot, "realized_vol_bps", 15.0) or 15.0),
-            float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 8.0)),
+            float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0)),
         )
 
-        # None means the feed's freshness guard rejected its cached TWAP. Never
-        # reuse last_poly_spot for the probability model: a stale 60s TWAP near
-        # expiry saturates Phi(d) and can print p_fair=0.99 for a losing side.
+        # None means the feed's freshness guard rejected its cached TWAP.
         poly_fresh = poly_spot is not None and poly_spot > 0
         self.poly_spot_fresh = poly_fresh
         if poly_fresh:
             self.last_poly_spot = poly_spot
-        if spot.price and spot.price > 0:
-            self.last_spot_price = spot.price
 
-        # Keep both the probability model and the directional signal on ONE
-        # reference chain. Fresh: Poly TWAP vs Poly strike. Stale: Binance spot
-        # vs Binance open. Mixing Binance spot with the Poly strike is what made
-        # delta_s and p_fair disagree on the same tick.
+        spot_stale = bool(getattr(spot, "is_stale", False)) or (spot.price <= 0)
+        if not spot_stale and spot.price > 0:
+            self.last_spot_price = spot.price
+            self._spot_buf.append((now, float(spot.price)))
+            if len(self._spot_buf) > 120 or (self._spot_buf and now - self._spot_buf[0][0] > 65.0):
+                self._spot_buf = [(ts, px) for ts, px in self._spot_buf if now - ts <= 65.0]
+
+        if poly_fresh and not spot_stale and len(self._spot_buf) >= 5:
+            bin_60s = [px for ts, px in self._spot_buf if now - ts <= 60.0]
+            if bin_60s:
+                inst_basis = (sum(bin_60s) / len(bin_60s)) - float(poly_spot)
+                self._basis_ema = inst_basis if self._basis_ema is None else (0.9 * self._basis_ema + 0.1 * inst_basis)
+                self._basis_updated_t = now
+                self._basis_sample_count += 1
+
+        basis_max_age = float(config.PARAMS.get("BASIS_MAX_AGE_S", 120.0))
+        basis_ready = (self._basis_ema is not None) and ((now - self._basis_updated_t) <= basis_max_age)
+
+        # Attach live basis & realized 60s TWAP onto SpotState for estimator
         spot.poly_price = poly_spot if poly_fresh else None
-        spot.open_price = open_px if poly_fresh else self.binance_open_price
         if not getattr(spot, "binance_open_price", None):
             spot.binance_open_price = self.binance_open_price
+        if basis_ready and open_px > 0:
+            spot.basis_ema = self._basis_ema
+            spot.open_price = open_px
+            if tau <= 60.0 and self._spot_buf:
+                win_start_60 = self.window_end - 60.0
+                realized_vals = [px - self._basis_ema for ts, px in self._spot_buf if ts >= win_start_60]
+                if realized_vals:
+                    spot.twap_realized_60s = sum(realized_vals) / len(realized_vals)
+        else:
+            spot.basis_ema = None
+            spot.open_price = self.binance_open_price
 
         p_fair = estimate_p_fair(
             spot, open_px, tau, vol_bps,
@@ -290,8 +318,8 @@ class PaperRunner:
                 "poly_up": round(poly_up, 4),
                 "poly_down": round(poly_down, 4)
             })
-            if len(self.price_history) > 360:
-                self.price_history = self.price_history[-360:]
+            if len(self.price_history) > 720:
+                self.price_history = self.price_history[-720:]
 
         if net_stats:
             self.net_stats = net_stats
@@ -315,17 +343,43 @@ class PaperRunner:
         )
         if replay_mode:
             # Sparse recorded ticks are not a live feed outage.
-            is_deadman_active = spot.price <= 0
+            is_deadman_active = spot.price <= 0 or spot_stale
         else:
             is_deadman_active = (
                 stale_age > deadman_timeout or loop_gap > deadman_timeout
-                or spot.price <= 0 or book_empty
+                or spot.price <= 0 or spot_stale or book_empty
             )
         deadman_reason = (
             f"feed age {stale_age:.1f}s / loop gap {loop_gap:.1f}s > {deadman_timeout:.1f}s"
+            + (" / 现货断流" if spot_stale else "")
             + (" / 空盘口(行情流中断)" if book_empty else "")
         )
         self._last_step_time = now
+
+        # 0. Process real trade prints that occurred in (prev_t, now] against resting orders
+        # BEFORE evaluating new decisions/cancellations for `now`.
+        print_touched_ids = set()
+        if trade_prints and self.working_orders:
+            for tp in trade_prints:
+                tp_side = tp.get("outcome")  # "Up" or "Down"
+                tp_t = float(tp.get("received_at") or tp.get("timestamp") or now)
+                for o in self.working_orders:
+                    if tp_side and o.side != tp_side:
+                        continue
+                    fill_sz = self.matcher.on_trade_print(
+                        o, float(tp["price"]), float(tp["size"]), tp_t
+                    )
+                    if fill_sz > 0 or o.remaining < o.size - 1e-9:
+                        print_touched_ids.add(o.id)
+                    if fill_sz > 0:
+                        if o.side == "Up":
+                            self.pos_up.shares += fill_sz
+                            self.pos_up.cash += (fill_sz * o.price)
+                        else:
+                            self.pos_down.shares += fill_sz
+                            self.pos_down.cash += (fill_sz * o.price)
+                        self._record_fill(tp_t, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
+            self.working_orders = [o for o in self.working_orders if o.remaining > 1e-6]
 
         if is_deadman_active and self.working_orders:
             for o in self.working_orders:
@@ -373,6 +427,8 @@ class PaperRunner:
             COMMITTED_WINDOW_COST=committed_cost,
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
+            BASIS_READY=basis_ready,
+            REQUIRE_STRIKE_AND_BASIS=(not replay_mode and delayed_book_fetcher is not None),
             PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
             FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0),
             CONSECUTIVE_UP_ROUNDS=getattr(self, "consecutive_up", 0),
@@ -394,6 +450,27 @@ class PaperRunner:
             "t": round(now, 2), "action": decision.action, "side": decision.side,
             "price": decision.price, "size": decision.size, "reason": decision.reason
         })
+
+        # Record significant decision state transitions for the live announcement feed
+        tl_key = (decision.action, decision.side, (decision.reason or "").split("(")[0][:36])
+        if (tl_key != getattr(self, "_last_timeline_key", None)
+                or decision.action in ("taker_buy", "taker_hedge", "taker_unwind", "quote")
+                or (now - getattr(self, "_last_timeline_t", 0.0)) >= 20.0):
+            if not hasattr(self, "decision_timeline"):
+                self.decision_timeline = []
+            self.decision_timeline.append({
+                "t": round(now, 2),
+                "tau_s": round(tau, 1),
+                "action": decision.action,
+                "side": decision.side,
+                "price": decision.price,
+                "reason": decision.reason,
+                "p_up": round(p_fair, 4),
+            })
+            if len(self.decision_timeline) > 50:
+                self.decision_timeline = self.decision_timeline[-50:]
+            self._last_timeline_key = tl_key
+            self._last_timeline_t = now
         
         to_cancel, action = plan_order_actions(
             self.working_orders, decision, now,
@@ -409,16 +486,37 @@ class PaperRunner:
                 "reason": o.cancel_reason or "策略撤单", "order_id": o.id
             })
             
-        # 1. Taker execution simulation (depth-aware, never infinite liquidity)
+        # 1. Taker execution simulation (depth-aware + optional real wire latency IOC check)
         if action and action.action in ("taker_buy", "taker_hedge", "taker_unwind"):
             want = float(action.size or 0.0)
             is_buy = action.action in ("taker_buy", "taker_hedge")
             target_book = book_down if action.side == "Down" else book_up
-            filled, vwap = self.matcher.taker_fill(target_book, want, is_buy=is_buy)
+            reject_reason = None
+
+            if (bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
+                    and delayed_book_fetcher is not None
+                    and action.price is not None):
+                if not replay_mode:
+                    time.sleep(float(config.PARAMS.get("LATENCY_S", 0.30)))
+                post_book = delayed_book_fetcher(action.side)
+                if post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
+                    filled, vwap = 0.0, 0.0
+                    reject_reason = "延迟后重拉盘口为空，IOC 放弃成交"
+                else:
+                    filled, vwap = self.matcher.taker_ioc_fill(
+                        post_book, want, limit_price=float(action.price), is_buy=is_buy
+                    )
+                    if filled <= 1e-6:
+                        reject_reason = (
+                            f"300ms 延迟后盘口已移动 (原信号限价 {action.price:.2f}, "
+                            f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
+                        )
+            else:
+                filled, vwap = self.matcher.taker_fill(target_book, want, is_buy=is_buy)
+
             # The policy judged the hedge on best_ask, but a taker actually
             # walks the ladder. Re-check the *real* VWAP before booking what
             # would otherwise be a falsely "risk-free" sub-$1 pair.
-            reject_reason = None
             if action.action == "taker_hedge" and filled > 1e-6:
                 held_basis = (self.pos_up.avg_price if action.side == "Down"
                               else self.pos_down.avg_price)
@@ -516,32 +614,7 @@ class PaperRunner:
                 "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
             })
 
-        # 3. Queue Matcher: only real trade prints deplete queue, then crossed books
-        print_touched_ids = set()
-        if trade_prints:
-            for tp in trade_prints:
-                tp_side = tp.get("outcome")  # "Up" or "Down"
-                tp_t = float(tp.get("received_at") or tp.get("timestamp") or now)
-                for o in self.working_orders:
-                    if tp_side and o.side != tp_side:
-                        continue
-                    fill_sz = self.matcher.on_trade_print(
-                        o, float(tp["price"]), float(tp["size"]), tp_t
-                    )
-                    if fill_sz > 0 or o.remaining < o.size - 1e-9:
-                        # The print already walked this price level: the book
-                        # snapshot below is stale for this order, so it must not
-                        # be filled a second time from the same liquidity.
-                        print_touched_ids.add(o.id)
-                    if fill_sz > 0:
-                        if o.side == "Up":
-                            self.pos_up.shares += fill_sz
-                            self.pos_up.cash += (fill_sz * o.price)
-                        else:
-                            self.pos_down.shares += fill_sz
-                            self.pos_down.cash += (fill_sz * o.price)
-                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
-
+        # 3. Crossed-book matching for remaining resting maker orders
         remaining_working = []
         for o in self.working_orders:
             if o.id in print_touched_ids:
@@ -751,6 +824,9 @@ class PaperRunner:
             "spot": round(bin_px, 2),                    # real Binance spot
             "poly_spot": round(poly_px, 2),              # lagging Chainlink TWAP
             "poly_spot_stale": not getattr(self, "poly_spot_fresh", False),
+            "spot_stale": bool(getattr(spot, "is_stale", False)),
+            "spot_source": getattr(spot, "spot_source", "binance"),
+            "basis_ema": round(self._basis_ema, 2) if self._basis_ema is not None else None,
             "open_px": poly_open,
             "binance_open_px": bin_open,
             "return_bps": round(bin_bps, 2),            # Binance vs Binance open
@@ -788,7 +864,8 @@ class PaperRunner:
             "actions": self.actions,
             "insurance_paid": round(self.insurance_paid, 4),
             "network": getattr(self, "net_stats", {}),
-            "last_decision": self.decisions[-1] if self.decisions else None
+            "last_decision": self.decisions[-1] if self.decisions else None,
+            "decision_timeline": getattr(self, "decision_timeline", [])[-30:]
         }
         tmp = self.live_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")

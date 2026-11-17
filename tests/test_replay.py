@@ -42,17 +42,23 @@ class TestEventDrivenReplay(unittest.TestCase):
         with open(events_dir / f"events_{self.date}.jsonl", "w", encoding="utf-8") as f:
             for i in range(150):
                 t = self.start + 2 * i
+                # Before t=start+72: Up 0.45/0.46, Down 0.52/0.54 (ask sum=1.00, bid sum=0.97)
+                # After t=start+72: market moves up -> Up 0.48/0.50, Down 0.50/0.52 (locks pair <= 1.00)
+                if i < 36:
+                    u_bid, u_ask, d_bid, d_ask = 0.45, 0.46, 0.52, 0.54
+                else:
+                    u_bid, u_ask, d_bid, d_ask = 0.48, 0.50, 0.50, 0.52
                 f.write(json.dumps({
                     "t": t, "token_id": token_up, "outcome": "Up",
-                    "best_bid": 0.45, "best_ask": 0.47,
-                    "bid_depth": [[0.45, 5.0]], "ask_depth": [[0.47, 50.0]],
-                    "last_trade_price": 0.46,
+                    "best_bid": u_bid, "best_ask": u_ask,
+                    "bid_depth": [[u_bid, 5.0]], "ask_depth": [[u_ask, 50.0]],
+                    "last_trade_price": u_bid,
                 }) + "\n")
                 f.write(json.dumps({
                     "t": t, "token_id": token_dn, "outcome": "Down",
-                    "best_bid": 0.51, "best_ask": 0.53,
-                    "bid_depth": [[0.51, 50.0]], "ask_depth": [[0.53, 50.0]],
-                    "last_trade_price": 0.52,
+                    "best_bid": d_bid, "best_ask": d_ask,
+                    "bid_depth": [[d_bid, 50.0]], "ask_depth": [[d_ask, 50.0]],
+                    "last_trade_price": d_bid,
                 }) + "\n")
 
         # One 15-share print at our 0.45 bid, after the quote has gone live:
@@ -101,17 +107,18 @@ class TestEventDrivenReplay(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        results = run_replay(limit=1, quiet=True, write=False)
+        with overridden_params({"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MIN_TAKER_EDGE": 0.99}):
+            results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         r = results[0]
         self.assertTrue(r["replayed"])
         self.assertGreaterEqual(r["fills"], 2)  # maker entry + taker hedge
 
-        # Entry: 5 shares @ 0.45 (maker, zero fee). Hedge: 5 shares @ 0.53 +
+        # Entry: 5 shares @ 0.45 (maker, zero fee). Hedge: 5 shares @ 0.52 +
         # taker fee. A locked pair settles at 5 * (1 - pair_cost) whichever side
         # wins, so the replay PnL is fully determined and winner-independent.
-        fee_per_share = 0.07 * 0.53 * (1.0 - 0.53)
-        expected = round(5.0 * (1.0 - (0.45 + 0.53 + fee_per_share)), 4)
+        fee_per_share = 0.07 * 0.52 * (1.0 - 0.52)
+        expected = round(5.0 * (1.0 - (0.45 + 0.52 + fee_per_share)), 4)
         self.assertAlmostEqual(r["replay_pnl"], expected, places=3)
         # The attribution label must come from the entry tick, not a tick-vote.
         self.assertEqual(r["regime_source"], "entry_time")
@@ -128,7 +135,8 @@ class TestEventDrivenReplay(unittest.TestCase):
                     "timestamp": self.start + 70, "received_at": self.start + 70.2,
                 }) + "\n")
 
-        results = run_replay(limit=1, quiet=True, write=False)
+        with overridden_params({"MIN_TAKER_EDGE": 0.99}):
+            results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["replay_traded"])
         self.assertEqual(results[0]["replay_pnl"], 0.0)

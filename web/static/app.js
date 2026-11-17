@@ -4,6 +4,16 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Prevent unnecessary DOM rebuilds on 500ms polling so :hover states and scroll positions never flicker
+const _lastHtmlCache = new WeakMap();
+function setHtmlIfChanged(el, html) {
+  if (!el) return false;
+  if (_lastHtmlCache.get(el) === html) return false;
+  _lastHtmlCache.set(el, html);
+  el.innerHTML = html;
+  return true;
+}
+
 const PAGE_TITLES = {
   overview: "交易总览",
   market: "实时工作区",
@@ -118,6 +128,7 @@ let liveChartGeom = null;
 let equityHoverIdx = null;
 let equityChartGeom = null;
 let modalHoverIdx = null;
+let modalSelectedActionIdx = null;
 let modalChartGeom = null;
 
 // ============================================================================
@@ -402,10 +413,10 @@ function updateNetworkTelemetry(live) {
   const binLatEl = $("src-binance-lat");
   const netCountEl = $("net-count");
 
-  const rxKbps = net.rx_kbps ?? net.kbps ?? 0;
+  const rxKbps = net.downstream_kbps ?? net.rx_kbps ?? net.kbps ?? 0;
   const polyMs = net.poly_latency_ms ?? cb.poly_latency_ms ?? net.latency_ms ?? 0;
   const binMs = net.binance_latency_ms ?? cb.spot_latency_ms ?? 0;
-  const rttMs = net.latency_ms ?? (polyMs && binMs ? (polyMs + binMs) / 2 : polyMs || binMs);
+  const rttMs = net.avg_latency_ms ?? net.latency_ms ?? (polyMs && binMs ? (polyMs + binMs) / 2 : polyMs || binMs);
 
   if (kbpsEl) kbpsEl.textContent = `${Number(rxKbps || 0).toFixed(1)} KB/s`;
   if (latEl) latEl.textContent = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
@@ -415,26 +426,130 @@ function updateNetworkTelemetry(live) {
   if (binLatEl) binLatEl.textContent = binMs ? `${Math.round(binMs)} ms` : "就绪";
 
   const tripped = Boolean(cb.active || cb.tripped);
+  const nowSec = live && live.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const liveAge = (live && live.now) ? Math.abs(nowSec - Number(live.now)) : Infinity;
+  const isIdle = !live || live.status === "idle" || liveAge > 10;
+  const spotStale = Boolean(live && live.spot_stale);
+  const polyStale = Boolean(live && live.poly_spot_stale);
+
   if (netCountEl) {
-    netCountEl.textContent = tripped ? "风控告警" : "4 源正常";
-    netCountEl.style.color = tripped ? "var(--down)" : "var(--up)";
-    netCountEl.style.background = tripped ? "var(--down-soft)" : "var(--up-soft)";
+    if (isIdle) {
+      netCountEl.textContent = "管道待机/离线";
+      netCountEl.style.color = "var(--text-muted)";
+      netCountEl.style.background = "var(--surface-2, rgba(148,163,184,0.14))";
+    } else if (tripped) {
+      netCountEl.textContent = "风控告警";
+      netCountEl.style.color = "var(--down)";
+      netCountEl.style.background = "var(--down-soft)";
+    } else if (spotStale) {
+      netCountEl.textContent = "现货断流";
+      netCountEl.style.color = "var(--down)";
+      netCountEl.style.background = "var(--down-soft)";
+    } else if (polyStale) {
+      netCountEl.textContent = "TWAP 滞后";
+      netCountEl.style.color = "#d97706";
+      netCountEl.style.background = "rgba(245,158,11,0.14)";
+    } else {
+      netCountEl.textContent = "4 源正常";
+      netCountEl.style.color = "var(--up)";
+      netCountEl.style.background = "var(--up-soft)";
+    }
   }
 }
 
 // ============================================================================
-// STRATEGY REASON TRANSLATOR (CLEAN CHINESE FINANCIAL PHRASING)
+// STRATEGY & CIRCUIT BREAKER REASON TRANSLATOR (CLEAN CHINESE PHRASING)
 // ============================================================================
+function translateCircuitBreakerReason(rawReason) {
+  if (!rawReason) return "微观风控熔断保护中";
+  const s = String(rawReason).trim();
+  let m;
+  if ((m = s.match(/Loss streak cooling\s*\((\d+)\s*rounds?\s*remaining\)/i))) {
+    return `连亏冷却保护（剩余 ${m[1]} 轮）`;
+  }
+  if ((m = s.match(/Loss streak:\s*(\d+)\s*consecutive losing rounds/i))) {
+    return `触发连亏保护（连续 ${m[1]} 轮亏损）`;
+  }
+  if ((m = s.match(/Daily drawdown.*?\$([\d.]+)/i)) || /daily\s*(drawdown|loss)/i.test(s)) {
+    const amt = m && m[1] ? `（$${m[1]}）` : "";
+    return `触发单日最大回撤熔断保护${amt}`;
+  }
+  if (/cooling/i.test(s)) {
+    return "连亏风控冷却保护中";
+  }
+  if (/[\u4e00-\u9fa5]/.test(s)) {
+    return s;
+  }
+  return "微观风控熔断保护中";
+}
+
 function translateDecisionReason(rawReason) {
   if (!rawReason) return "持续监控双边盘口赔率与预言机偏离度...";
   let s = String(rawReason).trim();
 
-  // Normalize mixed English strategy tags even when Chinese text follows
+  // v2.3 English reason translations (concise Chinese financial phrasing)
+  let m;
+  if ((m = s.match(/Holding\s+([\d.]+)\s+(Up|Down)\s+@\s*([\d.]+)\s+to settlement\s*\(p_fair=([\d.]+)\)/i))) {
+    const pct = (parseFloat(m[4]) * 100).toFixed(1);
+    return `持仓等待交割：持有 ${m[1]} 股 ${m[2]}（均价 $${m[3]}），当前模型胜率 ${pct}%`;
+  }
+  if ((m = s.match(/Taker IOC:\s*(Up|Down)\s+ask=([\d.]+),\s*fee=([\d.]+),\s*P\*=([\d.]+),\s*net_edge=([\d.-]+)/i))) {
+    const pPct = (parseFloat(m[4]) * 100).toFixed(1);
+    const ePct = (parseFloat(m[5]) * 100).toFixed(1);
+    return `触发主动吃单（IOC）：买入 ${m[1]} @ $${m[2]}（手续费 $${m[3]}，胜率 ${pPct}%，净优势 +${ePct}%）`;
+  }
+  if ((m = s.match(/Maker Quote:\s*(Up|Down)\s+bid=([\d.]+),\s*P\*=([\d.]+),\s*edge=([\d.-]+)/i))) {
+    const pPct = (parseFloat(m[3]) * 100).toFixed(1);
+    const ePct = (parseFloat(m[4]) * 100).toFixed(1);
+    return `零费率挂单排队：挂买 ${m[1]} @ $${m[2]}（模型胜率 ${pPct}%，优势 +${ePct}%）`;
+  }
+  if ((m = s.match(/Observation period\s*\(tau\s*([\d.]+)s/i))) {
+    return `开盘观察蓄势期（剩余 ${Math.round(parseFloat(m[1]))}s）：前 60 秒只采集基差与波动率，暂不开仓`;
+  }
+  if ((m = s.match(/Tail freeze\s*\(tau\s*([\d.]+)s/i))) {
+    return `尾盘冻结（剩余 ${Math.round(parseFloat(m[1]))}s）：最后 15 秒停止新开仓并撤回未成挂单，持有到期`;
+  }
+  if ((m = s.match(/No executable Net-Edge\s*\(P\*\(Up\)=([\d.]+),\s*Up=([^,]+),\s*Dn=([^)]+)\)/i))) {
+    const upPct = (parseFloat(m[1]) * 100).toFixed(1);
+    return `暂无满足净优势的报价（模型 UP 胜率 ${upPct}%，Up 盘口 ${m[2]} / Dn 盘口 ${m[3]}），继续盯盘`;
+  }
+  if ((m = s.match(/Anti-toxicity spot shock\s*\(([\d.]+)\s*bps\)/i))) {
+    return `现货突发急剧跳变（${m[1]} bps），防毒流保护已紧急撤回在途挂单`;
+  }
+  if (s.includes("Inconsistent book snapshot")) {
+    return "双边盘口瞬时异步交叉或价差异常，跳过本轮防止误判";
+  }
+  if (s.includes("Incomplete orderbook")) {
+    return "盘口买卖档位不完整（单边空盘），暂停报单等待流动性恢复";
+  }
+  if (s.includes("Waiting for official strike")) {
+    return "正在等待官方开盘基准价与稳态基差校准完成...";
+  }
+  if (s.includes("Spot price stale") || s.includes("Dead-man switch")) {
+    return "行情流延迟或断流触发死人开关保护，已撤单并暂停开仓";
+  }
+  if (s.includes("Max entries per window")) {
+    return "本轮已达到单窗开仓上限（1 次），锁定仓位等待结算";
+  }
+  if (s.includes("Fully hedged pair") || s.includes("Max position reached")) {
+    return "已达本轮最大持仓或双边配平，静待到期交割";
+  }
+  if (s.includes("Insufficient capital")) {
+    return "账户可用资金不足，暂停开新仓";
+  }
+  if (s.includes("Circuit breaker active")) {
+    return "风控熔断器生效中（触发单日回撤或连亏冷却），暂停新开第一腿";
+  }
+  if (/Loss streak cooling|Loss streak:|daily\s*(drawdown|loss)/i.test(s)) {
+    return translateCircuitBreakerReason(s);
+  }
+
+  // Legacy mixed-English normalization
   s = s
-    .replace(/LWAA\s+Maker\s+Absorption\s*:/gi, "LWAA 被动做市吸筹：")
-    .replace(/MWDE\s+Maker\s+Absorption\s*:/gi, "MWDE 被动做市吸筹：")
-    .replace(/LWAA\s+Taker\s+Absorption\s*:/gi, "LWAA 主动吃单吸筹：")
-    .replace(/MWDE\s+Taker\s+Absorption\s*:/gi, "MWDE 主动吃单吸筹：")
+    .replace(/LWAA\s+Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
+    .replace(/MWDE\s+Maker\s+Absorption\s*:/gi, "顺势被动挂单：")
+    .replace(/LWAA\s+Taker\s+Absorption\s*:/gi, "主动吃单吸筹：")
+    .replace(/MWDE\s+Taker\s+Absorption\s*:/gi, "顺势主动吃单：")
     .replace(/Arbitrage\s+lock\s*:/gi, "双边套利锁仓：")
     .replace(/Defensive\s+salvage\s*:/gi, "尾盘防守回收：")
     .replace(/Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
@@ -534,15 +649,23 @@ function updateOverview(live, hist) {
     if ($("overview-live-date")) $("overview-live-date").textContent = winInfo.dateStr;
 
     const tau = Math.max(0, Math.round(Number(live.tau_s || 0)));
-    if ($("overview-live-tau")) $("overview-live-tau").textContent = `${tau} 秒`;
+    if ($("overview-live-tau")) {
+    setHtmlIfChanged($("overview-live-tau"), `${tau}<span class="val-unit">s</span>`);
+  }
     const elapsedPct = Math.min(100, Math.max(0, ((300 - tau) / 300) * 100));
     if ($("overview-tau-bar")) $("overview-tau-bar").style.width = `${elapsedPct.toFixed(1)}%`;
 
-    if ($("overview-live-spot")) $("overview-live-spot").textContent = fmtUsd(live.spot || 0);
+    if ($("overview-live-spot")) {
+      const spotNum = Number(live.spot || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      setHtmlIfChanged($("overview-live-spot"), `<span class="val-currency">$</span>${spotNum}`);
+    }
     const upS = Number(live.pos_up?.shares || 0);
     const dnS = Number(live.pos_down?.shares || 0);
     if ($("overview-live-pos")) {
-      $("overview-live-pos").textContent = `UP ${fmtShares(upS)} / DN ${fmtShares(dnS)}`;
+      setHtmlIfChanged(
+        $("overview-live-pos"),
+        `<span class="pos-chip up">UP ${fmtShares(upS)}</span><span class="pos-sep">/</span><span class="pos-chip down">DN ${fmtShares(dnS)}</span>`
+      );
     }
   }
 
@@ -586,9 +709,6 @@ function updateOverview(live, hist) {
 
   // Render Regime Attribution Table
   renderRegimeAttribution(hist.regime_stats, tradedRounds, totalRounds);
-
-  // Render Recent 5 Settled Rounds Table
-  renderRecentRoundsTable(normRecords.slice(0, 5));
 }
 
 // ============================================================================
@@ -643,9 +763,9 @@ function drawEquityCurve(hist) {
     return;
   }
 
-  const padL = 56;
-  const padR = 16;
-  const padT = 18;
+  const padL = 52;
+  const padR = 20;
+  const padT = 26;
   const padB = 26;
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
@@ -658,12 +778,18 @@ function drawEquityCurve(hist) {
     minV -= 1;
   } else {
     const span = maxV - minV;
-    maxV += span * 0.12;
-    minV -= span * 0.1;
+    maxV += span * 0.16;
+    minV -= span * 0.10;
   }
 
   const xOf = (i) => padL + (i / (pts.length - 1)) * plotW;
   const yOf = (v) => padT + ((maxV - v) / (maxV - minV)) * plotH;
+
+  const coords = pts.map((p, i) => ({
+    ...p,
+    x: xOf(i),
+    y: yOf(p.cum_pnl),
+  }));
 
   equityChartGeom = {
     w,
@@ -674,15 +800,19 @@ function drawEquityCurve(hist) {
     padB,
     plotW,
     plotH,
-    pts: pts.map((p, i) => ({
-      ...p,
-      x: xOf(i),
-      y: yOf(p.cum_pnl),
-    })),
+    pts: coords,
   };
 
-  // Horizontal grid lines
-  const steps = 4;
+  // Crisp straight-segment path helper
+  const tracePolyline = () => {
+    coords.forEach((pt, i) => {
+      if (i === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    });
+  };
+
+  // Minimal horizontal dashed grid lines
+  const steps = 3;
   ctx.font = "500 10.5px 'JetBrains Mono', monospace";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
@@ -690,23 +820,27 @@ function drawEquityCurve(hist) {
   for (let s = 0; s <= steps; s++) {
     const val = minV + ((maxV - minV) * s) / steps;
     const y = yOf(val);
-    ctx.strokeStyle = pal.grid;
+    ctx.save();
+    ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.10)" : "rgba(15, 23, 42, 0.055)";
     ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
     ctx.beginPath();
     ctx.moveTo(padL, y);
     ctx.lineTo(w - padR, y);
     ctx.stroke();
+    ctx.restore();
 
     ctx.fillStyle = pal.axis;
-    ctx.fillText(fmtUsd(val, true), padL - 7, y);
+    ctx.fillText(fmtUsd(val, true), padL - 8, y);
   }
 
   // Zero baseline
   const zeroY = yOf(0);
   if (zeroY >= padT && zeroY <= padT + plotH) {
     ctx.save();
-    ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.35)" : "rgba(15, 23, 42, 0.22)";
-    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.28)" : "rgba(15, 23, 42, 0.16)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(padL, zeroY);
     ctx.lineTo(w - padR, zeroY);
@@ -718,58 +852,57 @@ function drawEquityCurve(hist) {
   const strokeColor = lastVal >= 0 ? pal.up : pal.down;
   const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   if (lastVal >= 0) {
-    grad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.28)" : "rgba(5, 150, 105, 0.20)");
+    grad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.15)");
+    grad.addColorStop(0.85, "rgba(16, 185, 129, 0.01)");
     grad.addColorStop(1, "rgba(16, 185, 129, 0.00)");
   } else {
-    grad.addColorStop(0, pal.isDark ? "rgba(244, 63, 94, 0.28)" : "rgba(225, 29, 72, 0.20)");
+    grad.addColorStop(0, pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.15)");
+    grad.addColorStop(0.85, "rgba(244, 63, 94, 0.01)");
     grad.addColorStop(1, "rgba(244, 63, 94, 0.00)");
   }
 
   // Area fill
   ctx.beginPath();
-  pts.forEach((p, i) => {
-    const x = xOf(i);
-    const y = yOf(p.cum_pnl);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.lineTo(xOf(pts.length - 1), padT + plotH);
-  ctx.lineTo(xOf(0), padT + plotH);
+  tracePolyline();
+  ctx.lineTo(coords[coords.length - 1].x, padT + plotH);
+  ctx.lineTo(coords[0].x, padT + plotH);
   ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Main line
+  // Main crisp line
   ctx.beginPath();
-  pts.forEach((p, i) => {
-    const x = xOf(i);
-    const y = yOf(p.cum_pnl);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
+  tracePolyline();
   ctx.strokeStyle = strokeColor;
   ctx.lineWidth = 2.2;
+  ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.stroke();
 
-  // Points
-  pts.forEach((p, i) => {
-    const x = xOf(i);
-    const y = yOf(p.cum_pnl);
-    ctx.beginPath();
-    ctx.arc(x, y, i === pts.length - 1 ? 4 : 2.3, 0, Math.PI * 2);
-    ctx.fillStyle = i === pts.length - 1 ? strokeColor : pal.cardBg;
-    ctx.fill();
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-  });
+  // Terminal glowing endpoint dot
+  const lastPt = coords[coords.length - 1];
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(lastPt.x, lastPt.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = lastVal >= 0
+    ? (pal.isDark ? "rgba(16, 185, 129, 0.24)" : "rgba(5, 150, 105, 0.16)")
+    : (pal.isDark ? "rgba(244, 63, 94, 0.24)" : "rgba(225, 29, 72, 0.16)");
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(lastPt.x, lastPt.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = strokeColor;
+  ctx.fill();
+  ctx.strokeStyle = pal.cardBg;
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+  ctx.restore();
 
   // Hover crosshair on equity curve
   if (equityHoverIdx !== null && equityChartGeom.pts[equityHoverIdx]) {
     const hp = equityChartGeom.pts[equityHoverIdx];
     ctx.save();
-    ctx.strokeStyle = pal.isDark ? "rgba(248, 250, 252, 0.35)" : "rgba(15, 23, 42, 0.28)";
+    ctx.strokeStyle = pal.isDark ? "rgba(248, 250, 252, 0.28)" : "rgba(15, 23, 42, 0.20)";
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -779,7 +912,7 @@ function drawEquityCurve(hist) {
     ctx.restore();
 
     ctx.beginPath();
-    ctx.arc(hp.x, hp.y, 5.5, 0, Math.PI * 2);
+    ctx.arc(hp.x, hp.y, 5, 0, Math.PI * 2);
     ctx.fillStyle = strokeColor;
     ctx.fill();
     ctx.strokeStyle = pal.cardBg;
@@ -832,10 +965,7 @@ function initEquityCurveInteractions() {
       const delta = Number(pt.round_pnl || 0);
       const cum = Number(pt.cum_pnl || 0);
       tooltip.innerHTML = `
-        <div class="tt-time" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-          <span>第 #${bestIdx} 场 · ${escapeHtml(winInfo.range)}</span>
-          <span style="color:var(--accent);font-size:11px">点击复盘</span>
-        </div>
+        <div class="tt-time">第 #${bestIdx} 场 · ${escapeHtml(winInfo.range)}</div>
         <div class="tt-row">
           <span>单场净损益</span>
           <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtUsd(delta, true)}</b>
@@ -937,7 +1067,7 @@ function renderRegimeAttribution(regimeStats, tradedRounds = 0, totalRounds = 0)
   }
 
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="action-empty">暂无已成交形态归因数据</td></tr>`;
+    setHtmlIfChanged(tbody, `<tr><td colspan="6" class="action-empty">暂无已成交形态归因数据</td></tr>`);
     return;
   }
 
@@ -949,7 +1079,7 @@ function renderRegimeAttribution(regimeStats, tradedRounds = 0, totalRounds = 0)
     badge.textContent = `实时归因 ${attributedCount} 场 · 共 ${tradedRounds} 成交场`;
   }
 
-  tbody.innerHTML = rows
+  setHtmlIfChanged(tbody, rows
     .map((r) => {
       const n = Number(r.n || 0);
       const totalPnl = Number(r.total_pnl || 0);
@@ -999,17 +1129,17 @@ function renderRegimeAttribution(regimeStats, tradedRounds = 0, totalRounds = 0)
         </tr>
       `;
     })
-    .join("");
+    .join(""));
 
   if (covEl) {
     covEl.hidden = false;
-    covEl.innerHTML = `
+    setHtmlIfChanged(covEl, `
       <span class="coverage-label">归因覆盖率说明：</span>
       <span class="coverage-chip">监测总窗口 <b>${totalRounds}</b></span>
       <span class="coverage-chip">已成交窗口 <b>${tradedRounds}</b></span>
       <span class="coverage-chip">携带开仓实时形态标签 <b>${attributedCount}</b></span>
       ${legacyCount > 0 ? `<span class="coverage-chip">早期未标注历史成交 <b>${legacyCount}</b></span>` : ""}
-    `;
+    `);
   }
 }
 
@@ -1037,45 +1167,45 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
   const pnl = Number(r.pnl || 0);
   const pnlClass = pnl > 0 ? "up" : pnl < 0 ? "down" : "";
 
+  const upShares = Number(r.up_shares || 0);
+  const dnShares = Number(r.down_shares || 0);
+  const costVal = Number(r.cost || 0);
+  const payoutVal = Number(r.payout || 0);
+  const fillsVal = Number(r.fills_count || 0);
+  const insVal = Number(r.insurance || 0);
+
+  const upCls = upShares > 1e-6 ? "cell-up" : "";
+  const dnCls = dnShares > 1e-6 ? "cell-down" : "";
+  const costCls = costVal > 1e-6 ? "cell-cost" : "";
+  const payoutCls = payoutVal > 1e-6 ? "cell-payout" : "";
+  const pnlStyle = Math.abs(pnl) > 1e-6 ? "font-weight:700" : "font-weight:600";
+
   const insCol = includeInsuranceCol
-    ? `<td class="num" style="color:var(--label)">${fmtUsd(r.insurance || 0)}</td>`
+    ? `<td class="center">${fmtUsd(insVal)}</td>`
     : "";
 
   return `
     <tr class="history-row-clickable" data-slug="${escapeHtml(r.slug)}" title="点击调阅 ${escapeHtml(winInfo.fullLabel)} 的 5 分钟行情与交易复盘">
       <td>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <span class="time-cell-main">${escapeHtml(winInfo.range)}</span>
-          <span class="expand-toggle-pill">${SVG_ICONS.search}<span>复盘</span></span>
-        </div>
+        <span class="time-cell-main">${escapeHtml(winInfo.range)}</span>
         <small style="display:block;font-size:11.5px;color:var(--caption)">${escapeHtml(winInfo.dateStr)}</small>
       </td>
-      <td>${winnerBadge}</td>
-      <td>
+      <td class="center">${winnerBadge}</td>
+      <td class="center col-price-cell">
         <span class="price-open-close">${fmtUsd(openPx)} → ${fmtUsd(closePx)}</span>
         <span class="price-diff-bps ${diffClass}">
           ${diffSign}${diff.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)
         </span>
       </td>
-      <td class="num">${fmtShares(r.up_shares)}</td>
-      <td class="num">${fmtShares(r.down_shares)}</td>
-      <td class="num">${fmtUsd(r.cost)}</td>
-      <td class="num">${fmtUsd(r.payout)}</td>
-      <td class="num ${pnlClass}" style="font-weight:700">${fmtUsd(pnl, true)}</td>
-      <td class="num">${Number(r.fills_count || 0)}</td>
+      <td class="center ${upCls}">${fmtShares(upShares)}</td>
+      <td class="center ${dnCls}">${fmtShares(dnShares)}</td>
+      <td class="center ${costCls}">${fmtUsd(costVal)}</td>
+      <td class="center ${payoutCls}">${fmtUsd(payoutVal)}</td>
+      <td class="center ${pnlClass}" style="${pnlStyle}">${fmtUsd(pnl, true)}</td>
+      <td class="center">${fillsVal}</td>
       ${insCol}
     </tr>
   `;
-}
-
-function renderRecentRoundsTable(records) {
-  const tbody = $("overview-recent-tbody");
-  if (!tbody) return;
-  if (!Array.isArray(records) || records.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="9" class="action-empty">暂无已结算轮次</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = records.map((r) => buildRoundTableRow(r, false)).join("");
 }
 
 // ============================================================================
@@ -1095,13 +1225,18 @@ function renderHistoryTable(hist) {
     return true;
   });
 
-  if (countEl) countEl.textContent = `${filtered.length} / ${allRecords.length} 场记录`;
+  if (countEl) {
+    const statHtml = historyFilterMode === "all"
+      ? `共 <strong>${allRecords.length}</strong> 场`
+      : `已筛选 <strong>${filtered.length}</strong> / ${allRecords.length} 场`;
+    setHtmlIfChanged(countEl, statHtml);
+  }
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="action-empty">当前筛选条件下暂无场次记录</td></tr>`;
+    setHtmlIfChanged(tbody, `<tr><td colspan="10" class="action-empty">当前筛选条件下暂无场次记录</td></tr>`);
     return;
   }
-  tbody.innerHTML = filtered.map((r) => buildRoundTableRow(r, true)).join("");
+  setHtmlIfChanged(tbody, filtered.map((r) => buildRoundTableRow(r, true)).join(""));
 }
 
 // ============================================================================
@@ -1111,13 +1246,7 @@ function updateMarket(live) {
   if (!live || live.status === "idle") return;
 
   const winInfo = slugToWindowText(live.slug, live.start, live.end);
-  const tau = Math.max(0, Math.round(Number(live.tau_s || 0)));
-  const elapsed = Math.min(300, Math.max(0, 300 - tau));
-
   if ($("market-time-range")) $("market-time-range").textContent = winInfo.range;
-
-  if ($("market-tau")) $("market-tau").textContent = String(tau);
-  if ($("chart-elapsed-badge")) $("chart-elapsed-badge").textContent = `已运行 ${elapsed}s / 300s`;
 
   const spot = Number(live.spot || 0);
   const polySpot = Number(live.poly_spot || spot);
@@ -1126,15 +1255,21 @@ function updateMarket(live) {
   // Backend return_bps (Binance-based) still drives the model and is untouched.
   const bps = openPx > 0 ? ((polySpot - openPx) / openPx) * 10000 : 0;
   const pct = bps / 100;
+  const diffUsd = openPx > 0 ? (polySpot - openPx) : 0;
 
   if ($("market-spot")) $("market-spot").textContent = fmtUsd(polySpot);
   if ($("market-open")) $("market-open").textContent = `基准 ${fmtUsd(openPx)}`;
 
   const bpsEl = $("market-bps");
+  const bpsSubEl = $("market-bps-sub");
   if (bpsEl) {
-    const sign = bps > 0 ? "+" : "";
-    bpsEl.textContent = `${sign}${pct.toFixed(3)}% (${sign}${bps.toFixed(1)} bps)`;
+    const sign = diffUsd > 0 ? "+" : (diffUsd < 0 ? "-" : "");
+    bpsEl.textContent = `${sign}$${Math.abs(diffUsd).toFixed(2)}`;
     bpsEl.className = `mc-val ${bps > 0 ? "up" : bps < 0 ? "down" : ""}`;
+  }
+  if (bpsSubEl) {
+    const bpsSign = bps > 0 ? "+" : "";
+    bpsSubEl.textContent = `${bpsSign}${pct.toFixed(3)}% · ${bpsSign}${bps.toFixed(1)} bps`;
   }
 
   // Risk & Circuit Breaker Status
@@ -1144,7 +1279,7 @@ function updateMarket(live) {
   if (riskPill && riskText) {
     if (cb.active || cb.tripped) {
       riskPill.className = "status-pill status-critical";
-      riskText.textContent = cb.reason || "微观风控熔断保护中";
+      riskText.textContent = translateCircuitBreakerReason(cb.reason);
     } else {
       const regKey = live.regime || live.micro_regime || "normal_oscillation";
       const regLabel = REGIME_META[regKey]?.label?.split(" ")[0] || "流动性正常";
@@ -1153,12 +1288,8 @@ function updateMarket(live) {
     }
   }
 
-  // Decision Arbitration Badge
-  const dec = live.last_decision || {};
-  const decReason = $("decision-reason");
-  if (decReason) {
-    decReason.textContent = translateDecisionReason(dec.reason);
-  }
+  // Unified Game-Style Strategy Decision Bulletin (single source of truth)
+  renderDecisionBulletin(live);
 
   // UP / DOWN Positions & Orderbook (handles best_bid/best_ask AND bid/ask, cash AND cost)
   const posUp = live.pos_up || {};
@@ -1290,7 +1421,7 @@ function renderWorkingOrders(orders) {
     pill.textContent = "当前无在途排队挂单";
     pill.className = "order-pill";
     box.hidden = true;
-    box.innerHTML = "";
+    setHtmlIfChanged(box, "");
     return;
   }
 
@@ -1298,7 +1429,7 @@ function renderWorkingOrders(orders) {
   pill.className = "order-pill active";
   box.hidden = false;
 
-  box.innerHTML = orders
+  setHtmlIfChanged(box, orders
     .map((o) => {
       const side = String(o.side || "Up").toUpperCase();
       const px = Number(o.price ?? o.px ?? 0);
@@ -1324,7 +1455,7 @@ function renderWorkingOrders(orders) {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function formatActionItem(a, startTs = 0) {
@@ -1387,11 +1518,11 @@ function renderActionFeed(actions, startTs = 0) {
   if (countEl) countEl.textContent = `${arr.length} 笔动作`;
 
   if (arr.length === 0) {
-    list.innerHTML = `<li class="action-empty">本轮暂无报单或撮合动作，策略持续监控盘口边际中...</li>`;
+    setHtmlIfChanged(list, `<li class="action-empty">本轮暂无报单或撮合动作，策略持续监控盘口边际中...</li>`);
     return;
   }
 
-  list.innerHTML = arr
+  setHtmlIfChanged(list, arr
     .slice()
     .reverse()
     .slice(0, 30)
@@ -1407,7 +1538,7 @@ function renderActionFeed(actions, startTs = 0) {
         </li>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 // ============================================================================
@@ -1808,6 +1939,7 @@ async function openRoundModal(slug) {
   if (!modal || !body) return;
   modal.hidden = false;
   modalHoverIdx = null;
+  modalSelectedActionIdx = null;
 
   const rawRec = (cachedHistory?.records || []).find((r) => r.slug === slug) || null;
   const rec = normalizeRecord(rawRec);
@@ -1840,6 +1972,7 @@ function closeRoundModal() {
   cachedModalWindow = null;
   cachedModalRecord = null;
   modalHoverIdx = null;
+  modalSelectedActionIdx = null;
 }
 
 window.openRoundModal = openRoundModal;
@@ -1860,33 +1993,41 @@ function renderModalDetailContent(winData, rec) {
   const startTs = Number(winData?.start || rec?.start_ts || 0);
   const actions = Array.isArray(winData?.actions) ? winData.actions : [];
 
+  const diffPx = closePx - openPx;
+  const diffPct = openPx > 0 ? (diffPx / openPx) * 100 : 0;
+  const diffSign = diffPx > 0 ? "+" : "";
+  const diffCls = diffPx > 0 ? "up" : diffPx < 0 ? "down" : "";
+  const openShort = openPx.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const closeShort = closePx.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
   body.innerHTML = `
     <div class="modal-summary-grid">
-      <div class="modal-kpi">
+      <div class="modal-kpi modal-kpi-wide">
         <span class="modal-kpi-label">开盘基准 → 交割收盘</span>
-        <strong class="modal-kpi-val">${fmtUsd(openPx)} → ${fmtUsd(closePx)}</strong>
+        <strong class="modal-kpi-val">$${openShort} → $${closeShort}</strong>
+        <span class="modal-kpi-sub ${diffCls}">${diffSign}$${diffPx.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)</span>
       </div>
       <div class="modal-kpi">
-        <span class="modal-kpi-label">看涨 (UP) 期末持仓</span>
-        <strong class="modal-kpi-val up">${fmtShares(upShares)} 股</strong>
+        <span class="modal-kpi-label">UP 期末持仓</span>
+        <strong class="modal-kpi-val ${upShares > 0 ? "up" : ""}">${fmtShares(upShares)} <span class="val-unit">股</span></strong>
       </div>
       <div class="modal-kpi">
-        <span class="modal-kpi-label">看跌 (DOWN) 期末持仓</span>
-        <strong class="modal-kpi-val down">${fmtShares(dnShares)} 股</strong>
+        <span class="modal-kpi-label">DN 期末持仓</span>
+        <strong class="modal-kpi-val ${dnShares > 0 ? "down" : ""}">${fmtShares(dnShares)} <span class="val-unit">股</span></strong>
       </div>
       <div class="modal-kpi">
-        <span class="modal-kpi-label">投入总成本 → 期末兑现</span>
+        <span class="modal-kpi-label">总成本 → 期末兑现</span>
         <strong class="modal-kpi-val">${fmtUsd(cost)} → ${fmtUsd(payout)}</strong>
       </div>
       <div class="modal-kpi">
-        <span class="modal-kpi-label">本轮已实现净损益 (Net PnL)</span>
+        <span class="modal-kpi-label">本轮已实现净损益</span>
         <strong class="modal-kpi-val ${pnl > 0 ? "up" : pnl < 0 ? "down" : ""}">${fmtUsd(pnl, true)}</strong>
       </div>
     </div>
 
     <div class="detail-card">
       <div class="detail-card-head">
-        <span class="detail-card-title">${SVG_ICONS.chart}<span>5 分钟秒级价格与胜率复盘图 (移动鼠标可逐秒检视)</span></span>
+        <span class="detail-card-title">${SVG_ICONS.chart}<span>5 分钟秒级价格与胜率复盘图</span></span>
         <div class="detail-card-legend">
           <span><i class="legend-dot btc"></i>Binance 现货</span>
           <span><i class="legend-dot twap"></i>60s TWAP</span>
@@ -1902,19 +2043,19 @@ function renderModalDetailContent(winData, rec) {
 
     <div class="detail-card table-card">
       <div class="detail-card-head">
-        <span class="detail-card-title">${SVG_ICONS.list}<span>本轮撮合与策略决策流水 (${actions.length} 条记录)</span></span>
+        <span class="detail-card-title">${SVG_ICONS.list}<span>撮合与策略决策流水 (${actions.length} 条)</span></span>
       </div>
       <div class="table-wrap">
         <table class="detail-actions-table">
           <thead>
             <tr>
-              <th>窗口内时间</th>
+              <th>窗口时间</th>
               <th>事件类型</th>
-              <th>方向 / 合约</th>
-              <th class="num">成交/报单价</th>
+              <th>方向</th>
+              <th class="num">价格</th>
               <th class="num">股数</th>
               <th class="num">金额</th>
-              <th>微观策略决策依据</th>
+              <th>策略决策依据</th>
             </tr>
           </thead>
           <tbody>
@@ -1922,16 +2063,19 @@ function renderModalDetailContent(winData, rec) {
               actions.length === 0
                 ? `<tr><td colspan="7" class="action-empty">该窗口内策略未触发开仓动作 (全程观望)</td></tr>`
                 : actions
-                    .map((a) => {
+                    .map((a, idx) => {
                       const item = formatActionItem(a, startTs);
                       const px = Number(a.price ?? a.px ?? 0);
                       const sz = Number(a.size ?? a.shares ?? 0);
                       const notional = px * sz;
+                      const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
+                      const elapsed = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
+                      const evtCls = item.typeClass === "fill" ? "fill" : item.typeClass === "cancel" ? "cancel" : "quote";
                       return `
-                        <tr>
+                        <tr class="modal-action-row" data-action-idx="${idx}" data-elapsed="${elapsed.toFixed(2)}">
                           <td>${escapeHtml(item.timeStr)}</td>
-                          <td><span class="winner-pill ${item.typeClass === "fill" ? "up" : item.typeClass === "cancel" ? "down" : "pending"}">${escapeHtml(item.typeLabel)}</span></td>
-                          <td><span class="winner-pill ${item.sideClass || "pending"}">${escapeHtml(item.sideLabel)}</span></td>
+                          <td><span class="evt-tag ${evtCls}">${escapeHtml(item.typeLabel)}</span></td>
+                          <td><span class="side-txt ${item.sideClass || ""}">${escapeHtml(item.sideLabel)}</span></td>
                           <td class="num">${px > 0 ? "$" + px.toFixed(2) : "--"}</td>
                           <td class="num">${sz > 0 ? sz.toFixed(1) : "--"}</td>
                           <td class="num">${notional > 0 ? fmtUsd(notional) : "--"}</td>
@@ -1950,6 +2094,7 @@ function renderModalDetailContent(winData, rec) {
   requestAnimationFrame(() => {
     drawModalHistoryChart(winData, rec);
     bindModalChartHover();
+    bindModalActionRowClicks(winData, startTs);
   });
 }
 
@@ -2147,6 +2292,68 @@ function drawModalHistoryChart(winData, rec) {
     ctx.stroke();
   }
 
+  // Action event markers along timeline (subtle baseline dots + selected action spotlight)
+  const actions = Array.isArray(winData?.actions) ? winData.actions : [];
+  actions.forEach((a, idx) => {
+    const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
+    const elSec = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
+    const ax = xOfSec(elSec);
+    const actType = String(a.action || "").toLowerCase();
+    const isSel = modalSelectedActionIdx === idx;
+    const evtColor = actType === "fill" ? pal.up : actType === "cancel" ? pal.down : pal.spot;
+
+    ctx.save();
+    if (isSel) {
+      ctx.strokeStyle = evtColor;
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(ax, padT);
+      ctx.lineTo(ax, h - padB);
+      ctx.stroke();
+
+      // Spotlight marker on nearest price point
+      let nearest = pts[0];
+      let minDt = Infinity;
+      pts.forEach((pt) => {
+        const dt = Math.abs(pt.elapsed - elSec);
+        if (dt < minDt) {
+          minDt = dt;
+          nearest = pt;
+        }
+      });
+      if (nearest) {
+        const ny = yOfPrice(nearest.spot);
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(ax, ny, 7.5, 0, Math.PI * 2);
+        ctx.fillStyle = actType === "fill" ? "rgba(16, 185, 129, 0.22)" : actType === "cancel" ? "rgba(244, 63, 94, 0.22)" : "rgba(37, 99, 235, 0.20)";
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(ax, ny, 4.2, 0, Math.PI * 2);
+        ctx.fillStyle = evtColor;
+        ctx.fill();
+        ctx.strokeStyle = pal.cardBg;
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+      }
+    } else {
+      ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.16)" : "rgba(15, 23, 42, 0.08)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ax, padT);
+      ctx.lineTo(ax, h - padB);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(ax, h - padB, 3, 0, Math.PI * 2);
+      ctx.fillStyle = evtColor;
+      ctx.fill();
+    }
+    ctx.restore();
+  });
+
   // Hover crosshair in modal
   if (modalHoverIdx !== null && pts[modalHoverIdx]) {
     const hp = pts[modalHoverIdx];
@@ -2172,6 +2379,82 @@ function drawModalHistoryChart(winData, rec) {
   }
 }
 
+function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
+  const canvas = $("modal-hist-canvas");
+  const tooltip = $("modal-chart-tooltip");
+  if (!canvas || !tooltip || !modalChartGeom || !modalChartGeom.pts?.length) return;
+
+  const rect = canvas.getBoundingClientRect();
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  modalChartGeom.pts.forEach((p, idx) => {
+    const d = Math.abs(p.elapsed - elapsedSec);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = idx;
+    }
+  });
+
+  const pt = modalChartGeom.pts[bestIdx];
+  const openPx = modalChartGeom.openPx || pt.spot;
+  const bps = openPx > 0 ? ((pt.spot - openPx) / openPx) * 10000 : 0;
+  const sign = bps > 0 ? "+" : "";
+
+  const actionBanner = actionMeta
+    ? `<div class="tt-row" style="padding-bottom:4px;margin-bottom:4px;border-bottom:1px dashed var(--border)">
+         <span>${escapeHtml(actionMeta.typeLabel)}</span>
+         <b class="${actionMeta.sideClass || ""}">${escapeHtml(actionMeta.specStr || actionMeta.sideLabel)}</b>
+       </div>`
+    : "";
+
+  tooltip.innerHTML = `
+    <div class="tt-time" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <span>窗口第 ${Math.round(elapsedSec)} 秒</span>
+      <span class="${bps >= 0 ? "up" : "down"}">${sign}${bps.toFixed(1)} bps</span>
+    </div>
+    ${actionBanner}
+    <div class="tt-row"><span>Binance 实时现货</span><b>${fmtUsd(pt.spot)}</b></div>
+    <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
+    <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
+    <div class="tt-row"><span>模型公允胜率 P*</span><b style="color:var(--model)">${pt.p_model !== null ? (pt.p_model * 100).toFixed(1) + "%" : "--"}</b></div>
+  `;
+  tooltip.hidden = false;
+
+  const hx = modalChartGeom.xOfSec(elapsedSec);
+  const ttW = 235;
+  const leftPos = Math.min(rect.width - ttW - 10, Math.max(10, hx + 14));
+  tooltip.style.left = `${leftPos}px`;
+  tooltip.style.top = `12px`;
+}
+
+function bindModalActionRowClicks(winData, startTs) {
+  const rows = document.querySelectorAll("#modal-round-body .modal-action-row");
+  const actions = Array.isArray(winData?.actions) ? winData.actions : [];
+  const tooltip = $("modal-chart-tooltip");
+
+  rows.forEach((row) => {
+    row.addEventListener("click", () => {
+      const idx = Number(row.dataset.actionIdx);
+      const elapsed = Number(row.dataset.elapsed || 0);
+      if (modalSelectedActionIdx === idx) {
+        modalSelectedActionIdx = null;
+        rows.forEach((r) => r.classList.remove("is-selected"));
+        if (tooltip) tooltip.hidden = true;
+        drawModalHistoryChart(cachedModalWindow, cachedModalRecord);
+        return;
+      }
+
+      modalSelectedActionIdx = idx;
+      rows.forEach((r) => r.classList.toggle("is-selected", Number(r.dataset.actionIdx) === idx));
+      drawModalHistoryChart(cachedModalWindow, cachedModalRecord);
+
+      const act = actions[idx];
+      const item = act ? formatActionItem(act, startTs) : null;
+      showModalTooltipForElapsed(elapsed, item);
+    });
+  });
+}
+
 function bindModalChartHover() {
   const canvas = $("modal-hist-canvas");
   const tooltip = $("modal-chart-tooltip");
@@ -2195,36 +2478,249 @@ function bindModalChartHover() {
 
     modalHoverIdx = bestIdx;
     drawModalHistoryChart(cachedModalWindow, cachedModalRecord);
-
     const pt = modalChartGeom.pts[bestIdx];
-    const openPx = modalChartGeom.openPx || pt.spot;
-    const bps = openPx > 0 ? ((pt.spot - openPx) / openPx) * 10000 : 0;
-    const sign = bps > 0 ? "+" : "";
-
-    tooltip.innerHTML = `
-      <div class="tt-time" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-        <span>窗口第 ${Math.round(pt.elapsed)} 秒</span>
-        <span class="${bps >= 0 ? "up" : "down"}">${sign}${bps.toFixed(1)} bps</span>
-      </div>
-      <div class="tt-row"><span>Binance 实时现货</span><b>${fmtUsd(pt.spot)}</b></div>
-      <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
-      <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
-      <div class="tt-row"><span>模型公允胜率 P*</span><b style="color:var(--model)">${pt.p_model !== null ? (pt.p_model * 100).toFixed(1) + "%" : "--"}</b></div>
-    `;
-    tooltip.hidden = false;
-
-    const hx = modalChartGeom.xOfSec(pt.elapsed);
-    const ttW = 225;
-    const leftPos = Math.min(rect.width - ttW - 10, Math.max(10, hx + 14));
-    tooltip.style.left = `${leftPos}px`;
-    tooltip.style.top = `12px`;
+    showModalTooltipForElapsed(pt.elapsed, null);
   });
 
   canvas.addEventListener("mouseleave", () => {
     modalHoverIdx = null;
-    tooltip.hidden = true;
     if (cachedModalWindow) drawModalHistoryChart(cachedModalWindow, cachedModalRecord);
+    if (modalSelectedActionIdx !== null && cachedModalWindow) {
+      const actions = Array.isArray(cachedModalWindow.actions) ? cachedModalWindow.actions : [];
+      const startTs = Number(cachedModalWindow.start || cachedModalWindow.start_ts || cachedModalRecord?.start_ts || 0);
+      const act = actions[modalSelectedActionIdx];
+      if (act) {
+        const actT = Number(act.t ?? act.ts ?? act.timestamp ?? startTs);
+        const elSec = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
+        showModalTooltipForElapsed(elSec, formatActionItem(act, startTs));
+        return;
+      }
+    }
+    tooltip.hidden = true;
   });
+}
+
+const DECISION_LOG_STORAGE_KEY = "pmquant_decision_audit_log_v1";
+let decisionAuditSlug = null;
+let decisionAuditLog = [];
+try {
+  const savedLog = sessionStorage.getItem(DECISION_LOG_STORAGE_KEY);
+  if (savedLog) {
+    const parsed = JSON.parse(savedLog);
+    if (Array.isArray(parsed)) {
+      decisionAuditLog = parsed;
+      if (parsed.length > 0) decisionAuditSlug = parsed[parsed.length - 1].slug || null;
+    } else if (parsed && Array.isArray(parsed.entries)) {
+      decisionAuditSlug = parsed.slug || null;
+      decisionAuditLog = parsed.entries;
+    }
+  }
+} catch {}
+const decisionAuditKeys = new Set(decisionAuditLog.map((e) => e._uid));
+let lastFallbackDecisionState = { slug: null, key: null, t: 0 };
+
+function clearDecisionAuditLog(newSlug) {
+  decisionAuditSlug = newSlug || null;
+  decisionAuditLog = [];
+  decisionAuditKeys.clear();
+  lastFallbackDecisionState = { slug: newSlug || null, key: null, t: 0 };
+  try {
+    sessionStorage.setItem(DECISION_LOG_STORAGE_KEY, JSON.stringify({ slug: decisionAuditSlug, entries: [] }));
+  } catch {}
+}
+
+function appendDecisionAuditEntry(entry) {
+  if (!entry || !entry.reason) return;
+  const uid = `${entry.slug || ""}|${Number(entry.t || 0).toFixed(2)}|${entry.action || ""}|${entry.reason.slice(0, 48)}`;
+  if (decisionAuditKeys.has(uid)) return;
+  decisionAuditKeys.add(uid);
+  decisionAuditLog.push({ ...entry, _uid: uid });
+  if (decisionAuditLog.length > 200) {
+    const removed = decisionAuditLog.splice(0, decisionAuditLog.length - 200);
+    removed.forEach((r) => decisionAuditKeys.delete(r._uid));
+  }
+  try {
+    sessionStorage.setItem(DECISION_LOG_STORAGE_KEY, JSON.stringify({ slug: decisionAuditSlug, entries: decisionAuditLog }));
+  } catch {}
+}
+
+function ingestLiveDecisions(live) {
+  if (!live || live.status === "idle") return;
+  const slug = live.slug || "";
+  if (slug && decisionAuditSlug !== slug) {
+    clearDecisionAuditLog(slug);
+  }
+  const winInfo = slugToWindowText(slug, live.start, live.end);
+  const winRange = winInfo?.range || "";
+
+  // 1. Prefer authoritative backend decision_timeline when available
+  if (Array.isArray(live.decision_timeline) && live.decision_timeline.length > 0) {
+    live.decision_timeline.forEach((item) => {
+      appendDecisionAuditEntry({
+        slug,
+        winRange,
+        t: Number(item.t || live.now || 0),
+        tau_s: item.tau_s != null ? Number(item.tau_s) : null,
+        action: item.action || "wait",
+        side: item.side || null,
+        price: item.price != null ? Number(item.price) : null,
+        reason: item.reason || "",
+      });
+    });
+  } else {
+    // 2. Fallback accumulation when backend process hasn't been restarted yet:
+    //    record all order actions (submit/fill/cancel) + significant decision transitions
+    if (Array.isArray(live.actions)) {
+      live.actions.forEach((act) => {
+        const actType = act.action || "";
+        const mappedAction =
+          actType === "fill" ? "taker_buy" :
+          actType === "submit" ? "quote" :
+          actType === "cancel" ? "taker_unwind" : "wait";
+        const pxTxt = act.price != null ? ` @ $${Number(act.price).toFixed(2)}` : "";
+        const szTxt = act.size != null ? ` ${Number(act.size)}股` : "";
+        const sideTxt = act.side || "";
+        const labelPrefix =
+          actType === "fill" ? `成交${sideTxt}${szTxt}${pxTxt}` :
+          actType === "submit" ? `委托${sideTxt}${szTxt}${pxTxt}` :
+          actType === "cancel" ? `撤单${sideTxt}${szTxt}${pxTxt}` : actType;
+        appendDecisionAuditEntry({
+          slug,
+          winRange,
+          t: Number(act.t || live.now || 0),
+          tau_s: live.end && act.t ? Math.max(0, Math.round(Number(live.end) - Number(act.t))) : null,
+          action: mappedAction,
+          side: act.side || null,
+          price: act.price != null ? Number(act.price) : null,
+          reason: act.reason ? `${labelPrefix}：${act.reason}` : labelPrefix,
+        });
+      });
+    }
+
+    if (live.last_decision && live.last_decision.reason) {
+      const ld = live.last_decision;
+      const nowT = Number(ld.t || live.now || Date.now() / 1000);
+      const coreReason = String(ld.reason).split("(")[0].slice(0, 36);
+      const stateKey = `${ld.action || ""}|${ld.side || ""}|${coreReason}`;
+      const isActionable = ["taker_buy", "taker_hedge", "taker_unwind", "quote"].includes(ld.action);
+      const changed = lastFallbackDecisionState.slug !== slug || lastFallbackDecisionState.key !== stateKey;
+      const timedOut = (nowT - lastFallbackDecisionState.t) >= 20;
+      if (changed || isActionable || timedOut) {
+        appendDecisionAuditEntry({
+          slug,
+          winRange,
+          t: nowT,
+          tau_s: live.tau_s != null ? Number(live.tau_s) : null,
+          action: ld.action || "wait",
+          side: ld.side || null,
+          price: ld.price != null ? Number(ld.price) : null,
+          reason: ld.reason,
+        });
+        lastFallbackDecisionState = { slug, key: stateKey, t: nowT };
+      }
+    }
+  }
+}
+
+function renderDecisionBulletin(live) {
+  const listEl = $("decision-bulletin-list");
+  const countEl = $("bulletin-count");
+  const modalCountEl = $("modal-bulletin-count");
+  const previewEl = $("bulletin-latest-preview");
+  if (!listEl) return;
+
+  ingestLiveDecisions(live);
+
+  const timeline = decisionAuditLog;
+  if (!timeline.length) {
+    if (countEl) countEl.textContent = "0 条";
+    if (modalCountEl) modalCountEl.textContent = "0 条记录";
+    if (previewEl) previewEl.textContent = "等待策略研判记录...";
+    setHtmlIfChanged(listEl, `
+      <div class="bulletin-empty">
+        <div class="bulletin-empty-title">暂无策略研判记录</div>
+        <div class="bulletin-empty-sub">策略引擎每次产生关键研判、开仓、挂单或撤单决策时，将按时间顺序永久追加记录在此</div>
+      </div>`);
+    return;
+  }
+
+  if (countEl) countEl.textContent = `${timeline.length} 条`;
+  if (modalCountEl) modalCountEl.textContent = `${timeline.length} 条记录`;
+  const tagMap = {
+    taker_buy: ["吃单", "tag-taker"],
+    taker_hedge: ["锁仓", "tag-taker"],
+    taker_unwind: ["防守", "tag-warn"],
+    quote: ["挂单", "tag-quote"],
+    wait: ["研判", "tag-hold"],
+  };
+
+  const latest = timeline[timeline.length - 1];
+  if (previewEl && latest) {
+    const lts = latest.t ? new Date(Number(latest.t) * 1000).toLocaleTimeString("zh-CN", {
+      hour12: false, timeZone: "Asia/Shanghai"
+    }) : "--:--:--";
+    const ltau = latest.tau_s != null ? `剩${Math.max(0, Math.round(Number(latest.tau_s)))}s` : "";
+    const [lTag] = tagMap[latest.action] || ["状态"];
+    previewEl.textContent = `[${lts}${ltau ? " · " + ltau : ""}] [${lTag}] ${translateDecisionReason(latest.reason)}`;
+  }
+
+  const rows = [...timeline].reverse().map((item, idx) => {
+    const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
+      hour12: false, timeZone: "Asia/Shanghai"
+    }) : "--:--:--";
+    const winTxt = item.winRange ? `${item.winRange} · ` : "";
+    const tauTxt = item.tau_s != null ? `剩${Math.max(0, Math.round(Number(item.tau_s)))}s` : "";
+    const [tagLabel, tagCls] = tagMap[item.action] || ["状态", "tag-hold"];
+    const text = translateDecisionReason(item.reason);
+    const latestCls = idx === 0 ? " is-latest" : "";
+    return `
+      <div class="bulletin-row${latestCls}">
+        <span class="bulletin-time">[${ts} · ${winTxt}${tauTxt}]</span>
+        <span class="bulletin-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
+        <span class="bulletin-text">${escapeHtml(text)}</span>
+      </div>`;
+  }).join("");
+  setHtmlIfChanged(listEl, rows);
+}
+
+let stableServerOffsetMs = null;
+let lastCountdownSlug = null;
+let lastCountdownTau = null;
+
+function syncServerClockOffset(serverTimeSec) {
+  if (!serverTimeSec) return;
+  const rawOffset = Number(serverTimeSec) * 1000 - Date.now();
+  if (stableServerOffsetMs === null || Math.abs(rawOffset - stableServerOffsetMs) > 1500) {
+    stableServerOffsetMs = rawOffset;
+  } else {
+    stableServerOffsetMs = stableServerOffsetMs * 0.9 + rawOffset * 0.1;
+  }
+}
+
+function updateSmoothCountdowns() {
+  if (!cachedLive || cachedLive.status === "idle" || !cachedLive.end) return;
+  const slug = cachedLive.slug || "";
+  if (slug !== lastCountdownSlug) {
+    lastCountdownSlug = slug;
+    lastCountdownTau = null;
+  }
+
+  const offset = stableServerOffsetMs !== null ? stableServerOffsetMs : 0;
+  const nowServerSec = (Date.now() + offset) / 1000;
+  let tau = Math.max(0, Math.floor(Number(cachedLive.end) - nowServerSec));
+  if (lastCountdownTau !== null && tau > lastCountdownTau) {
+    tau = lastCountdownTau;
+  }
+  lastCountdownTau = tau;
+  const elapsed = Math.min(300, Math.max(0, 300 - tau));
+
+  if ($("market-tau")) $("market-tau").textContent = String(tau);
+  if ($("chart-elapsed-badge")) $("chart-elapsed-badge").textContent = `已运行 ${elapsed}s / 300s`;
+  if ($("overview-live-tau")) {
+    setHtmlIfChanged($("overview-live-tau"), `${tau}<span class="val-unit">s</span>`);
+  }
+  const bar = $("overview-tau-bar");
+  if (bar) bar.style.width = `${((elapsed / 300) * 100).toFixed(1)}%`;
 }
 
 // ============================================================================
@@ -2252,13 +2748,23 @@ async function fetchAll(isManual = false) {
     const [live, hist] = await Promise.all([liveRes.json(), histRes.json()]);
     cachedLive = live;
     cachedHistory = hist;
+    if (live && live.server_time) {
+      syncServerClockOffset(live.server_time);
+    }
 
     if (connPill) connPill.className = "status-pill status-ready";
     if (connText) connText.textContent = "服务在线";
 
+    const versionEl = $("page-version");
+    const activeVer = (hist && (hist.current_batch || hist.batch_id)) || (live && live.batch_id);
+    if (versionEl && activeVer) {
+      versionEl.textContent = activeVer;
+    }
+
     updateNetworkTelemetry(live);
     updateOverview(live, hist);
     updateMarket(live);
+    updateSmoothCountdowns();
     renderHistoryTable(hist);
 
     if (isManual) {
@@ -2318,6 +2824,83 @@ function initInteractions() {
     });
   }
 
+  const connHelpBtn = $("conn-help-btn");
+  const connGuideModal = $("conn-guide-modal");
+  const connGuideClose = $("conn-guide-close-btn");
+  const closeConnGuide = () => {
+    if (connGuideModal) connGuideModal.hidden = true;
+  };
+  if (connHelpBtn && connGuideModal) {
+    connHelpBtn.addEventListener("click", () => {
+      connGuideModal.hidden = false;
+    });
+  }
+  if (connGuideClose) {
+    connGuideClose.addEventListener("click", closeConnGuide);
+  }
+  if (connGuideModal) {
+    connGuideModal.addEventListener("click", (e) => {
+      if (e.target === connGuideModal) closeConnGuide();
+    });
+  }
+  const bulletinToggle = $("bulletin-toggle-btn");
+  const timelineModal = $("decision-timeline-modal");
+  const timelineClose = $("decision-timeline-close-btn");
+  const closeTimelineModal = () => {
+    if (timelineModal) timelineModal.hidden = true;
+  };
+  if (bulletinToggle && timelineModal) {
+    const openTimelineModal = () => {
+      timelineModal.hidden = false;
+    };
+    bulletinToggle.addEventListener("click", openTimelineModal);
+    bulletinToggle.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openTimelineModal();
+      }
+    });
+  }
+  if (timelineClose) {
+    timelineClose.addEventListener("click", closeTimelineModal);
+  }
+  if (timelineModal) {
+    timelineModal.addEventListener("click", (e) => {
+      if (e.target === timelineModal) closeTimelineModal();
+    });
+  }
+
+  const regimeHelpBtn = $("regime-help-btn");
+  const regimeGuideModal = $("regime-guide-modal");
+  const regimeGuideClose = $("regime-guide-close-btn");
+  const closeRegimeGuide = () => {
+    if (regimeGuideModal) regimeGuideModal.hidden = true;
+  };
+  if (regimeHelpBtn && regimeGuideModal) {
+    regimeHelpBtn.addEventListener("click", () => {
+      regimeGuideModal.hidden = false;
+    });
+  }
+  if (regimeGuideClose) {
+    regimeGuideClose.addEventListener("click", closeRegimeGuide);
+  }
+  if (regimeGuideModal) {
+    regimeGuideModal.addEventListener("click", (e) => {
+      if (e.target === regimeGuideModal) closeRegimeGuide();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && connGuideModal && !connGuideModal.hidden) {
+      closeConnGuide();
+    }
+    if (e.key === "Escape" && regimeGuideModal && !regimeGuideModal.hidden) {
+      closeRegimeGuide();
+    }
+    if (e.key === "Escape" && timelineModal && !timelineModal.hidden) {
+      closeTimelineModal();
+    }
+  });
+
   window.addEventListener("resize", () => {
     if (currentPage === "overview" && cachedHistory) drawEquityCurve(cachedHistory);
     if (currentPage === "market" && cachedLive) drawLivePriceChart(cachedLive);
@@ -2338,7 +2921,8 @@ document.addEventListener("DOMContentLoaded", () => {
   initLiveChartInteractions();
   updateWallClock();
   setInterval(updateWallClock, 1000);
+  setInterval(updateSmoothCountdowns, 250);
 
   fetchAll(false);
-  setInterval(() => fetchAll(false), 1000);
+  setInterval(() => fetchAll(false), 500);
 });

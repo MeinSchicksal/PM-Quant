@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.10">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.28">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -19,7 +19,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v2.2</span>
+      <span class="brand-version" id="page-version">v2.3</span>
     </div>
 
     <div class="sidebar-top">
@@ -54,7 +54,10 @@
     <div class="sidebar-spacer"></div>
 
     <div class="sidebar-group sidebar-connections">
-      <div class="sidebar-group-label">数据源连接</div>
+      <div class="sidebar-group-head">
+        <div class="sidebar-group-label">数据源连接</div>
+        <button type="button" class="conn-help-btn" id="conn-help-btn" title="查看数据源状态与指标说明" aria-label="数据源状态说明">?</button>
+      </div>
       <div class="conn-card">
         <div class="conn-head">
           <div class="status-pill status-ready" id="conn-pill" title="数据源通信状态">
@@ -148,24 +151,27 @@
         </div>
 
         <div class="active-strip-metrics">
-          <div class="active-strip-tau">
-            <div class="active-strip-tau-top">
-              <span class="cap-label">交割倒计时</span>
-              <strong class="mono-val" id="overview-live-tau">-- 秒</strong>
-            </div>
-            <div class="single-progress-track">
-              <div class="single-progress-fill" id="overview-tau-bar" style="width: 0%"></div>
-            </div>
+          <div class="active-strip-cell">
+            <span class="cap-label">交割倒计时</span>
+            <strong class="cap-val" id="overview-live-tau">-- <span class="val-unit">s</span></strong>
           </div>
 
-          <div class="active-strip-kv">
+          <span class="strip-divider" aria-hidden="true"></span>
+
+          <div class="active-strip-cell">
             <span class="cap-label">BTC 实时现货</span>
-            <strong class="cap-val" id="overview-live-spot">$0.00</strong>
+            <strong class="cap-val" id="overview-live-spot"><span class="val-currency">$</span>0.00</strong>
           </div>
 
-          <div class="active-strip-kv">
+          <span class="strip-divider" aria-hidden="true"></span>
+
+          <div class="active-strip-cell">
             <span class="cap-label">本轮持仓配比</span>
-            <strong class="cap-val" id="overview-live-pos">UP 0.0 / DN 0.0</strong>
+            <strong class="cap-val cap-pos" id="overview-live-pos">
+              <span class="pos-chip up">UP 0.0</span>
+              <span class="pos-sep">/</span>
+              <span class="pos-chip down">DN 0.0</span>
+            </strong>
           </div>
         </div>
 
@@ -175,6 +181,10 @@
             <path d="M4 10h12m-4-4 4 4-4 4"/>
           </svg>
         </a>
+
+        <div class="strip-progress-rail" aria-hidden="true">
+          <div class="strip-progress-glow" id="overview-tau-bar" style="width: 0%"></div>
+        </div>
       </section>
 
       <!-- Row 2: Golden-Ratio 2-Column Hero Grid (Left: Net PnL & Capital Scorecard | Right: Wide Equity Curve) -->
@@ -183,7 +193,6 @@
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益">
           <div class="card-head">
             <h2>累计已结算净收益</h2>
-            <span class="badge-pill" id="hero-settled-count">0 场已结算</span>
           </div>
 
           <div class="pnl-primary-block">
@@ -230,9 +239,8 @@
           <div class="card-head">
             <div class="card-head-inline">
               <h2>已结算轮次净值曲线</h2>
-              <span class="card-head-hint">悬停检视单场损益 · 点击节点直接调阅复盘</span>
+              <span class="card-head-hint">悬停检视单场损益</span>
             </div>
-            <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
           </div>
           <div class="equity-canvas-wrap">
             <canvas id="equity-curve-canvas" height="220"></canvas>
@@ -297,43 +305,6 @@
         </div>
         <div class="regime-coverage" id="regime-coverage" hidden></div>
       </section>
-
-      <!-- Row 5: Recent Settled Rounds Table -->
-      <section class="panel section-panel table-panel" aria-label="近期结算轮次">
-        <div class="section-head">
-          <div class="section-title-group">
-            <h2>近期结算场次</h2>
-            <p class="section-subtitle">展示最近 5 个窗口的交割结果与头寸核算，点击任意行可调阅 5 分钟秒级复盘图与操作明细</p>
-          </div>
-          <a class="btn-link" href="#history" id="view-more-history">
-            <span>查看全部历史账本</span>
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 10h12m-4-4 4 4-4 4"/>
-            </svg>
-          </a>
-        </div>
-
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>北京时间轮次</th>
-                <th>胜出方向</th>
-                <th title="Polymarket 该窗口开盘价 → 收盘价，下方为美元涨跌与百分比">开盘 → 收盘 (涨跌)</th>
-                <th class="num" title="看涨（UP）持仓股数">UP 股数</th>
-                <th class="num" title="看跌（DOWN）持仓股数">DN 股数</th>
-                <th class="num">投入成本</th>
-                <th class="num">期末兑现</th>
-                <th class="num">净收益</th>
-                <th class="num" title="该窗口成交笔数">成交笔数</th>
-              </tr>
-            </thead>
-            <tbody id="overview-recent-tbody">
-              <tr><td colspan="9" class="action-empty">加载结算记录中...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <!-- ====================================================================
@@ -370,18 +341,36 @@
           <div class="mc-item">
             <span class="mc-label">相对开盘偏离幅度</span>
             <div class="mc-val-row">
-              <strong class="mc-val" id="market-bps">+0.00%</strong>
+              <strong class="mc-val" id="market-bps">$0.00</strong>
+              <small class="mc-sub" id="market-bps-sub">+0.000% · +0.0 bps</small>
             </div>
           </div>
 
           <div class="mc-item mc-risk-col">
-            <span class="mc-label">微观风控与形态状态</span>
+            <span class="mc-label mc-label-with-help">
+              <span>微观风控与形态状态</span>
+              <button type="button" class="conn-help-btn mc-help-btn" id="regime-help-btn" title="查看微观风控与行情形态说明" aria-label="微观风控与形态说明">?</button>
+            </span>
             <div class="mc-val-row">
               <span class="status-pill status-ready" id="market-risk-pill">
                 <span class="status-dot"></span>
                 <span id="market-risk">流动性正常</span>
               </span>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Compact Single-Line Strategy Decision Ticker -->
+      <section class="panel decision-bulletin-panel" aria-label="策略研判记录">
+        <div class="bulletin-bar" id="bulletin-toggle-btn" role="button" tabindex="0">
+          <div class="bulletin-bar-left">
+            <span class="bulletin-live-dot" aria-hidden="true"></span>
+            <span class="bulletin-label">研判记录</span>
+            <span class="bulletin-latest-preview" id="bulletin-latest-preview">等待策略研判记录...</span>
+          </div>
+          <div class="bulletin-bar-right">
+            <span class="badge-pill" id="bulletin-count">0 条</span>
           </div>
         </div>
       </section>
@@ -424,11 +413,6 @@
               <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
               <span class="chart-stat-item">模型 P* <strong class="prob-tag-model" id="chart-stat-prob-model">--%</strong></span>
               <span class="chart-stat-item">定价边际 <strong id="chart-stat-edge">+0.0%</strong></span>
-            </div>
-
-            <div class="decision-badge" id="decision-badge">
-              <span class="decision-dot"></span>
-              <span id="decision-reason">策略评估中...</span>
             </div>
           </div>
         </div>
@@ -570,24 +554,36 @@
               <button type="button" class="filter-btn" data-filter="win">盈利</button>
               <button type="button" class="filter-btn" data-filter="loss">亏损</button>
             </div>
-            <span class="badge-pill" id="history-count">0 场记录</span>
+            <span class="history-count-stat" id="history-count">共 <strong>0</strong> 场</span>
           </div>
         </div>
 
         <div class="table-wrap">
-          <table class="data-table">
+          <table class="data-table rounds-table">
+            <colgroup>
+              <col style="width: 13%">
+              <col style="width: 11%">
+              <col style="width: 17%">
+              <col style="width: 8%">
+              <col style="width: 8%">
+              <col style="width: 9%">
+              <col style="width: 9%">
+              <col style="width: 9%">
+              <col style="width: 7%">
+              <col style="width: 9%">
+            </colgroup>
             <thead>
               <tr>
                 <th>北京时间轮次</th>
-                <th>交割方向</th>
-                <th title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开盘 → 收盘 (涨跌)</th>
-                <th class="num" title="看涨（UP）持仓股数">UP 股</th>
-                <th class="num" title="看跌（DOWN）持仓股数">DN 股</th>
-                <th class="num">总成本</th>
-                <th class="num">兑现收入</th>
-                <th class="num">净收益</th>
-                <th class="num" title="该窗口成交笔数">笔数</th>
-                <th class="num" title="为对冲裸头寸支付的保险成本">保险成本</th>
+                <th class="center">交割方向</th>
+                <th class="center col-price-hdr" title="Polymarket 该窗口开盘价 → 收盘价，括号内为涨跌幅">开盘 → 收盘 (涨跌)</th>
+                <th class="center col-up-hdr" title="看涨（UP）持仓股数">UP 股</th>
+                <th class="center col-down-hdr" title="看跌（DOWN）持仓股数">DN 股</th>
+                <th class="center col-cost-hdr">总成本</th>
+                <th class="center col-payout-hdr">兑现收入</th>
+                <th class="center">净收益</th>
+                <th class="center" title="该窗口成交笔数">笔数</th>
+                <th class="center" title="双边对冲锁仓时，若 (UP均价 + DN均价) > $1.00，超出的对冲溢价即为保险成本">保险成本</th>
               </tr>
             </thead>
             <tbody id="history-tbody">
@@ -607,7 +603,6 @@
       <div class="modal-header">
         <div class="modal-header-left">
           <h2 class="modal-title" id="modal-round-title">5 分钟轮次复盘详情</h2>
-          <span class="badge-pill" id="modal-round-slug">--</span>
           <span class="winner-pill pending" id="modal-round-winner">--</span>
         </div>
         <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
@@ -620,9 +615,166 @@
     </div>
   </div>
 
+  <!-- ======================================================================
+       DATA SOURCE GUIDE MODAL (数据源状态与指标新手说明弹窗)
+       ====================================================================== -->
+  <div id="conn-guide-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="conn-guide-title">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="conn-guide-title">数据源与状态指标说明</h2>
+          <span class="badge-pill">新手指南</span>
+        </div>
+        <button type="button" class="modal-close-btn" id="conn-guide-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
+      </div>
+      <div class="modal-body conn-guide-body">
+        <div class="guide-section">
+          <h3 class="guide-section-title">一、顶部连接与右侧状态徽章含义</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">服务在线</span>
+              <div class="guide-desc"><strong>浏览器 ↔ 本地看板正常</strong>：页面与本地 8900 Web 服务通信正常；若显示 <span class="guide-inline-bad">连接中断</span>，说明看板服务已停止。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">4 源正常</span>
+              <div class="guide-desc"><strong>全部数据流实时健康</strong>：交易管道运行中，且 Polymarket 盘口、WebSocket 成交、BTC 现货、Chainlink TWAP 均新鲜无阻断，系统可正常交易。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-warn">TWAP 滞后</span>
+              <div class="guide-desc"><strong>Chainlink 60s TWAP 暂未更新（&gt;10s）</strong>：属外部预言机接口短时延迟，系统会自动切换至「实时现货 + 稳态基差」估算真实价格，无需人工干预。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-bad">现货断流</span>
+              <div class="guide-desc"><strong>BTC 现货连续失败（&gt;3s）</strong>：Binance/OKX 均无法获取最新价格。死人开关已自动撤回所有在途挂单并禁止新开仓，请检查本机网络或代理节点。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-bad">风控告警</span>
+              <div class="guide-desc"><strong>触发账户保护</strong>：达到单日最大回撤（$15）或连亏 3 轮冷却，系统已自动锁仓/暂停开新仓，防止连续逆风扩大亏损。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-muted">管道待机/离线</span>
+              <div class="guide-desc"><strong>后台交易管道未运行</strong>：仅看板服务开着，<code>live.json</code> 超过 10 秒未更新（不会下单或录行情）。执行 <code>python main.py start</code> 或 <code>run</code> 即可启动。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="guide-section">
+          <h3 class="guide-section-title">二、实时延迟与网络遥测指标</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-metric">Polymarket 盘口</span>
+              <div class="guide-desc">拉取 Up / Down 订单簿的往返耗时（ms）。正常范围 <code>150 ~ 500 ms</code>；若持续超过 <code>1500 ms</code> 可能导致 300ms 延迟 IOC 吃单错失率上升。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-metric">Chainlink 预言机</span>
+              <div class="guide-desc">拉取 BTC 现货与 Chainlink 官方结算参考价的延迟（ms）。注意本市场正式结算依据为 Chainlink 60 秒时间加权均价（TWAP）。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-metric">吞吐 / RTT / 累计</span>
+              <div class="guide-desc">依次代表<strong>每秒下行行情速率（KB/s）</strong>、<strong>平均网络往返延迟（ms）</strong>、<strong>本次启动累计接收流量（MB）</strong>。管道运行中吞吐通常在 <code>3 ~ 15 KB/s</code> 波动。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       REGIME & MICRO-RISK GUIDE MODAL (微观风控与行情形态说明弹窗)
+       ====================================================================== -->
+  <div id="regime-guide-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="regime-guide-title">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="regime-guide-title">微观风控与行情形态说明</h2>
+          <span class="badge-pill">状态字典</span>
+        </div>
+        <button type="button" class="modal-close-btn" id="regime-guide-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
+      </div>
+      <div class="modal-body conn-guide-body">
+        <div class="guide-section">
+          <h3 class="guide-section-title">一、微观形态标签（共 8 种，用于事后归因，不直接拦截开仓）</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">窄幅震荡</span>
+              <div class="guide-desc"><strong>range_bound</strong>：偏离开盘价较小且方向信噪比低，价格在基准附近来回拉锯。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">常态波动</span>
+              <div class="guide-desc"><strong>normal_oscillation</strong>：常规 5 分钟震荡市况，买卖盘口深度正常，策略主战场。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-warn">温和偏态漂移</span>
+              <div class="guide-desc"><strong>skewed_drift</strong>：价格已偏向某一侧（胜率偏离 50%），但尚未形成极端单边突破。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">单边强势多/空</span>
+              <div class="guide-desc"><strong>trending_up / trending_down</strong>：现货显著脱离基准线且信噪比 &gt; 1.8，趋势方向明确。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-warn">宽价差低流动性</span>
+              <div class="guide-desc"><strong>wide_spread</strong>：盘口买卖价差超过 $0.06，做市商变谨慎，吃单摩擦成本升高。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-bad">毒流冲击</span>
+              <div class="guide-desc"><strong>toxic</strong>：现货 2~3 秒内突发急剧跳变，系统自动撤回在途被动挂单防被点杀。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-muted">尾盘冻结</span>
+              <div class="guide-desc"><strong>tail_freeze</strong>：距离结算不足 15 秒，停止新开仓与补腿，持仓等待到期交割。</div>
+            </div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h3 class="guide-section-title">二、后缀同步与熔断状态</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">双源同步</span>
+              <div class="guide-desc">Binance 实时现货与 Chainlink TWAP 均在线且已对齐稳态基差，估值最精准。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-bad">风控熔断</span>
+              <div class="guide-desc">触发日度回撤上限（$15）或连亏 3 轮冷却期，强制禁止新开第一腿。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       DECISION TIMELINE MODAL (本轮实时研判时间轴弹窗)
+       ====================================================================== -->
+  <div id="decision-timeline-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-dialog-bulletin" role="dialog" aria-modal="true" aria-labelledby="decision-timeline-title">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="decision-timeline-title">策略研判与决策记录</h2>
+          <span class="badge-pill" id="modal-bulletin-count">0 条记录</span>
+        </div>
+        <button type="button" class="modal-close-btn bulletin-close-btn" id="decision-timeline-close-btn" aria-label="关闭弹窗">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+          <span>关闭</span>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="bulletin-list bulletin-list-modal" id="decision-bulletin-list">
+          <div class="bulletin-empty">
+            <div class="bulletin-empty-title">暂无策略研判记录</div>
+            <div class="bulletin-empty-sub">策略引擎每次产生关键研判、开仓、挂单或撤单决策时，将按时间顺序永久追加记录在此</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.2"></script>
+  <script src="/static/app.js?v=3.2.26"></script>
 </body>
 </html>

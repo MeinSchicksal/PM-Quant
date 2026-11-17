@@ -234,10 +234,11 @@ class TestSettlementTruth(unittest.TestCase):
         # best_ask=0.30 looks like a lock, but walking 5 shares hits 0.75.
         bd = _book(0.20, 0.30, t=100.0,
                    asks=[(0.30, 1.0), (0.75, 50.0)])
-        bu = _book(0.40, 0.99, t=100.0)
+        bu = _book(0.40, 0.60, t=100.0)
         sp = SpotState(timestamp=100.0, price=100000.0, open_price=100000.0,
                        poly_price=100000.0, binance_open_price=100000.0)
-        r.step(100.0, sp, bu, bd, poly_spot=100000.0)
+        with patch.dict(config.PARAMS, {"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00}):
+            r.step(100.0, sp, bu, bd, poly_spot=100000.0)
         rejects = [a for a in r.actions if a.get("action") == "taker_reject"]
         self.assertTrue(rejects)
         self.assertIn("VWAP", rejects[-1]["reason"])

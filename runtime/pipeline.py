@@ -82,6 +82,10 @@ class PipelineDriver:
             self.trade_stream.stop()
         except Exception:
             pass
+        try:
+            self.feed.close()
+        except Exception:
+            pass
 
     def run(self):
         # Line-buffer stdout so `python main.py start > pipeline.log` tails in
@@ -113,37 +117,41 @@ class PipelineDriver:
                 tau_s = info["tau_s"]
                 close_px = 0.0  # only valid for a round settled in this iteration
 
-                # 0. Background Reconciler: Ensure delayed Chainlink TWAP replaces spot fallback
-                if loop_start - last_reconcile_t >= 5.0 and pending_settlements:
+                # 0. Background Reconciler: Confirm official Gamma/UMA settlement & Chainlink TWAP
+                if loop_start - last_reconcile_t >= 10.0 and pending_settlements:
                     last_reconcile_t = loop_start
                     for item in list(pending_settlements):
-                        p_slug = item["slug"] if isinstance(item, dict) else item[0]
-                        p_start = item["start_t"] if isinstance(item, dict) else item[1]
-                        if isinstance(item, dict):
-                            item["attempts"] = item.get("attempts", 0) + 1
-                        official_poly = self.feed.fetch_window_settlement_price(p_start)
-                        if official_poly:
+                        p_slug = item["slug"]
+                        p_start = item["start_t"]
+                        item["attempts"] = item.get("attempts", 0) + 1
+
+                        official = self.feed.verify_official_settlement(p_slug)
+                        official_poly = item.get("twap_prices") or self.feed.fetch_window_settlement_price(p_start)
+                        if official_poly and not item.get("twap_prices"):
+                            item["twap_prices"] = official_poly
                             off_open, off_close, off_winner = official_poly
-                            # These prices/winner come from the TWAP endpoint,
-                            # not from UMA resolution. runner.reconcile_record
-                            # keeps an already-verified Gamma winner intact.
                             self.runner.reconcile_record(
                                 p_slug, off_open, off_close, off_winner,
                                 winner_source="twap"
                             )
-                            pending_settlements.remove(item)
                             print(f"[Pipeline] Official Chainlink TWAP confirmed for {p_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})\n")
-                        elif isinstance(item, dict) and (item["attempts"] >= 30 or (loop_start - item.get("added_at", loop_start)) > 1800):
+
+                        if official:
+                            off_open = official_poly[0] if official_poly else item.get("open_px", 0.0)
+                            off_close = official_poly[1] if official_poly else item.get("close_px", 0.0)
+                            self.runner.reconcile_record(
+                                p_slug, off_open, off_close, official["winner"],
+                                winner_source="gamma"
+                            )
+                            pending_settlements.remove(item)
+                            print(f"[Pipeline] Official Gamma/UMA truth confirmed for {p_slug}: {official['winner']}\n")
+                        elif item["attempts"] >= 40 or (loop_start - item.get("added_at", loop_start)) > 1800:
                             print(f"[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts). Dropping.\n")
                             pending_settlements.remove(item)
 
                 # 1. Check Window Rollover / Expiration
                 if last_slug and last_slug != slug:
                     print(f"\n[Pipeline] Window {last_slug} ended. Settling...")
-                    # Gamma/UMA resolution is the authoritative winner. Query it
-                    # FIRST, regardless of whether the TWAP endpoint answered;
-                    # previously it was only consulted when TWAP failed, and a
-                    # later TWAP reconcile could overwrite the official result.
                     official = self.feed.verify_official_settlement(last_slug)
                     official_winner = official.get("winner") if official else None
                     winner_source = "gamma" if official else "spot_fallback"
@@ -158,19 +166,24 @@ class PipelineDriver:
                             winner_source = "twap"
                     else:
                         close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                        # A 60s smoothed TWAP is a poor proxy for a point-value
-                        # settlement. Use the real Binance point print instead.
                         close_px = (
                             getattr(self.runner, "last_spot_price", 0.0)
                             or (close_spot.price if close_spot.price > 0 else self.runner.open_price)
                         )
-                        if last_start_t:
-                            pending_settlements.append({
-                                "slug": last_slug,
-                                "start_t": last_start_t,
-                                "attempts": 0,
-                                "added_at": loop_start
-                            })
+
+                    # Always enqueue for Gamma UMA verification if not yet resolved officially
+                    if not official and last_start_t:
+                        pending_settlements.append({
+                            "slug": last_slug,
+                            "start_t": last_start_t,
+                            "open_px": self.runner.open_price,
+                            "close_px": close_px,
+                            "twap_prices": official_poly,
+                            "attempts": 0,
+                            "added_at": loop_start
+                        })
+                        if len(pending_settlements) > 20:
+                            pending_settlements = pending_settlements[-20:]
 
                     self.runner.close_window(close_px, official_winner,
                                             winner_source=winner_source)
@@ -268,23 +281,30 @@ class PipelineDriver:
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
                     poly_spot = self.feed.get_polymarket_btc_price(loop_start)
-                    spot = self.feed.fetch_spot_state(
+                    spot, b_up, b_dn = self.feed.fetch_tick_bundle(
                         self.runner.open_price,
-                        loop_start,
-                        binance_open_price=self.runner.binance_open_price,
-                        poly_spot=poly_spot
+                        self.runner.binance_open_price,
+                        active_tokens["token_up"],
+                        active_tokens["token_down"],
+                        now=loop_start,
+                        poly_spot=poly_spot,
                     )
-                    b_up = self.feed.fetch_order_book(active_tokens["token_up"], "Up")
-                    b_dn = self.feed.fetch_order_book(active_tokens["token_down"], "Down")
 
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
+
+                    def _delayed_book(side_name: str):
+                        tok = active_tokens.get("token_up" if side_name == "Up" else "token_down")
+                        if not tok:
+                            return None
+                        return self.feed.fetch_order_book(tok, side_name)
 
                     self.runner.step(
                         loop_start, spot, b_up, b_dn,
                         net_stats=self.feed.get_net_summary(),
                         trade_prints=trades,
-                        poly_spot=poly_spot
+                        poly_spot=poly_spot,
+                        delayed_book_fetcher=_delayed_book
                     )
 
                     # Formatted terminal status line
@@ -313,9 +333,9 @@ class PipelineDriver:
                         end="", flush=True
                     )
 
-                # Maintain 1-second cadence
+                # Maintain 0.5-second (2 Hz) high-frequency cadence
                 elapsed = time.time() - loop_start
-                sleep_s = max(0.05, 1.0 - elapsed)
+                sleep_s = max(0.05, 0.5 - elapsed)
                 time.sleep(sleep_s)
 
             except KeyboardInterrupt:
@@ -328,6 +348,10 @@ class PipelineDriver:
 
         try:
             self.trade_stream.stop()
+        except Exception:
+            pass
+        try:
+            self.feed.close()
         except Exception:
             pass
         if last_slug:
