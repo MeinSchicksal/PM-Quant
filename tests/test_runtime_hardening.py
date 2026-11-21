@@ -477,6 +477,57 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         self.assertIsNone(ws.get_order_book(tok, now=1001.0))
         self.assertGreater(ws._token_gen, gen_before)
 
+    def test_cancel_latency_allows_adverse_fill_during_300ms_wire_flight(self):
+        tmp = tempfile.mkdtemp(prefix="pm_cancel_lat_")
+        runner = PaperRunner(ledger_dir=tmp)
+        t0 = 1800000000.0
+        runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0)
+        b_up = _book(0.49, 10.0, 0.51, 10.0)
+        b_dn = _book(0.49, 10.0, 0.51, 10.0)
+        spot = SpotState(timestamp=t0 + 70.0, price=65010.0, open_price=65000.0, realized_vol_bps=14.0)
+
+        # 1. Place 5-share Maker quote at t0+70.0 (live_at = t0+70.30, queue_ahead = 0 at 0.50)
+        q_dec = Decision(action="quote", side="Up", price=0.50, size=5.0, reason="maker entry")
+        with patch("runtime.runner.plan_decision", return_value=q_dec):
+            runner.step(t0 + 70.0, spot, b_up, b_dn, replay_mode=True)
+        self.assertEqual(len(runner.working_orders), 1)
+
+        # 2. At t0+75.0, urgent cancel is requested -> order enters pending_cancels for 300ms [75.0, 75.30)
+        cancel_dec = Decision(action="wait", reason="toxic shock", urgent_cancel=True)
+        with patch("runtime.runner.plan_decision", return_value=cancel_dec):
+            runner.step(t0 + 75.0, spot, b_up, b_dn, replay_mode=True)
+        self.assertEqual(len(runner.working_orders), 0)
+        self.assertEqual(len(runner.pending_cancels), 1)
+
+        # 3. Trade print arrives at t0+75.15 (150ms after cancel request, still in flight!) -> must fill!
+        with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="hold")):
+            runner.step(
+                t0 + 75.15, spot, b_up, b_dn,
+                trade_prints=[{"outcome": "Up", "price": 0.50, "size": 5.0, "timestamp": t0 + 75.15}],
+                replay_mode=True,
+            )
+        self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
+        self.assertEqual(len(runner.pending_cancels), 0)
+
+    def test_minimum_5_share_order_rule_enforced_everywhere(self):
+        import config
+        from core.policy import plan_decision
+        from core.execution import plan_order_actions
+
+        # 1. Partial fill of 1.5 shares (< 5.0 shares) must NOT trigger sub-5-share black-swan hedge or salvage
+        pos_dn = Position(shares=1.5, cash=0.87)  # @ 0.58
+        pos_up = Position(0.0, 0.0)
+        b_up = _book(0.05, 50.0, 0.06, 50.0)
+        b_dn = _book(0.94, 50.0, 0.95, 50.0)
+        spot = SpotState(timestamp=1200.0, price=64900.0, open_price=65000.0, realized_vol_bps=14.0)
+        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=100.0, params=config.PARAMS, entries_count=1)
+        self.assertEqual(dec.action, "wait", "Sub-5-share inventory must never place a sub-5-share hedge order")
+
+        # 2. plan_order_actions rejects any quote/taker decision < 5.0 shares
+        bad_quote = Decision(action="quote", side="Up", price=0.50, size=3.5, reason="sub-5 quote")
+        _, act = plan_order_actions([], bad_quote, now=1200.0, min_order_shares=5.0)
+        self.assertIsNone(act)
+
 
 if __name__ == "__main__":
     unittest.main()

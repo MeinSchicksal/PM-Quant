@@ -16,10 +16,12 @@ ROOT = Path(__file__).resolve().parent
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
+    "MIN_ORDER_SHARES": 5.0,          # Hard Polymarket CLOB rule: every placed order must be >= 5.0 shares
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares)
     "MAX_LOTS": 2,                    # Up to 2 lots (10 shares) via confirmed pyramid add
     "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll
     "LATENCY_S": 0.30,                # Round-trip wire + engine order insertion delay (s)
+    "CANCEL_LATENCY_S": 0.30,         # In-flight wire delay for order cancellation requests (s)
     "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: rate * p * (1-p); makers pay zero
     "TAKER_MAX_ADVERSE_DROP": 0.05,   # Reject delayed taker IOC if ask collapses >= $0.05 (knife-drop protection)
 

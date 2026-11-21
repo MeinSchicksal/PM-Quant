@@ -122,7 +122,13 @@ class QueueMatcher:
         Returns:
             Filled shares on this print (0.0 if queue not yet exhausted).
         """
-        if order.cancel_at is not None or order.remaining <= 1e-6:
+        if order.remaining <= 1e-6:
+            return 0.0
+        cancel_cutoff = getattr(order, "cancel_effective_at", None)
+        if cancel_cutoff is not None:
+            if now >= cancel_cutoff - 1e-9:
+                return 0.0
+        elif order.cancel_at is not None:
             return 0.0
 
         # Physical latency constraint: cannot fill before arrival at matching engine
@@ -212,7 +218,13 @@ class QueueMatcher:
         Returns:
             Filled shares on this tick (0.0 if still waiting in queue).
         """
-        if order.cancel_at is not None or order.remaining <= 1e-6:
+        if order.remaining <= 1e-6:
+            return 0.0
+        cancel_cutoff = getattr(order, "cancel_effective_at", None)
+        if cancel_cutoff is not None:
+            if now >= cancel_cutoff - 1e-9:
+                return 0.0
+        elif order.cancel_at is not None:
             return 0.0
 
         # Physical latency constraint: cannot fill before arrival at matching engine

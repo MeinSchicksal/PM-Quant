@@ -63,8 +63,10 @@ def _plan_inventory_management(
 ) -> Decision:
     """Manage open directional inventory: black-swan lock, optional arb, tail salvage, or v2.6 secondary entry."""
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
+    lot_size = float(params.get("LOT_SIZE", 5.0))
+    min_order_sh = max(lot_size, float(params.get("MIN_ORDER_SHARES", 5.0)))
 
-    if bool(params.get("ENABLE_ARBITRAGE_HEDGE", False)):
+    if bool(params.get("ENABLE_ARBITRAGE_HEDGE", False)) and held_shares >= min_order_sh - 1e-4:
         max_pair_cost = float(params.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
         hedge_ask = opp_book.best_ask
         if hedge_ask is not None:
@@ -80,8 +82,8 @@ def _plan_inventory_management(
                     reason=f"Deep Arbitrage lock: pair_cost={pair_cost:.3f} <= {max_pair_cost:.2f}, take hedge @ {hedge_ask:.2f}",
                 )
 
-    # Ultra-deep black-swan lock: protect 94%+ winners (opp_ask <= $0.06 & pair_cost <= $0.85)
-    if bool(params.get("ENABLE_BLACKSWAN_LOCK", False)):
+    # Ultra-deep black-swan lock: protect 94%+ winners (opp_ask <= $0.06 & pair_cost <= $0.85, requires >= 5.0 shares)
+    if bool(params.get("ENABLE_BLACKSWAN_LOCK", False)) and held_shares >= min_order_sh - 1e-4:
         bs_max_opp = float(params.get("BLACKSWAN_LOCK_MAX_OPP_ASK", 0.06))
         bs_max_pair = float(params.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
         hedge_ask = opp_book.best_ask
@@ -107,7 +109,7 @@ def _plan_inventory_management(
         and bool(params.get("ALLOW_TAKER_UNWIND", True))
     )
 
-    if salvage_enabled and tau_s <= salvage_tau and p_fair_held < salvage_prob:
+    if salvage_enabled and held_shares >= min_order_sh - 1e-4 and tau_s <= salvage_tau and p_fair_held < salvage_prob:
         salvage_bid = held_book.best_bid
         if salvage_bid is not None and salvage_min_bid <= salvage_bid <= salvage_max_bid:
             fee = taker_fee_per_share(salvage_bid, fee_rate)
@@ -121,7 +123,6 @@ def _plan_inventory_management(
                 reason=f"Defensive Salvage: 尾盘({tau_s:.0f}s) P*={p_fair_held:.2f} 坍塌，市价出清残值 bid={salvage_bid:.2f} (挽回${salvage_cash:.2f})",
             )
 
-    lot_size = float(params.get("LOT_SIZE", 5.0))
     max_shares_cap = lot_size * int(params.get("MAX_LOTS", 1))
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
     anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
@@ -243,7 +244,11 @@ def _plan_inventory_management(
                                 reason=f"v2.6 坍塌反手挂单 Maker: {opp_side} bid=${mk_px:.2f} (P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
                             )
 
-    should_pull = (held_shares >= max_shares_cap - 1e-4) or (entries_count >= max_entries) or is_toxic_or_stale
+    should_pull = (
+        (held_shares >= max_shares_cap - 1e-4)
+        or (entries_count >= max_entries and held_shares >= min_order_sh - 1e-4)
+        or is_toxic_or_stale
+    )
     return _wait(
         f"v2.6: 持有 {held_shares:.0f} 股 {held_side} @ ${held_basis:.2f} 至结算 (P*={p_fair_held:.2f})",
         urgent=should_pull,

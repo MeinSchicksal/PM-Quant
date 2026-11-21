@@ -91,6 +91,7 @@ class Order:
     placed_at: float = 0.0
     live_at: float = 0.0
     cancel_at: Optional[float] = None
+    cancel_effective_at: Optional[float] = None
     cancel_reason: str = ""
 
 

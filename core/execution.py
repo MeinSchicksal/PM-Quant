@@ -60,17 +60,22 @@ def plan_order_actions(
     book_down: Optional[object] = None,
     min_requote_age_s: float = 2.5,
     bid_retreat_ticks: float = 0.029,
+    min_order_shares: float = 5.0,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
     Applies quoting hysteresis and protects resting safe quotes from 1-second
     noise, while immediately pulling quotes if toxic shock, tail freeze,
     objective direction reversal, or >= 3-tick bid retreat occurs.
+    Enforces the exchange rule that every submitted order must be >= min_order_shares (5.0).
     
     Returns:
         (orders_to_cancel, action_to_execute)
     """
     to_cancel: List[Order] = []
+    if decision.action in ("quote", "taker_buy", "taker_hedge", "taker_unwind"):
+        if float(decision.size or 0.0) < min_order_shares - 1e-4:
+            return to_cancel, None
     
     if decision.action == "wait":
         # Structural cancel signal comes from the policy, not from the wording

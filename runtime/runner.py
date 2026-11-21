@@ -55,6 +55,7 @@ class PaperRunner:
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
+        self.pending_cancels = []
         self.fills = []
         self.decisions = []
         self.decision_timeline = []
@@ -139,6 +140,7 @@ class PaperRunner:
         self.pos_up = Position(0.0, 0.0)
         self.pos_down = Position(0.0, 0.0)
         self.working_orders = []
+        self.pending_cancels = []
         self.fills = []
         self.decisions = []
         self.decision_timeline = []
@@ -188,6 +190,7 @@ class PaperRunner:
             for o in self.working_orders:
                 o.cancel_at = time.time()
             self.working_orders = []
+        self.pending_cancels = []
         if self.price_history:
             # Keep the two opening anchors distinct but consistent on the first
             # point: `price` is the Binance kline open, `poly_price` the official
@@ -404,13 +407,17 @@ class PaperRunner:
         self._last_step_time = now
 
         # 0. Process real trade prints that occurred in (prev_t, now] against resting orders
-        # BEFORE evaluating new decisions/cancellations for `now`.
+        # AND in-flight cancelling orders (cancel latency simulation) BEFORE evaluating new decisions.
+        cancel_lat = float(config.PARAMS.get("CANCEL_LATENCY_S", config.PARAMS.get("LATENCY_S", 0.30)))
+        if not hasattr(self, "pending_cancels"):
+            self.pending_cancels = []
         print_touched_ids = set()
-        if trade_prints and self.working_orders:
+        active_for_prints = list(self.working_orders) + list(self.pending_cancels)
+        if trade_prints and active_for_prints:
             for tp in trade_prints:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
                 tp_t = float(tp.get("received_at") or tp.get("timestamp") or now)
-                for o in self.working_orders:
+                for o in active_for_prints:
                     if tp_side and o.side != tp_side:
                         continue
                     fill_sz = self.matcher.on_trade_print(
@@ -427,11 +434,18 @@ class PaperRunner:
                             self.pos_down.cash += (fill_sz * o.price)
                         self._record_fill(tp_t, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
             self.working_orders = [o for o in self.working_orders if o.remaining > 1e-6]
+        self.pending_cancels = [
+            o for o in self.pending_cancels
+            if o.remaining > 1e-6 and now < float(getattr(o, "cancel_effective_at", 0.0) or 0.0) - 1e-9
+        ]
 
         if is_deadman_active and self.working_orders:
             for o in self.working_orders:
                 o.cancel_at = now
+                o.cancel_effective_at = now + cancel_lat
                 o.cancel_reason = f"行情延迟保护撤单 ({deadman_reason})"
+                if o.remaining > 1e-6 and cancel_lat > 0:
+                    self.pending_cancels.append(o)
                 self.actions.append({
                     "t": round(now, 2), "action": "cancel", "side": o.side,
                     "price": o.price, "size": o.remaining, "purpose": o.purpose,
@@ -535,6 +549,10 @@ class PaperRunner:
             self._last_timeline_key = tl_key
             self._last_timeline_t = now
         
+        min_order_sh = max(
+            float(config.PARAMS.get("LOT_SIZE", 5.0)),
+            float(config.PARAMS.get("MIN_ORDER_SHARES", 5.0)),
+        )
         pref_side = determine_objective_side(spot, tau, eval_params)
         to_cancel, action = plan_order_actions(
             self.working_orders, decision, now,
@@ -544,25 +562,32 @@ class PaperRunner:
             book_down=book_down,
             min_requote_age_s=float(config.PARAMS.get("MIN_REQUOTE_AGE_S", 2.5)),
             bid_retreat_ticks=float(config.PARAMS.get("MAX_BID_RETREAT_CANCEL", 0.029)),
+            min_order_shares=min_order_sh,
         )
         for o in to_cancel:
             o.cancel_at = now
+            o.cancel_effective_at = now + cancel_lat
             if o in self.working_orders:
                 self.working_orders.remove(o)
+            if o.remaining > 1e-6 and cancel_lat > 0:
+                self.pending_cancels.append(o)
             self.actions.append({
                 "t": round(now, 2), "action": "cancel", "side": o.side,
                 "price": o.price, "size": o.remaining, "purpose": o.purpose,
                 "reason": o.cancel_reason or "策略撤单", "order_id": o.id
             })
             
-        # 1. Taker execution simulation (depth-aware + optional real wire latency IOC check)
+        # 1. Taker execution simulation (depth-aware + optional real wire latency IOC check + >= 5.0 shares rule)
         if action and action.action in ("taker_buy", "taker_hedge", "taker_unwind"):
             want = float(action.size or 0.0)
             is_buy = action.action in ("taker_buy", "taker_hedge")
             target_book = book_down if action.side == "Down" else book_up
             reject_reason = None
 
-            if (bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
+            if want < min_order_sh - 1e-4:
+                filled, vwap = 0.0, 0.0
+                reject_reason = f"违反最小下单量规则: 下单股数 {want:.2f} < {min_order_sh:.1f} 股"
+            elif (bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
                     and delayed_book_fetcher is not None
                     and action.price is not None):
                 if not replay_mode:
@@ -665,8 +690,8 @@ class PaperRunner:
                     "reason": reject_reason or "empty/one-sided book, no visible liquidity"
                 })
 
-        # 2. Maker quote placement (entry, pyramid add, and reversal flip all use purpose="entry")
-        elif action and action.action == "quote":
+        # 2. Maker quote placement (hard rule: every placed order must be >= min_order_sh = 5.0 shares)
+        elif action and action.action == "quote" and float(action.size or 0.0) >= min_order_sh - 1e-4:
             purpose = "entry"
             self._next_order_id += 1
             oid = self._next_order_id
@@ -694,7 +719,27 @@ class PaperRunner:
                 "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
             })
 
-        # 3. Crossed-book matching for remaining resting maker orders
+        # 3. Crossed-book matching for remaining resting maker orders AND in-flight cancelling orders
+        if self.pending_cancels:
+            still_pending = []
+            for o in self.pending_cancels:
+                if o.remaining <= 1e-6 or now >= float(getattr(o, "cancel_effective_at", 0.0) or 0.0) - 1e-9:
+                    continue
+                if o.id not in print_touched_ids:
+                    target_book = book_up if o.side == "Up" else book_down
+                    fill_sz = self.matcher.match_order(o, target_book, now)
+                    if fill_sz > 0:
+                        if o.side == "Up":
+                            self.pos_up.shares += fill_sz
+                            self.pos_up.cash += (fill_sz * o.price)
+                        else:
+                            self.pos_down.shares += fill_sz
+                            self.pos_down.cash += (fill_sz * o.price)
+                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
+                if o.remaining > 1e-6:
+                    still_pending.append(o)
+            self.pending_cancels = still_pending
+
         remaining_working = []
         for o in self.working_orders:
             if o.id in print_touched_ids:
@@ -815,6 +860,7 @@ class PaperRunner:
 
         # Clear working orders
         self.working_orders = []
+        self.pending_cancels = []
 
     def _compute_same_chain_abs_move(self, close_px: float, winner_source: str) -> float:
         """Compute prior-round move magnitude without mixing Binance spot and Chainlink strike."""
