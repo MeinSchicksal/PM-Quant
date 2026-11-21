@@ -52,6 +52,8 @@ class CircuitBreaker:
             # If round had no fills, tick down cooldown if cooling
             if self.cooling_rounds_left > 0:
                 self.cooling_rounds_left -= 1
+                if self.cooling_rounds_left == 0:
+                    self.consecutive_losses = 0
             return
 
         self.daily_pnl += net_pnl

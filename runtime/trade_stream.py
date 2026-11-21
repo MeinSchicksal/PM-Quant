@@ -30,9 +30,10 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 class TradeStreamClient:
-    def __init__(self, record_raw: bool = True, proxy: Optional[str] = None):
+    def __init__(self, record_raw: bool = True, proxy: Optional[str] = None, idle_reconnect_s: float = 15.0):
         self.record_raw = record_raw
         self.proxy = proxy
+        self.idle_reconnect_s = max(0.05, float(idle_reconnect_s))
         self.running = False
         self.connected = False
         self._thread: Optional[threading.Thread] = None
@@ -134,25 +135,35 @@ class TradeStreamClient:
                         "subscriptions": [{"topic": "activity", "type": "trades"}]
                     }
                     await ws.send(json.dumps(sub_msg))
+                    # Application-level idle watchdog: RTDS can keep TCP/ping alive
+                    # while silently stopping business trade pushes.
+                    last_activity_t = time.monotonic()
 
+                    recv_timeout = min(2.0, self.idle_reconnect_s)
                     while self.running:
                         try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                            raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
                         except asyncio.TimeoutError:
+                            raw = None
+
+                        payload = None
+                        if raw and raw.strip():
+                            try:
+                                msg = json.loads(raw)
+                                p = msg.get("payload") if isinstance(msg, dict) else None
+                                if isinstance(p, dict) and p:
+                                    payload = p
+                            except Exception:
+                                payload = None
+
+                        if payload is None:
+                            if (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
+                                raise TimeoutError(
+                                    f"TradeStream idle watchdog: no trade payloads for {self.idle_reconnect_s:.1f}s"
+                                )
                             continue
 
-                        if not raw or not raw.strip():
-                            continue
-
-                        try:
-                            msg = json.loads(raw)
-                        except Exception:
-                            continue
-
-                        payload = msg.get("payload") if isinstance(msg, dict) else None
-                        if not payload or not isinstance(payload, dict):
-                            continue
-
+                        last_activity_t = time.monotonic()
                         self._ingest(payload)
 
             except Exception as exc:

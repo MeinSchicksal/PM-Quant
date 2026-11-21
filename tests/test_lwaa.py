@@ -75,13 +75,13 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
         self.assertEqual(dec_dn.side, "Down")
 
     def test_maker_quote_when_lead_between_maker_and_taker_thresholds(self):
-        """When objective lead is 5.0-8.0 bps in late window, quote as zero-fee Maker."""
+        """When net edge clears MIN_MAKER_EDGE but stays below MIN_TAKER_EDGE, quote zero-fee Maker."""
         pos = Position(0.0, 0.0)
         book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
         book_dn = OrderBook(bids=[(0.37, 50.0)], asks=[(0.40, 50.0)])
-        # +6.0 bps lead (+45 on 75000) -> maker only
         spot = SpotState(timestamp=1260.0, price=75045.0, open_price=75000.0)
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=p)
         self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")
         self.assertAlmostEqual(dec.price, 0.61)
@@ -92,11 +92,12 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
         book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
         book_dn = OrderBook(bids=[(0.37, 50.0)], asks=[(0.40, 50.0)])
         spot = SpotState(timestamp=1260.0, price=75045.0, open_price=75000.0)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=self.params, quote_attempts=0)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=p, quote_attempts=0)
         self.assertEqual(dec.action, "quote")
 
-        dec2 = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=39.0, params=self.params, quote_attempts=1)
+        dec2 = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=39.0, params=p, quote_attempts=1)
         self.assertEqual(dec2.action, "wait")
         self.assertFalse(dec2.urgent_cancel)
 

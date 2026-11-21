@@ -59,6 +59,8 @@ class MarketFeed:
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
         self._poly_session = None
+        self._spot_ws = None
+        self._book_ws = None
 
         # Real-time network speed, latency, and traffic accounting
         self.net_stats = {
@@ -540,50 +542,64 @@ class MarketFeed:
             binance_open_price=binance_open_price, poly_spot=poly_spot,
         )
 
-    def _fetch_order_book_raw(self, token_id: str, sess: requests.Session = None) -> Tuple[Optional[OrderBook], float, int, Optional[dict]]:
+    def _fetch_order_book_raw(
+        self,
+        token_id: str,
+        sess: requests.Session = None,
+        max_attempts: int = 2,
+    ) -> Tuple[Optional[OrderBook], float, int, Optional[dict]]:
         http = sess or self.session
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
-        t0 = time.perf_counter()
-        try:
-            resp = http.get(url, timeout=(1.0, 1.5))
-            lat_ms = (time.perf_counter() - t0) * 1000.0
-            byte_count = len(resp.content)
-            if resp.status_code == 200:
-                data = resp.json()
-                raw_bids = data.get("bids", [])
-                raw_asks = data.get("asks", [])
-                last_trade_str = data.get("last_trade_price")
-                last_trade_px = float(last_trade_str) if last_trade_str is not None else None
+        for attempt in range(max(1, int(max_attempts))):
+            t0 = time.perf_counter()
+            try:
+                resp = http.get(url, timeout=(0.9, 1.2))
+                lat_ms = (time.perf_counter() - t0) * 1000.0
+                byte_count = len(resp.content)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_bids = data.get("bids", [])
+                    raw_asks = data.get("asks", [])
+                    last_trade_str = data.get("last_trade_price")
+                    last_trade_px = float(last_trade_str) if last_trade_str is not None else None
 
-                bids_sorted = sorted(
-                    [(float(b["price"]), float(b["size"])) for b in raw_bids if float(b["size"]) > 0],
-                    key=lambda x: x[0], reverse=True,
-                )
-                asks_sorted = sorted(
-                    [(float(a["price"]), float(a["size"])) for a in raw_asks if float(a["size"]) > 0],
-                    key=lambda x: x[0],
-                )
-                now_t = time.time()
-                raw_ev = {
-                    "t": round(now_t, 2),
-                    "token_id": token_id,
-                    "best_bid": bids_sorted[0][0] if bids_sorted else None,
-                    "best_ask": asks_sorted[0][0] if asks_sorted else None,
-                    "bid_depth": bids_sorted[:5],
-                    "ask_depth": asks_sorted[:5],
-                    "last_trade_price": last_trade_px,
-                }
-                book = OrderBook(
-                    bids=bids_sorted,
-                    asks=asks_sorted,
-                    last_trade_price=last_trade_px,
-                    source_t=now_t,
-                    received_at=now_t,
-                )
-                return book, lat_ms, byte_count, raw_ev
-            return None, lat_ms, byte_count, None
-        except Exception:
-            return None, 0.0, 0, None
+                    bids_sorted = sorted(
+                        [(float(b["price"]), float(b["size"])) for b in raw_bids if float(b["size"]) > 0],
+                        key=lambda x: x[0], reverse=True,
+                    )
+                    asks_sorted = sorted(
+                        [(float(a["price"]), float(a["size"])) for a in raw_asks if float(a["size"]) > 0],
+                        key=lambda x: x[0],
+                    )
+                    now_t = time.time()
+                    raw_ev = {
+                        "t": round(now_t, 2),
+                        "token_id": token_id,
+                        "best_bid": bids_sorted[0][0] if bids_sorted else None,
+                        "best_ask": asks_sorted[0][0] if asks_sorted else None,
+                        "bid_depth": bids_sorted[:5],
+                        "ask_depth": asks_sorted[:5],
+                        "last_trade_price": last_trade_px,
+                    }
+                    book = OrderBook(
+                        bids=bids_sorted,
+                        asks=asks_sorted,
+                        last_trade_price=last_trade_px,
+                        source_t=now_t,
+                        received_at=now_t,
+                    )
+                    return book, lat_ms, byte_count, raw_ev
+                # Retry once on transient rate-limit or 5xx upstream errors
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt + 1 < max_attempts:
+                    time.sleep(0.05)
+                    continue
+                return None, lat_ms, byte_count, None
+            except Exception:
+                if attempt + 1 < max_attempts:
+                    time.sleep(0.05)
+                    continue
+                return None, 0.0, 0, None
+        return None, 0.0, 0, None
 
     def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:
         """Fetch Polymarket CLOB order book and last_trade_price."""
@@ -597,6 +613,11 @@ class MarketFeed:
         return OrderBook(bids=[], asks=[], last_trade_price=None,
                          source_t=0.0, received_at=0.0)
 
+    def attach_ws_clients(self, spot_ws=None, book_ws=None):
+        """Attach optional real-time WebSocket clients for low-latency spot & CLOB books."""
+        self._spot_ws = spot_ws
+        self._book_ws = book_ws
+
     def fetch_tick_bundle(
         self,
         open_price: float,
@@ -606,15 +627,65 @@ class MarketFeed:
         now: float = None,
         poly_spot: float = None,
     ) -> Tuple[SpotState, OrderBook, OrderBook]:
-        """Concurrently fetch BTC spot + Up book + Down book (1x RTT instead of 3x RTT)."""
+        """Fetch BTC spot + Up book + Down book using WS push first, HTTP REST fallback."""
         t = now or time.time()
-        f_spot = self._executor.submit(lambda: self._fetch_live_spot_price(self._get_worker_session()))
-        f_up = self._executor.submit(lambda: self._fetch_order_book_raw(token_up, self._get_worker_session()))
-        f_dn = self._executor.submit(lambda: self._fetch_order_book_raw(token_down, self._get_worker_session()))
+        spot_ws = getattr(self, "_spot_ws", None)
+        book_ws = getattr(self, "_book_ws", None)
 
-        live_px, src, spot_lat, spot_bytes = f_spot.result()
-        up_book, up_lat, up_bytes, up_ev = f_up.result()
-        dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result()
+        ws_spot = spot_ws.get_latest(max_age_s=2.0, now=t) if spot_ws is not None else None
+        ws_up = book_ws.get_order_book(token_up, max_age_s=3.0, now=t) if book_ws is not None else None
+        ws_dn = book_ws.get_order_book(token_down, max_age_s=3.0, now=t) if book_ws is not None else None
+
+        f_spot = (
+            self._executor.submit(lambda: self._fetch_live_spot_price(self._get_worker_session()))
+            if ws_spot is None else None
+        )
+        f_up = (
+            self._executor.submit(lambda: self._fetch_order_book_raw(token_up, self._get_worker_session()))
+            if ws_up is None else None
+        )
+        f_dn = (
+            self._executor.submit(lambda: self._fetch_order_book_raw(token_down, self._get_worker_session()))
+            if ws_dn is None else None
+        )
+
+        if ws_spot is not None:
+            live_px, ws_ts, src = ws_spot
+            spot_lat = max(1.0, (t - ws_ts) * 1000.0)
+            spot_bytes = 96
+        else:
+            live_px, src, spot_lat, spot_bytes = f_spot.result()
+
+        def _book_to_raw_ev(book: OrderBook, tok: str) -> Optional[dict]:
+            # Deduplicate identical quiet WS snapshots while keeping at least 1 Hz alignment
+            rec_cache = getattr(self, "_last_ws_book_rec", None)
+            if rec_cache is None:
+                rec_cache = {}
+                self._last_ws_book_rec = rec_cache
+            fp = (tuple(book.bids[:3]), tuple(book.asks[:3]), book.last_trade_price)
+            prev_fp, prev_rec_t = rec_cache.get(tok, (None, 0.0))
+            if fp == prev_fp and (t - prev_rec_t) < 1.0:
+                return None
+            rec_cache[tok] = (fp, t)
+            return {
+                "t": round(t, 2),
+                "token_id": tok,
+                "best_bid": book.best_bid,
+                "best_ask": book.best_ask,
+                "bid_depth": book.bids[:5],
+                "ask_depth": book.asks[:5],
+                "last_trade_price": book.last_trade_price,
+            }
+
+        if ws_up is not None:
+            up_book, up_lat, up_bytes, up_ev = ws_up, max(1.0, (t - ws_up.received_at) * 1000.0), 256, _book_to_raw_ev(ws_up, token_up)
+        else:
+            up_book, up_lat, up_bytes, up_ev = f_up.result()
+
+        if ws_dn is not None:
+            dn_book, dn_lat, dn_bytes, dn_ev = ws_dn, max(1.0, (t - ws_dn.received_at) * 1000.0), 256, _book_to_raw_ev(ws_dn, token_down)
+        else:
+            dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result()
 
         spot = self._build_spot_state(
             open_price, t, live_px, src, spot_lat, spot_bytes,
@@ -624,9 +695,10 @@ class MarketFeed:
         def _finalize_book(book, lat_ms, byte_count, raw_ev, outcome):
             if lat_ms > 0:
                 self._record_net("poly", lat_ms, byte_count)
-            if book is not None and raw_ev is not None:
-                raw_ev["outcome"] = outcome
-                self.record_raw_event("events", raw_ev)
+            if book is not None:
+                if raw_ev is not None:
+                    raw_ev["outcome"] = outcome
+                    self.record_raw_event("events", raw_ev)
                 return book
             return OrderBook(bids=[], asks=[], last_trade_price=None, source_t=0.0, received_at=0.0)
 

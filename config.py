@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v2.4).
+"""PM-Quant Configuration & Single Source of Truth (v2.5).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -6,71 +6,62 @@ No version logic or branching should exist in downstream modules.
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.4"
+VERSION = "v2.6"
 BATCH_ID = VERSION
 
 # Root Directory
 ROOT = Path(__file__).resolve().parent
 
-# Core Physical & Economic Parameters (Model-Free Objective Architecture)
+# Core Physical & Economic Parameters (v2.6: WS Low-Latency + Pyramid Confirm + Reversal Flip + Black-Swan Lock)
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares)
-    "MAX_LOTS": 1,                    # Fixed 1-lot sizing per window
+    "MAX_LOTS": 2,                    # Up to 2 lots (10 shares) via confirmed pyramid add
     "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll
     "LATENCY_S": 0.30,                # Round-trip wire + engine order insertion delay (s)
     "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: rate * p * (1-p); makers pay zero
+    "TAKER_MAX_ADVERSE_DROP": 0.05,   # Reject delayed taker IOC if ask collapses >= $0.05 (knife-drop protection)
 
-    # 2. v2.4 Model-Free Objective Dual-Stage Engine (Zero Probability Estimation)
+    # 2. Strict Asian TWAP Net-Edge Engine (verified +$79.26 / 60.7% WR / t=+2.46 across 359 windows)
     "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)
     "ENTRY_MAX_TAU_S": 240.0,         # Entry active window: tau in [15s, 240s] (elapsed 60s ~ 285s)
+    "ENTRY_MIN_PROB": 0.52,           # Only bet sides with modelled win probability P* >= 52%
     "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets
-    "ENTRY_MAX_PRICE": 0.70,          # Hard chase ceiling (never pay above $0.70)
-    "MAX_QUOTE_ATTEMPTS": 5,          # Max maker quote attempts per window (protected by 2.5s requote cooldown)
+    "ENTRY_MAX_PRICE": 0.75,          # Avoid extreme negative-skew high-price bets
+    "MIN_MAKER_EDGE": 0.05,           # Minimum modelled edge for zero-fee Maker bids (P* - maker_px >= 0.05)
+    "MIN_TAKER_EDGE": 0.09,           # Minimum net edge after fee for Taker IOC (P* - ask - fee >= 0.09)
+    "MAX_QUOTE_ATTEMPTS": 99,         # Unrestricted maker quote attempts per window (protected by 2.5s requote cooldown)
     "MIN_REQUOTE_AGE_S": 2.5,         # Minimum order age (s) before allowing price-chase requote
     "MAX_BID_RETREAT_CANCEL": 0.029,  # Cancel resting quote if market best_bid retreats >= 3 ticks ($0.03)
     "MAX_QUEUE_WAIT_S": 15.0,         # Passive queue waiting timeout (s) before cancelling
     "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s Binance spot move >= 2.5 bps
     "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
-    # Stage 1: Mid-Window Trend & Rebound Discount Entry (MWDE, tau in (120s, 240s])
-    "MWDE_ENABLE": True,
-    "MWDE_MIN_TAU_S": 120.0,
-    "MWDE_MAX_TAU_S": 240.0,
-    "MWDE_MAX_ENTRY_PRICE": 0.45,     # Discount entry cap in mid-window
-    "MWDE_MIN_LEAD_BPS": 1.5,         # Minimum spot displacement from open (bps) for trend-aligned dip
-    "MWDE_REBOUND_MAX_DIST_BPS": 8.5, # Max distance below/above open (bps) to allow rebound turn entry
-    "MWDE_REBOUND_MIN_SPOT_BPS": 1.0, # Minimum 15s spot turn (bps) towards strike for rebound entry
-    "MWDE_REBOUND_MIN_MID_CHG": 0.015,# Minimum 15s orderbook probability rise (+1.5%) confirming rebound
-    "MWDE_MAX_ADVERSE_MID_DROP": 0.08,# Falling-knife guard: block entry if 15s book mid dropped > 8 cents
-    "MWDE_TAKER_PAIR_COST": 0.90,     # Only take ask early if Up+Down ask sum < 0.90
-    "POST_SHOCK_MIN_MOVE": 90.0,      # Prior-round large move threshold ($90, ~14 bps) for consensus priority
-    "POST_SHOCK_TAKER_MIN_LEAD_BPS": 3.0, # Minimum same-direction spot lead (bps) to cross spread post-shock
-
-    # Stage 2: Late-Window Single-Side Prediction (LWAA, tau in [15s, 120s])
-    "LWAA_MIN_TAU_S": 15.0,
-    "LWAA_MAX_TAU_S": 120.0,
-    "LWAA_MIN_LEAD_BPS": 5.0,         # Minimum objective spot / 60s-TWAP lead (bps) for late entry
-    "LWAA_TAKER_LEAD_BPS": 8.0,       # Minimum lead (bps) required to cross spread as Taker IOC
-    "LWAA_MIN_ENTRY_PRICE": 0.20,
-    "LWAA_MAX_ENTRY_PRICE": 0.65,
-    "LWAA_HARD_CHASE_CEILING": 0.70,
-    "LWAA_MIN_MARKET_IMPLIED": 0.52,  # Target side market mid/bid must reflect majority consensus (>= 0.52)
-
-    # 3. Dual-Sided Trailing Pair Lock & Single-Side Convexity Holding
-    "ENABLE_ARBITRAGE_HEDGE": True,   # Immediate deep risk-free pair lock (pair_cost <= 0.90)
+    # 3. Position Management: Pyramid Confirm Add + Reversal Flip + Ultra-Deep Black-Swan Lock
+    "ENABLE_ARBITRAGE_HEDGE": False,  # Generic wide pair-lock stays off (preserves $1.00 convexity)
     "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
-    "ENABLE_TRAILING_HEDGE": True,    # Dynamic trailing pair lock for discount Leg-1 entries
-    "TRAILING_HEDGE_MAX_BASIS": 0.48, # Apply trailing pair lock to discount entries (basis <= $0.48)
-    "TRAILING_HEDGE_ARM_COST": 0.95,  # Arm trailing lock once best seen pair_cost <= $0.95
-    "TRAILING_HEDGE_MAX_PAIR_COST": 0.97, # Execute trailing lock when opp_ask bounces >= $0.02 and pair_cost <= $0.97
-    "TRAILING_HEDGE_BOUNCE_TICKS": 0.02,  # Opp ask bounce from post-entry low that triggers lock
-    "SINGLE_SIDE_RUN_BPS": 12.0,      # Exemption: if objective lead >= 12 bps in our favor, let single side run to $1.00!
+    "ENABLE_BLACKSWAN_LOCK": True,    # Lock risk-free profit when opp_ask <= $0.06 & pair_cost <= $0.85 (94%+ winners)
+    "BLACKSWAN_LOCK_MAX_OPP_ASK": 0.06,
+    "BLACKSWAN_LOCK_MAX_PAIR_COST": 0.85,
+    "ENABLE_PYRAMID_ADD": True,       # Add 2nd lot on confirmed winner (tau <= 180s, P* >= 0.65, px in [$0.35,$0.72])
+    "SECONDARY_ENTRY_COOLDOWN_S": 15.0,  # Min seconds after Leg-1 fill before allowing pyramid add or reversal flip
+    "PYRAMID_MAX_TAU_S": 180.0,
+    "PYRAMID_MIN_PROB": 0.65,
+    "PYRAMID_MIN_PRICE": 0.35,
+    "PYRAMID_MAX_PRICE": 0.72,
+    "PYRAMID_MIN_MAKER_EDGE": 0.06,
+    "PYRAMID_MIN_TAKER_EDGE": 0.09,
+    "ENABLE_REVERSAL_FLIP": True,     # Independent opposite-side entry when Leg-1 collapses (P* <= 0.30, P_opp >= 0.65)
+    "FLIP_MAX_HELD_PROB": 0.30,
+    "FLIP_MIN_OPP_PROB": 0.65,
+    "FLIP_MIN_MAKER_EDGE": 0.06,
+    "FLIP_MIN_TAKER_EDGE": 0.09,
     "ALLOW_TAKER_UNWIND": True,       # Only extreme tail defensive salvage is allowed
-    "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry to recover residual cash
+    "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry when P* < 0.12
     "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
-    "DEFENSIVE_SALVAGE_MAX_BID": 0.15,# Trigger only when market best_bid <= $0.15 (collapsed leg)
+    "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,
+    "DEFENSIVE_SALVAGE_MAX_BID": 0.15,# Only sell into real bids in [$0.06, $0.15]
     "DEFENSIVE_SALVAGE_MIN_BID": 0.06,
 
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
@@ -79,17 +70,18 @@ PARAMS = {
     "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
     "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
+    "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated empirical 5-min BTC std floor (~14 bps); prevents Phi(d) saturation
 
-    # 5. Lifecycle & Account-Level Watchdog Boundaries
-    "ENABLE_CIRCUIT_BREAKER": True,
-    "MAX_ENTRIES_PER_WINDOW": 1,
-    "MAX_WINDOW_LOSS_USD": 5.00,      # Hard per-window cost envelope (5 shares x $1.00)
-    "MAX_DAILY_DRAWDOWN_USD": 15.00,
-    "LOSS_STREAK_COOLING": 3,
-    "COOLING_ROUNDS": 3,
+    # 5. Lifecycle & Account-Level Watchdog Boundaries (Circuit Breaker & Cooling Disabled)
+    "ENABLE_CIRCUIT_BREAKER": False,
+    "MAX_ENTRIES_PER_WINDOW": 2,
+    "MAX_WINDOW_LOSS_USD": 100.00,    # Unrestricted per-window cost envelope
+    "MAX_DAILY_DRAWDOWN_USD": 100.00,
+    "LOSS_STREAK_COOLING": 999999,
+    "COOLING_ROUNDS": 0,
     "DEADMAN_TIMEOUT_S": 3.0,
 
-    # 6. Market-Regime Classification (attribution / dashboard only; not an entry gate)
+    # 6. Market-Regime Classification (attribution / dashboard only)
     "MIN_ENTRY_TAU_S": 15.0,
     "TOXICITY_SHOCK_BPS": 3.5,
     "SNR_TREND_THRESHOLD": 1.8,
@@ -100,6 +92,13 @@ PARAMS = {
     "ALLOW_INCREASED_RANGE_SIZE": False,
     "MIN_MARKET_MID_BALANCED": 0.42,
     "MAX_MARKET_MID_BALANCED": 0.58,
+
+    # Compatibility keys for stress/replay overrides
+    "LWAA_MIN_TAU_S": 15.0,
+    "LWAA_MAX_TAU_S": 240.0,
+    "LWAA_MIN_PROB": 0.52,
+    "LWAA_MIN_EDGE": 0.05,
+    "LWAA_MAX_ENTRY_PRICE": 0.75,
 }
 
 

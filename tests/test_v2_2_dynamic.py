@@ -26,14 +26,14 @@ class TestV24DynamicFeatures(unittest.TestCase):
         )
 
     def test_dynamic_maker_price_tracks_current_bid(self):
-        """When lead is 5-8 bps in late window, maker quote anchors to current bid or improves 1 tick."""
+        """When modelled net edge triggers Maker quoting, bid tracks current bid + 1 tick safely."""
         pos = Position(0.0, 0.0)
         book_up = OrderBook(bids=[(0.61, 20.0)], asks=[(0.64, 20.0)])
         book_dn = OrderBook(bids=[(0.36, 20.0)], asks=[(0.39, 20.0)])
-        # +6.0 bps lead
         spot = SpotState(timestamp=1250.0, price=75045.0, open_price=75000.0)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=self.params)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=p)
         self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")
         self.assertAlmostEqual(dec.price, 0.62)
@@ -45,7 +45,8 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.36, 20.0)], asks=[(0.39, 20.0)])
         spot = SpotState(timestamp=1250.0, price=75045.0, open_price=75000.0)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=49.0, params=self.params, quote_attempts=1)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=49.0, params=p, quote_attempts=1)
         self.assertEqual(dec.action, "wait")
         self.assertFalse(dec.urgent_cancel)
 

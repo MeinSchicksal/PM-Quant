@@ -126,12 +126,16 @@ let cachedModalRecord = null;
 let liveChartHoverIdx = null;
 let liveSelectedActionIdx = null;
 let liveSelectedActionSlug = null;
+let liveActionFilterMode = "all"; // "all" | "fill" | "order"
 let liveChartGeom = null;
 let equityHoverIdx = null;
 let equityChartGeom = null;
 let modalHoverIdx = null;
 let modalSelectedActionIdx = null;
 let modalChartGeom = null;
+let modalShowDeBasisSpot = false;
+let modalActionFilterMode = "all"; // "all" | "fill" | "order"
+let modalCurrentSlug = null;
 
 // ============================================================================
 // TOAST NOTIFICATION SYSTEM
@@ -553,7 +557,8 @@ function translateDecisionReason(rawReason) {
     .replace(/Arbitrage\s+lock\s*:/gi, "双边套利锁仓：")
     .replace(/Defensive\s+salvage\s*:/gi, "尾盘防守回收：")
     .replace(/Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
-    .replace(/Taker\s+Absorption\s*:/gi, "主动吃单吸筹：");
+    .replace(/Taker\s+Absorption\s*:/gi, "主动吃单吸筹：")
+    .replace(/^v2\.\d+:?\s*/i, "");
 
   if (/[\u4e00-\u9fa5]/.test(s)) return s;
 
@@ -982,9 +987,10 @@ function initEquityCurveInteractions() {
       `;
     }
 
+    tooltip.style.left = "0px";
     tooltip.hidden = false;
-    const ttW = 225;
-    const leftPos = Math.min(rect.width - ttW - 10, Math.max(10, pt.x - ttW / 2));
+    const ttW = Math.max(210, tooltip.offsetWidth || 240);
+    const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, pt.x - ttW / 2));
     tooltip.style.left = `${leftPos}px`;
     tooltip.style.top = `10px`;
   });
@@ -1324,16 +1330,20 @@ function updateMarket(live) {
   const upWinNet = upShares * 1.0 - totalCost;
   const dnWinNet = dnShares * 1.0 - totalCost;
 
-  const fUpEl = $("pnl-forecast-up");
-  if (fUpEl) {
-    fUpEl.textContent = totalCost > 0 ? `若 UP 胜出: ${fmtUsd(upWinNet, true)}` : "当前空仓观望";
-    fUpEl.style.color = totalCost > 0 ? (upWinNet >= 0 ? "var(--up)" : "var(--down)") : "var(--label)";
-  }
-  const fDnEl = $("pnl-forecast-down");
-  if (fDnEl) {
-    fDnEl.textContent = totalCost > 0 ? `若 DOWN 胜出: ${fmtUsd(dnWinNet, true)}` : "当前空仓观望";
-    fDnEl.style.color = totalCost > 0 ? (dnWinNet >= 0 ? "var(--up)" : "var(--down)") : "var(--label)";
-  }
+  const renderSideForecast = (elId, sideName, netVal) => {
+    const el = $(elId);
+    if (!el) return;
+    if (totalCost > 0) {
+      setHtmlIfChanged(
+        el,
+        `<span class="pnl-hint">若 ${sideName} 胜出</span><span class="pnl-amt ${netVal >= 0 ? "pos" : "neg"}">${escapeHtml(fmtUsd(netVal, true))}</span>`
+      );
+    } else {
+      setHtmlIfChanged(el, `<span class="pnl-hint">空仓观望</span>`);
+    }
+  };
+  renderSideForecast("pnl-forecast-up", "UP", upWinNet);
+  renderSideForecast("pnl-forecast-down", "DOWN", dnWinNet);
 
   const upBid = bookUp.best_bid ?? bookUp.bid ?? null;
   const upAsk = bookUp.best_ask ?? bookUp.ask ?? null;
@@ -1349,50 +1359,69 @@ function updateMarket(live) {
   const dnBidD5 = bookDn.bid_depth_5 ?? null;
   const dnAskD5 = bookDn.ask_depth_5 ?? null;
 
+  const fmtCompactShares = (n) => {
+    const val = Number(n);
+    if (!Number.isFinite(val)) return "--";
+    if (val >= 1000) return `${(val / 1000).toFixed(1)}k`;
+    return fmtShares(val);
+  };
   const fmtBookVol = (v) =>
-    v !== null && v !== undefined && Number.isFinite(Number(v)) ? `${fmtShares(Number(v))} 股` : "-- 股";
+    v !== null && v !== undefined && Number.isFinite(Number(v)) ? `${fmtCompactShares(v)} 股` : "-- 股";
 
   if ($("up-bid-px")) $("up-bid-px").textContent = fmtPriceCents(upBid);
   if ($("up-ask-px")) $("up-ask-px").textContent = fmtPriceCents(upAsk);
-  if ($("up-bid-sz")) $("up-bid-sz").textContent = fmtBookVol(upBidSz);
-  if ($("up-ask-sz")) $("up-ask-sz").textContent = fmtBookVol(upAskSz);
+  if ($("up-bid-sz")) {
+    $("up-bid-sz").textContent = fmtBookVol(upBidSz);
+    $("up-bid-sz").title = upBidSz !== null ? `${fmtShares(upBidSz)} 股` : "";
+  }
+  if ($("up-ask-sz")) {
+    $("up-ask-sz").textContent = fmtBookVol(upAskSz);
+    $("up-ask-sz").title = upAskSz !== null ? `${fmtShares(upAskSz)} 股` : "";
+  }
 
   const upMid =
     upBid && upAsk ? (Number(upBid) + Number(upAsk)) / 2 : Number(live.poly_up ?? upBid ?? upAsk ?? 0.5);
-  if ($("up-prob-bar")) {
-    $("up-prob-bar").style.width = `${Math.min(100, Math.max(0, upMid * 100)).toFixed(1)}%`;
-  }
-  if ($("up-book-status")) {
-    if (upBid && upAsk) {
-      const sp = Math.max(0, Number(upAsk) - Number(upBid));
-      const depthTag =
-        upBidD5 !== null && upAskD5 !== null ? `5档量 ${fmtShares(upBidD5)}/${fmtShares(upAskD5)} · ` : "";
-      $("up-book-status").textContent = `${depthTag}隐含 ${(upMid * 100).toFixed(1)}% · 价差 $${sp.toFixed(2)}`;
-    } else {
-      $("up-book-status").textContent = "盘口深度就绪";
+  const renderBookMeta = (prefix, bid, ask, mid, bidD5, askD5) => {
+    const depthEl = $(`${prefix}-meta-depth`);
+    if (depthEl) {
+      depthEl.textContent =
+        bidD5 !== null && askD5 !== null
+          ? `${fmtCompactShares(bidD5)} / ${fmtCompactShares(askD5)}`
+          : "--";
     }
-  }
+    const impEl = $(`${prefix}-meta-implied`);
+    if (impEl) {
+      impEl.textContent = bid && ask ? `${(mid * 100).toFixed(1)}%` : "--";
+    }
+    const spEl = $(`${prefix}-meta-spread`);
+    if (spEl) {
+      spEl.textContent = bid && ask ? `$${Math.max(0, Number(ask) - Number(bid)).toFixed(2)}` : "--";
+    }
+  };
+  renderBookMeta("up", upBid, upAsk, upMid, upBidD5, upAskD5);
 
   if ($("down-bid-px")) $("down-bid-px").textContent = fmtPriceCents(dnBid);
   if ($("down-ask-px")) $("down-ask-px").textContent = fmtPriceCents(dnAsk);
-  if ($("down-bid-sz")) $("down-bid-sz").textContent = fmtBookVol(dnBidSz);
-  if ($("down-ask-sz")) $("down-ask-sz").textContent = fmtBookVol(dnAskSz);
+  if ($("down-bid-sz")) {
+    $("down-bid-sz").textContent = fmtBookVol(dnBidSz);
+    $("down-bid-sz").title = dnBidSz !== null ? `${fmtShares(dnBidSz)} 股` : "";
+  }
+  if ($("down-ask-sz")) {
+    $("down-ask-sz").textContent = fmtBookVol(dnAskSz);
+    $("down-ask-sz").title = dnAskSz !== null ? `${fmtShares(dnAskSz)} 股` : "";
+  }
 
   const dnMid =
     dnBid && dnAsk ? (Number(dnBid) + Number(dnAsk)) / 2 : Number(live.poly_down ?? dnBid ?? dnAsk ?? 0.5);
-  if ($("down-prob-bar")) {
-    $("down-prob-bar").style.width = `${Math.min(100, Math.max(0, dnMid * 100)).toFixed(1)}%`;
-  }
-  if ($("down-book-status")) {
-    if (dnBid && dnAsk) {
-      const sp = Math.max(0, Number(dnAsk) - Number(dnBid));
-      const depthTag =
-        dnBidD5 !== null && dnAskD5 !== null ? `5档量 ${fmtShares(dnBidD5)}/${fmtShares(dnAskD5)} · ` : "";
-      $("down-book-status").textContent = `${depthTag}隐含 ${(dnMid * 100).toFixed(1)}% · 价差 $${sp.toFixed(2)}`;
-    } else {
-      $("down-book-status").textContent = "盘口深度就绪";
-    }
-  }
+  renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
+
+  const upPctNum = Math.min(100, Math.max(0, upMid * 100));
+  const dnPctNum = Math.min(100, Math.max(0, dnMid * 100));
+  const sumMid = upMid + dnMid;
+  const barSplit = sumMid > 0 ? Math.min(99, Math.max(1, (upMid / sumMid) * 100)) : 50;
+  if ($("prob-tug-up-pct")) $("prob-tug-up-pct").textContent = `${upPctNum.toFixed(1)}%`;
+  if ($("prob-tug-down-pct")) $("prob-tug-down-pct").textContent = `${dnPctNum.toFixed(1)}%`;
+  if ($("up-prob-bar")) $("up-prob-bar").style.flexBasis = `${barSplit.toFixed(2)}%`;
 
   renderWorkingOrders(live.working_orders || []);
   renderActionFeed(live.actions || [], live.start);
@@ -1437,14 +1466,16 @@ function renderWorkingOrders(orders) {
   if (!pill || !box) return;
 
   if (!Array.isArray(orders) || orders.length === 0) {
-    pill.textContent = "当前无在途排队挂单";
+    pill.hidden = true;
+    pill.textContent = "";
     pill.className = "order-pill";
     box.hidden = true;
     setHtmlIfChanged(box, "");
     return;
   }
 
-  pill.textContent = `${orders.length} 笔挂单排队撮合中`;
+  pill.hidden = false;
+  pill.textContent = `${orders.length} 笔排队`;
   pill.className = "order-pill active";
   box.hidden = false;
 
@@ -1495,9 +1526,9 @@ function formatActionItem(a, startTs = 0) {
   let timeStr = "--:--:--";
   if (startTs > 0 && t > 1e9) {
     const sec = Math.max(0, Math.round(t - startTs));
-    const m = Math.floor(sec / 60);
+    const m = String(Math.floor(sec / 60)).padStart(2, "0");
     const s = String(sec % 60).padStart(2, "0");
-    timeStr = `+0${m}:${s} (${sec}s)`;
+    timeStr = `+${m}:${s}`;
   } else if (t > 1e9) {
     const fmt = new Intl.DateTimeFormat("zh-CN", {
       timeZone: "Asia/Shanghai",
@@ -1510,6 +1541,11 @@ function formatActionItem(a, startTs = 0) {
   }
 
   const act = String(a.action || a.kind || "fill").toLowerCase();
+  const px = Number(a.price ?? a.px ?? 0);
+  const sz = Number(a.size ?? a.shares ?? 0);
+  const rawReason = String(a.reason || a.msg || "").trim();
+  const isRealFill = (act === "fill" || act === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(rawReason);
+
   let typeLabel = "撮合成交";
   let typeClass = "fill";
   if (act === "quote") {
@@ -1518,16 +1554,41 @@ function formatActionItem(a, startTs = 0) {
   } else if (act === "cancel") {
     typeLabel = "队列撤单";
     typeClass = "cancel";
+  } else if (act === "taker_reject" || ((act === "fill" || act === "taker_partial") && !isRealFill)) {
+    typeLabel = "拒单拦截";
+    typeClass = "cancel";
+  } else if (act === "taker_partial") {
+    typeLabel = "部分成交";
+    typeClass = "fill";
   }
 
   const side = String(a.side || "--").toUpperCase();
   const sideClass = side === "UP" ? "up" : side === "DOWN" ? "down" : "";
-  const px = Number(a.price ?? a.px ?? 0);
-  const sz = Number(a.size ?? a.shares ?? 0);
   const specStr = px > 0 && sz > 0 ? `$${px.toFixed(2)} × ${sz.toFixed(1)}股` : "--";
-  const reasonStr = translateDecisionReason(a.reason || a.msg || "");
+
+  let reasonStr = "";
+  if (rawReason) {
+    reasonStr = translateDecisionReason(rawReason);
+  } else if (isRealFill) {
+    const kindTag = String(a.kind || "").toLowerCase() === "taker" ? "Taker 主动吃单" : "Maker 被动队列";
+    const purp = String(a.purpose || "entry").toLowerCase();
+    const purpTag = purp === "hedge" ? "对冲锁仓" : purp === "unwind" ? "尾盘回收" : "首腿开仓";
+    reasonStr = `${kindTag}成交 · ${purpTag}`;
+  } else if (act === "quote") {
+    const ahead = Number(a.queue_ahead ?? 0);
+    reasonStr = `FIFO 限价挂单入列（前方排队 ${ahead.toFixed(1)} 股）`;
+  } else {
+    reasonStr = "交易指令记录";
+  }
 
   return { timeStr, typeLabel, typeClass, sideLabel: side, sideClass, specStr, reasonStr };
+}
+
+function syncChartPinButton() {
+  const pinBtn = $("chart-clear-pin-btn");
+  if (pinBtn) {
+    pinBtn.hidden = liveSelectedActionIdx === null;
+  }
 }
 
 function renderActionFeed(actions, startTs = 0) {
@@ -1536,23 +1597,37 @@ function renderActionFeed(actions, startTs = 0) {
   if (!list) return;
 
   const arr = Array.isArray(actions) ? actions : [];
-  if (countEl) countEl.textContent = `${arr.length} 笔动作`;
+  if (countEl) countEl.textContent = `${arr.length} 笔`;
+  syncChartPinButton();
 
   if (arr.length === 0) {
     setHtmlIfChanged(list, `<li class="action-empty">本轮暂无报单或撮合动作，策略持续监控盘口边际中...</li>`);
     return;
   }
 
-  setHtmlIfChanged(list, arr
-    .slice()
-    .reverse()
-    .slice(0, 30)
-    .map((raw, revIdx) => {
-      const origIdx = arr.length - 1 - revIdx;
+  const indexed = arr.map((raw, idx) => ({ raw, origIdx: idx })).reverse();
+  const filtered = indexed.filter(({ raw }) => {
+    if (liveActionFilterMode === "all") return true;
+    const act = String(raw.action || raw.kind || "fill").toLowerCase();
+    const px = Number(raw.price ?? raw.px ?? 0);
+    const sz = Number(raw.size ?? raw.shares ?? 0);
+    const isRealFill = (act === "fill" || act === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(String(raw.reason || ""));
+    if (liveActionFilterMode === "fill") return isRealFill;
+    return !isRealFill;
+  });
+
+  if (filtered.length === 0) {
+    setHtmlIfChanged(list, `<li class="action-empty">当前筛选条件下暂无记录</li>`);
+    return;
+  }
+
+  setHtmlIfChanged(list, filtered
+    .slice(0, 40)
+    .map(({ raw, origIdx }) => {
       const item = formatActionItem(raw, startTs);
       const isSel = liveSelectedActionIdx === origIdx;
       return `
-        <li class="action-item clickable ${item.typeClass === "cancel" ? "cancel" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在图表上高亮该节点并显示横纵延长线">
+        <li class="action-item clickable ${item.typeClass === "cancel" ? "cancel" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
           <span class="action-time">${escapeHtml(item.timeStr)}</span>
           <span class="action-type ${item.typeClass}">${escapeHtml(item.typeLabel)}</span>
           <span class="action-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
@@ -1628,10 +1703,10 @@ function drawLivePriceChart(live) {
     return;
   }
 
-  const padL = 78;
-  const padR = 66;
-  const padT = 24;
-  const padB = 34;
+  const padL = 68;
+  const padR = 54;
+  const padT = 18;
+  const padB = 26;
   const plotW = w - padL - padR;
   const totalPlotH = h - padT - padB;
 
@@ -1641,9 +1716,9 @@ function drawLivePriceChart(live) {
   let probH = 0;
 
   if (chartViewMode === "dual") {
-    priceH = Math.round(totalPlotH * 0.51);
-    probTop = padT + priceH + 46;
-    probH = totalPlotH - priceH - 46;
+    priceH = Math.round(totalPlotH * 0.52);
+    probTop = padT + priceH + 38;
+    probH = totalPlotH - priceH - 38;
   } else if (chartViewMode === "prob") {
     priceH = 0;
     probTop = padT;
@@ -1801,8 +1876,8 @@ function drawLivePriceChart(live) {
       ctx.strokeStyle = pal.divider;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(padL, probTop - 25);
-      ctx.lineTo(w - padR, probTop - 25);
+      ctx.moveTo(padL, probTop - 21);
+      ctx.lineTo(w - padR, probTop - 21);
       ctx.stroke();
     }
 
@@ -1811,7 +1886,7 @@ function drawLivePriceChart(live) {
     ctx.font = "600 11px Inter, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    ctx.fillText("UP 市场隐含概率 (%)", padL + 4, probTop - 6);
+    ctx.fillText("UP 市场隐含概率 (%)", padL + 4, probTop - 5);
     ctx.font = "500 12px 'JetBrains Mono', monospace";
 
     [0.0, 0.25, 0.5, 0.75, 1.0].forEach((prob) => {
@@ -1899,8 +1974,11 @@ function drawLivePriceChart(live) {
   const actions = Array.isArray(live.actions) ? live.actions : [];
   actions.forEach((a, idx) => {
     const actType = String(a.action || "").toLowerCase();
+    const px = Number(a.price ?? a.px ?? 0);
+    const sz = Number(a.size ?? a.shares ?? 0);
+    const isRealFill = (actType === "fill" || actType === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(String(a.reason || ""));
+    if (!isRealFill) return;
     const isSel = liveSelectedActionIdx === idx;
-    if (actType !== "fill" && !isSel) return;
 
     const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
     const elSec = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
@@ -2119,11 +2197,14 @@ function initLiveChartInteractions() {
       <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
       <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
     `;
+    tooltip.style.left = "0px";
     tooltip.hidden = false;
 
     const hx = liveChartGeom.xOfSec(pt.elapsed);
-    const ttW = 225;
-    const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, hx + 14));
+    const ttW = Math.max(210, tooltip.offsetWidth || 245);
+    const rightLimit = rect.width - (liveChartGeom.padR || 52) - 8;
+    const rawLeft = hx + 16 + ttW > rightLimit ? hx - ttW - 16 : hx + 16;
+    const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, rawLeft));
     tooltip.style.left = `${leftPos}px`;
     tooltip.style.top = `16px`;
   });
@@ -2147,6 +2228,38 @@ function initLiveChartInteractions() {
     });
   }
 
+  const clearPinSelection = () => {
+    if (liveSelectedActionIdx === null) return;
+    liveSelectedActionIdx = null;
+    syncChartPinButton();
+    renderActionFeed(cachedLive?.actions || [], cachedLive?.start || 0);
+    if (cachedLive) drawLivePriceChart(cachedLive);
+  };
+
+  const clearPinBtn = $("chart-clear-pin-btn");
+  if (clearPinBtn) {
+    clearPinBtn.addEventListener("click", clearPinSelection);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && currentPage === "market" && liveSelectedActionIdx !== null) {
+      clearPinSelection();
+    }
+  });
+
+  const actionFilter = $("action-feed-filter");
+  if (actionFilter) {
+    actionFilter.addEventListener("click", (e) => {
+      const btn = e.target.closest(".af-btn[data-af]");
+      if (!btn) return;
+      liveActionFilterMode = btn.dataset.af || "all";
+      actionFilter.querySelectorAll(".af-btn").forEach((b) => {
+        b.classList.toggle("active", b === btn);
+      });
+      renderActionFeed(cachedLive?.actions || [], cachedLive?.start || 0);
+    });
+  }
+
   const actionFeed = $("live-action-feed");
   if (actionFeed) {
     actionFeed.addEventListener("click", (e) => {
@@ -2160,21 +2273,81 @@ function initLiveChartInteractions() {
       if (cachedLive) drawLivePriceChart(cachedLive);
     });
   }
+
+  const canvasBox = canvas.parentElement;
+  if (canvasBox && typeof ResizeObserver !== "undefined") {
+    let resizeRaf = null;
+    const ro = new ResizeObserver(() => {
+      if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        if (cachedLive && currentPage === "market") drawLivePriceChart(cachedLive);
+      });
+    });
+    ro.observe(canvasBox);
+  }
 }
 
 // ============================================================================
 // 5-MINUTE ROUND REVIEW MODAL (CLICK ANY SETTLED ROUND OR EQUITY POINT)
 // ============================================================================
+const REGIME_LABELS_ZH = {
+  range_bound: "窄幅震荡",
+  normal_oscillation: "常态波动",
+  normal: "常态波动",
+  calm: "低波静默",
+  skewed_drift: "温和偏态漂移",
+  trending_up: "单边强势上行",
+  trending_down: "单边强势下行",
+  volatile: "高波剧震",
+  wide_spread: "宽价差低流动性",
+  toxic: "毒流冲击",
+  tail_freeze: "尾盘冻结",
+};
+
+function updateModalHeaderBadges(slug, rec, winData) {
+  const sourceEl = $("modal-round-source");
+  const regimeEl = $("modal-round-regime");
+
+  const srcRaw = String(winData?.winner_source || rec?.winner_source || "").toLowerCase();
+  if (sourceEl) {
+    if (srcRaw === "gamma") {
+      sourceEl.textContent = "✓ Gamma 官方交割";
+      sourceEl.className = "modal-meta-badge gamma";
+      sourceEl.hidden = false;
+    } else if (srcRaw === "twap") {
+      sourceEl.textContent = "Chainlink 60s TWAP";
+      sourceEl.className = "modal-meta-badge";
+      sourceEl.hidden = false;
+    } else if (srcRaw) {
+      sourceEl.textContent = "现货基准结算";
+      sourceEl.className = "modal-meta-badge";
+      sourceEl.hidden = false;
+    } else {
+      sourceEl.hidden = true;
+    }
+  }
+
+  const regRaw = String(winData?.regime || rec?.regime || "").toLowerCase();
+  if (regimeEl) {
+    if (regRaw && REGIME_LABELS_ZH[regRaw]) {
+      regimeEl.textContent = REGIME_LABELS_ZH[regRaw];
+      regimeEl.hidden = false;
+    } else {
+      regimeEl.hidden = true;
+    }
+  }
+}
+
 async function openRoundModal(slug) {
   if (!slug) return;
   const modal = $("round-detail-modal");
   const body = $("modal-round-body");
-  const slugEl = $("modal-round-slug");
   const winnerEl = $("modal-round-winner");
   const titleEl = $("modal-round-title");
 
   if (!modal || !body) return;
   modal.hidden = false;
+  modalCurrentSlug = slug;
   modalHoverIdx = null;
   modalSelectedActionIdx = null;
 
@@ -2184,12 +2357,12 @@ async function openRoundModal(slug) {
   const winInfo = slugToWindowText(slug, rec?.start_ts, rec?.end_ts);
 
   if (titleEl) titleEl.textContent = `${winInfo.fullLabel} 轮次复盘详情`;
-  if (slugEl) slugEl.textContent = slug;
   if (winnerEl) {
     const w = String(rec?.winner || "SETTLED").toUpperCase();
     winnerEl.className = `winner-pill ${w === "UP" ? "up" : w === "DOWN" ? "down" : "pending"}`;
-    winnerEl.textContent = w === "UP" ? "UP 胜出" : w === "DOWN" ? "DOWN 胜出" : "平局";
+    winnerEl.textContent = w === "UP" ? "▲ UP 胜出" : w === "DOWN" ? "▼ DOWN 胜出" : "平局";
   }
+  updateModalHeaderBadges(slug, rec, null);
 
   body.innerHTML = `<div class="action-empty">正在加载 ${escapeHtml(slug)} 的 5 分钟秒级复盘数据...</div>`;
 
@@ -2197,6 +2370,7 @@ async function openRoundModal(slug) {
     const res = await fetch(`/api/window?slug=${encodeURIComponent(slug)}`, { cache: "no-store" });
     const winData = await res.json();
     cachedModalWindow = winData;
+    updateModalHeaderBadges(slug, rec, winData);
     renderModalDetailContent(winData, rec);
   } catch (err) {
     body.innerHTML = `<div class="action-empty">无法加载该轮次详细轨迹数据 (${escapeHtml(err.message)})</div>`;
@@ -2206,6 +2380,7 @@ async function openRoundModal(slug) {
 function closeRoundModal() {
   const modal = $("round-detail-modal");
   if (modal) modal.hidden = true;
+  modalCurrentSlug = null;
   cachedModalWindow = null;
   cachedModalRecord = null;
   modalHoverIdx = null;
@@ -2214,6 +2389,84 @@ function closeRoundModal() {
 
 window.openRoundModal = openRoundModal;
 window.closeRoundModal = closeRoundModal;
+
+function classifyModalActions(actions, fills) {
+  // Assign sequential fill numbers (#1, #2, #3...) and strategy stage labels
+  let fillSeq = 0;
+  let entryLegsCount = 0;
+  let firstEntrySide = null;
+  let lastFillT = -999;
+  let lastFillSide = null;
+  let lastFillPx = -1;
+
+  return actions.map((a, idx) => {
+    const act = String(a.action || a.kind || "fill").toLowerCase();
+    const side = String(a.side || "").toUpperCase();
+    const px = Number(a.price ?? a.px ?? 0);
+    const sz = Number(a.size ?? a.shares ?? 0);
+    const rawReason = String(a.reason || "");
+    const isFill = (act === "fill" || act === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(rawReason);
+    const t = Number(a.t ?? a.ts ?? a.timestamp ?? 0);
+    const purp = String(a.purpose || "entry").toLowerCase();
+
+    let seqNum = null;
+    let stageLabel = "";
+    let stageCls = "";
+    let isPrimaryChartCallout = false;
+
+    if (isFill) {
+      // Merge split fills occurring within 0.4s at identical side & price into the same visual callout #
+      if (Math.abs(t - lastFillT) <= 0.4 && side === lastFillSide && Math.abs(px - lastFillPx) < 1e-4) {
+        seqNum = fillSeq;
+        isPrimaryChartCallout = false;
+      } else {
+        fillSeq += 1;
+        seqNum = fillSeq;
+        isPrimaryChartCallout = true;
+        lastFillT = t;
+        lastFillSide = side;
+        lastFillPx = px;
+      }
+
+      if (purp === "hedge" || px <= 0.08) {
+        stageLabel = "极深黑天鹅锁利";
+        stageCls = "hedge";
+      } else if (purp === "unwind") {
+        stageLabel = "尾盘防守回收";
+        stageCls = "hedge";
+      } else {
+        if (isPrimaryChartCallout) entryLegsCount += 1;
+        if (!firstEntrySide) firstEntrySide = side;
+        if (entryLegsCount <= 1) {
+          stageLabel = "首单建仓";
+          stageCls = "entry1";
+        } else if (side === firstEntrySide) {
+          stageLabel = "顺势确认加仓";
+          stageCls = "pyramid";
+        } else {
+          stageLabel = "坍塌独立反手";
+          stageCls = "pyramid";
+        }
+      }
+    } else if (act === "quote") {
+      stageLabel = "FIFO 队列挂单";
+    } else if (act === "cancel") {
+      stageLabel = "主动风控撤单";
+    } else if (act === "taker_reject" || /错失|防滑点|拦截|reject/i.test(rawReason)) {
+      stageLabel = "防滑点/接飞刀拦截";
+    }
+
+    return {
+      raw: a,
+      idx,
+      isFill,
+      seqNum,
+      stageLabel,
+      stageCls,
+      isPrimaryChartCallout,
+    };
+  });
+}
 
 function renderModalDetailContent(winData, rec) {
   const body = $("modal-round-body");
@@ -2227,52 +2480,139 @@ function renderModalDetailContent(winData, rec) {
   const cost = Number(rec?.cost ?? normWin?.cost ?? 0);
   const payout = Number(rec?.payout ?? normWin?.payout ?? 0);
   const pnl = Number(rec?.pnl ?? normWin?.pnl ?? 0);
+  const winner = String(rec?.winner || normWin?.winner || "UP").toUpperCase();
   const startTs = Number(winData?.start || rec?.start_ts || 0);
   const actions = Array.isArray(winData?.actions) ? winData.actions : [];
+  const fills = Array.isArray(winData?.fills) ? winData.fills : [];
+  const hist = Array.isArray(winData?.price_history) ? winData.price_history : [];
 
   const diffPx = closePx - openPx;
   const diffPct = openPx > 0 ? (diffPx / openPx) * 100 : 0;
+  const diffBps = openPx > 0 ? (diffPx / openPx) * 10000 : 0;
   const diffSign = diffPx > 0 ? "+" : "";
   const diffCls = diffPx > 0 ? "up" : diffPx < 0 ? "down" : "";
   const openShort = openPx.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const closeShort = closePx.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+  // Compute TWAP range in bps
+  const twapVals = hist.map((p) => Number(p.poly_price ?? 0)).filter((v) => v > 0);
+  if (openPx > 0) twapVals.push(openPx);
+  const rangeBps =
+    twapVals.length >= 2 && openPx > 0
+      ? (((Math.max(...twapVals) - Math.min(...twapVals)) / openPx) * 10000).toFixed(1)
+      : "0.0";
+
+  // Compute exact per-leg VWAP & cost from fills
+  let upFillSh = 0;
+  let upFillCost = 0;
+  let dnFillSh = 0;
+  let dnFillCost = 0;
+  let makerFills = 0;
+  let takerFills = 0;
+  fills.forEach((f) => {
+    const s = String(f.side || "").toUpperCase();
+    const sh = Number(f.size ?? f.shares ?? 0);
+    const px = Number(f.price ?? 0);
+    const k = String(f.kind || "maker").toLowerCase();
+    if (k === "taker") takerFills += 1;
+    else makerFills += 1;
+    if (s === "UP") {
+      upFillSh += sh;
+      upFillCost += sh * px;
+    } else if (s === "DOWN") {
+      dnFillSh += sh;
+      dnFillCost += sh * px;
+    }
+  });
+  const upAvg = upFillSh > 0 ? upFillCost / upFillSh : 0;
+  const dnAvg = dnFillSh > 0 ? dnFillCost / dnFillSh : 0;
+
+  // Strategy Pattern Banner
+  const pairedShares = Math.min(upShares, dnShares);
+  let stratBannerHtml = "";
+  if (pairedShares >= 0.5) {
+    const pairUnit = (upAvg > 0 && dnAvg > 0) ? (upAvg + dnAvg) : (cost / Math.max(1, pairedShares));
+    stratBannerHtml = `<span>★ 极深双边锁利 (${pairedShares.toFixed(1)} 对)</span><span class="up">配对 $${pairUnit.toFixed(3)} → 兑现 $1.00</span>`;
+  } else if (Math.max(upShares, dnShares) >= 9.5) {
+    stratBannerHtml = `<span>▲ 顺势确认双倍满仓 (2 手 · ${Math.max(upShares, dnShares).toFixed(1)} 股)</span><span>持有至交割</span>`;
+  } else if (Math.max(upShares, dnShares) > 0.1) {
+    stratBannerHtml = `<span>● 标准单手方向持仓 (1 手 · ${Math.max(upShares, dnShares).toFixed(1)} 股)</span><span>持有至交割</span>`;
+  } else {
+    stratBannerHtml = `<span>○ 本轮未触发建仓</span><span>全程观望零风险</span>`;
+  }
+
+  // Classify actions and count tabs
+  const enrichedActions = classifyModalActions(actions, fills);
+  const fillActionCount = enrichedActions.filter((x) => x.isFill).length;
+  const orderActionCount = enrichedActions.length - fillActionCount;
+  const quoteCount = enrichedActions.filter((x) => String(x.raw.action || "").toLowerCase() === "quote").length;
+  const cancelCount = enrichedActions.filter((x) => !x.isFill && String(x.raw.action || "").toLowerCase() !== "quote").length;
+  const grossFillCost = upFillCost + dnFillCost;
+  const feeDiff = Math.max(0, cost - grossFillCost);
+  const feeText = feeDiff >= 0.005 ? `含手续费 $${feeDiff.toFixed(2)}` : "Maker 零手续费";
+
+  const roiPct = cost > 0.01 ? ((pnl / cost) * 100).toFixed(1) : "0.0";
+  const roiSign = pnl > 0 ? "+" : "";
+  const maxHeldSh = Math.max(upShares, dnShares);
+  const perSharePnl = maxHeldSh > 0 ? pnl / maxHeldSh : 0;
+
+  const visibleActions = enrichedActions.filter((item) => {
+    if (modalActionFilterMode === "fill") return item.isFill;
+    if (modalActionFilterMode === "order") return !item.isFill;
+    return true;
+  });
+
+  const pnlCls = pnl > 0.001 ? "up" : pnl < -0.001 ? "down" : "";
+  const focalCls = pnl > 0.001 ? "is-win" : pnl < -0.001 ? "is-loss" : "";
+
   body.innerHTML = `
-    <div class="modal-summary-grid">
-      <div class="modal-kpi modal-kpi-wide">
-        <span class="modal-kpi-label">开盘基准 → 交割收盘</span>
-        <strong class="modal-kpi-val">$${openShort} → $${closeShort}</strong>
-        <span class="modal-kpi-sub ${diffCls}">${diffSign}$${diffPx.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)</span>
+    <div class="review-banner">
+      <!-- Primary Visual Focal Point: Net PnL & Cash Outcome -->
+      <div class="review-pnl-focal ${focalCls}">
+        <span class="review-focal-label">本轮已实现净损益</span>
+        <div class="review-focal-row">
+          <span class="review-focal-val ${pnlCls}">${fmtUsd(pnl, true)}</span>
+          ${cost > 0.01 ? `<span class="review-focal-roi ${pnlCls}">ROI ${roiSign}${roiPct}%</span>` : ""}
+        </div>
+        <span class="review-focal-sub">总成本 ${fmtUsd(cost)} → 期末兑现 ${fmtUsd(payout)}</span>
       </div>
-      <div class="modal-kpi">
-        <span class="modal-kpi-label">UP 期末持仓</span>
-        <strong class="modal-kpi-val ${upShares > 0 ? "up" : ""}">${fmtShares(upShares)} <span class="val-unit">股</span></strong>
+
+      <!-- Supporting Metric 1: UP Position -->
+      <div class="review-kpi-col">
+        <span class="review-kpi-label">UP 期末持仓</span>
+        <span class="review-kpi-val ${upShares > 0 ? "up" : "muted"}">${fmtShares(upShares)} 股</span>
+        <span class="review-kpi-sub">${upShares > 0 ? `均价 $${upAvg.toFixed(2)} · 成本 $${upFillCost.toFixed(2)}` : "本轮未持仓"}</span>
       </div>
-      <div class="modal-kpi">
-        <span class="modal-kpi-label">DN 期末持仓</span>
-        <strong class="modal-kpi-val ${dnShares > 0 ? "down" : ""}">${fmtShares(dnShares)} <span class="val-unit">股</span></strong>
+
+      <!-- Supporting Metric 2: DN Position -->
+      <div class="review-kpi-col">
+        <span class="review-kpi-label">DN 期末持仓</span>
+        <span class="review-kpi-val ${dnShares > 0 ? "down" : "muted"}">${fmtShares(dnShares)} 股</span>
+        <span class="review-kpi-sub">${dnShares > 0 ? `均价 $${dnAvg.toFixed(2)} · 成本 $${dnFillCost.toFixed(2)}` : "本轮未持仓"}</span>
       </div>
-      <div class="modal-kpi">
-        <span class="modal-kpi-label">总成本 → 期末兑现</span>
-        <strong class="modal-kpi-val">${fmtUsd(cost)} → ${fmtUsd(payout)}</strong>
-      </div>
-      <div class="modal-kpi">
-        <span class="modal-kpi-label">本轮已实现净损益</span>
-        <strong class="modal-kpi-val ${pnl > 0 ? "up" : pnl < 0 ? "down" : ""}">${fmtUsd(pnl, true)}</strong>
+
+      <!-- Supporting Metric 3: Settlement Price -->
+      <div class="review-kpi-col">
+        <span class="review-kpi-label">开盘基准 → 交割收盘</span>
+        <span class="review-kpi-val">$${openShort} → $${closeShort}</span>
+        <span class="review-kpi-sub ${diffCls}">${diffSign}$${diffPx.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)</span>
       </div>
     </div>
 
     <div class="detail-card">
       <div class="detail-card-head">
-        <span class="detail-card-title">${SVG_ICONS.chart}<span>5 分钟秒级价格与盘口复盘图</span></span>
+        <span class="detail-card-title">${SVG_ICONS.chart}<span>5 分钟结算价格与盘口隐含概率</span></span>
         <div class="detail-card-legend">
-          <span><i class="legend-dot btc"></i>Binance 现货</span>
-          <span><i class="legend-dot twap"></i>60s TWAP</span>
-          <span><i class="legend-dot up-prob"></i>UP 盘口隐含</span>
+          <span><i class="legend-dot twap"></i>Chainlink 60s TWAP</span>
+          <span><i class="legend-dot open-ref"></i>开盘基准</span>
+          <span><i class="legend-dot up-prob"></i>UP 盘口隐含 (%)</span>
+          <button type="button" class="modal-legend-toggle ${modalShowDeBasisSpot ? "is-active" : ""}" id="modal-toggle-spot" title="叠加按开盘去基差对齐的 Binance 现货走势">
+            <i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加 Binance 现货" : "叠加 Binance 现货"}
+          </button>
         </div>
       </div>
       <div class="history-canvas-box">
-        <canvas id="modal-hist-canvas" height="360"></canvas>
+        <canvas id="modal-hist-canvas" height="265"></canvas>
         <div class="chart-tooltip" id="modal-chart-tooltip" hidden></div>
       </div>
     </div>
@@ -2280,6 +2620,11 @@ function renderModalDetailContent(winData, rec) {
     <div class="detail-card table-card">
       <div class="detail-card-head">
         <span class="detail-card-title">${SVG_ICONS.list}<span>撮合与策略决策流水 (${actions.length} 条)</span></span>
+        <div class="modal-table-filters" id="modal-table-filter-group">
+          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "all" ? "active" : ""}" data-mtf="all">全部 (${enrichedActions.length})</button>
+          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "fill" ? "active" : ""}" data-mtf="fill">仅看成交 (${fillActionCount})</button>
+          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "order" ? "active" : ""}" data-mtf="order">挂单与撤单 (${orderActionCount})</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="detail-actions-table">
@@ -2296,10 +2641,10 @@ function renderModalDetailContent(winData, rec) {
           </thead>
           <tbody>
             ${
-              actions.length === 0
-                ? `<tr><td colspan="7" class="action-empty">该窗口内策略未触发开仓动作 (全程观望)</td></tr>`
-                : actions
-                    .map((a, idx) => {
+              visibleActions.length === 0
+                ? `<tr><td colspan="7" class="action-empty">${actions.length === 0 ? "该窗口内策略未触发开仓动作 (全程观望)" : "当前筛选条件下无记录"}</td></tr>`
+                : visibleActions
+                    .map(({ raw: a, idx, isFill }) => {
                       const item = formatActionItem(a, startTs);
                       const px = Number(a.price ?? a.px ?? 0);
                       const sz = Number(a.size ?? a.shares ?? 0);
@@ -2307,8 +2652,9 @@ function renderModalDetailContent(winData, rec) {
                       const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
                       const elapsed = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
                       const evtCls = item.typeClass === "fill" ? "fill" : item.typeClass === "cancel" ? "cancel" : "quote";
+
                       return `
-                        <tr class="modal-action-row" data-action-idx="${idx}" data-elapsed="${elapsed.toFixed(2)}">
+                        <tr class="modal-action-row ${isFill ? "is-fill-row" : ""} ${modalSelectedActionIdx === idx ? "is-selected" : ""}" data-action-idx="${idx}" data-elapsed="${elapsed.toFixed(2)}">
                           <td>${escapeHtml(item.timeStr)}</td>
                           <td><span class="evt-tag ${evtCls}">${escapeHtml(item.typeLabel)}</span></td>
                           <td><span class="side-txt ${item.sideClass || ""}">${escapeHtml(item.sideLabel)}</span></td>
@@ -2331,6 +2677,24 @@ function renderModalDetailContent(winData, rec) {
     drawModalHistoryChart(winData, rec);
     bindModalChartHover();
     bindModalActionRowClicks(winData, startTs);
+    const toggleSpotBtn = $("modal-toggle-spot");
+    if (toggleSpotBtn) {
+      toggleSpotBtn.addEventListener("click", () => {
+        modalShowDeBasisSpot = !modalShowDeBasisSpot;
+        toggleSpotBtn.classList.toggle("is-active", modalShowDeBasisSpot);
+        toggleSpotBtn.innerHTML = `<i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加 Binance 现货(去基差)" : "叠加 Binance 现货(去基差)"}`;
+        drawModalHistoryChart(winData, rec);
+      });
+    }
+    const filterGroup = $("modal-table-filter-group");
+    if (filterGroup) {
+      filterGroup.addEventListener("click", (e) => {
+        const btn = e.target.closest(".modal-tf-btn[data-mtf]");
+        if (!btn) return;
+        modalActionFilterMode = btn.dataset.mtf || "all";
+        renderModalDetailContent(winData, rec);
+      });
+    }
   });
 }
 
@@ -2341,7 +2705,7 @@ function drawModalHistoryChart(winData, rec) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   const w = Math.max(320, rect.width || 760);
-  const h = Math.max(280, rect.height || 360);
+  const h = Math.max(230, rect.height || 265);
 
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -2360,26 +2724,42 @@ function drawModalHistoryChart(winData, rec) {
   }
 
   const startTs = Number(winData.start || winData.start_ts || rec?.start_ts || hist[0].t || hist[0].ts || 0);
+  // Settlement strike: always anchor on Polymarket / Chainlink open price, matching workspace chart
+  const firstValidTwap = hist.find((p) => Number(p.poly_price ?? p.poly_spot ?? 0) > 0);
   const openPx = Number(
-    winData.binance_open_px || rec?.open_px || winData.open_px || hist[0].price || hist[0].spot || 0
+    winData.open_px || rec?.open_px || firstValidTwap?.poly_price || hist[0].price || hist[0].spot || 0
   );
+  const firstValidSpot = hist.find((p) => Number(p.spot_price ?? p.price ?? p.spot ?? 0) > 0);
+  const binOpenRef = Number(
+    winData.binance_open_px || firstValidSpot?.spot_price || firstValidSpot?.price || firstValidSpot?.spot || openPx
+  );
+  const basis0 = binOpenRef > 0 && openPx > 0 ? binOpenRef - openPx : 0;
 
-  const padL = 62;
-  const padR = 24;
+  const padL = 66;
+  const padR = 52;
   const padT = 16;
-  const padB = 26;
+  const padB = 22;
   const plotW = w - padL - padR;
   const totalH = h - padT - padB;
-  const priceH = Math.round(totalH * 0.64);
-  const probTop = padT + priceH + 14;
-  const probH = totalH - priceH - 14;
+  const priceH = Math.round(totalH * 0.54);
+  const probTop = padT + priceH + 26;
+  const probH = totalH - priceH - 26;
 
-  const pts = hist.map((p, i) => normalizePricePoint(p, startTs, openPx, i, hist.length));
+  // Forward-fill stale/missing Chainlink TWAP ticks identically to drawLivePriceChart
+  let lastTwap = openPx;
+  const pts = hist.map((p, i) => {
+    const np = normalizePricePoint(p, startTs, openPx, i, hist.length);
+    const twap = Number(p.poly_price ?? 0);
+    if (twap > 0) lastTwap = twap;
+    np.poly_spot = lastTwap;
+    np.spot_aligned = np.spot > 0 ? np.spot - basis0 : lastTwap;
+    return np;
+  });
 
   const vals = [openPx];
   pts.forEach((p) => {
-    if (p.spot > 0) vals.push(p.spot);
     if (p.poly_spot > 0) vals.push(p.poly_spot);
+    if (modalShowDeBasisSpot && p.spot_aligned > 0) vals.push(p.spot_aligned);
   });
   let minPx = Math.min(...vals);
   let maxPx = Math.max(...vals);
@@ -2388,8 +2768,8 @@ function drawModalHistoryChart(winData, rec) {
     minPx -= 4;
   } else {
     const span = maxPx - minPx;
-    maxPx += span * 0.12;
-    minPx -= span * 0.12;
+    maxPx += span * 0.14;
+    minPx -= span * 0.14;
   }
 
   const xOfSec = (s) => padL + (Math.min(300, Math.max(0, s)) / 300) * plotW;
@@ -2407,30 +2787,34 @@ function drawModalHistoryChart(winData, rec) {
     probTop,
     probH,
     openPx,
+    basis0,
     pts,
     xOfSec,
     yOfPrice,
     yOfProb,
   };
 
-  ctx.font = "500 10px 'JetBrains Mono', monospace";
+  ctx.font = "500 10.5px Consolas, 'JetBrains Mono', monospace";
   for (let s = 0; s <= 300; s += 60) {
     const x = xOfSec(s);
     ctx.strokeStyle = pal.grid;
     ctx.beginPath();
     ctx.moveTo(x, padT);
-    ctx.lineTo(x, h - padB);
+    ctx.lineTo(x, padT + priceH);
+    ctx.moveTo(x, probTop);
+    ctx.lineTo(x, probTop + probH);
     ctx.stroke();
 
     ctx.fillStyle = pal.axis;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.fillText(`0${Math.floor(s / 60)}:00`, x, h - padB + 6);
+    ctx.fillText(`0${Math.floor(s / 60)}:00`, x, h - padB + 5);
   }
 
-  // Price grid
-  for (let i = 0; i <= 3; i++) {
-    const val = minPx + ((maxPx - minPx) * i) / 3;
+  // Price grid + dual axis ($ price left, relative bps right)
+  ctx.font = "500 10.5px Consolas, 'JetBrains Mono', monospace";
+  for (let i = 0; i <= 4; i++) {
+    const val = minPx + ((maxPx - minPx) * i) / 4;
     const y = yOfPrice(val);
     ctx.strokeStyle = pal.grid;
     ctx.beginPath();
@@ -2441,15 +2825,33 @@ function drawModalHistoryChart(winData, rec) {
     ctx.fillStyle = pal.axis;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(`$${val.toFixed(1)}`, padL - 6, y);
+    const pxText = val.toLocaleString("en-US", {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    });
+    ctx.fillText(`$${pxText}`, padL - 8, y);
+
+    if (openPx > 0) {
+      const bps = ((val - openPx) / openPx) * 10000;
+      const bpsText = Math.abs(bps) < 0.05 ? "0.0bp" : `${bps > 0 ? "+" : ""}${bps.toFixed(1)}bp`;
+      ctx.textAlign = "left";
+      ctx.fillText(bpsText, w - padR + 8, y);
+    }
   }
+
+  ctx.fillStyle = pal.axis;
+  ctx.font = "600 10.5px Inter, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "bottom";
+  ctx.fillText("BTC 价格 (Chainlink 60s TWAP)", padL + 4, padT - 3);
 
   // Open benchmark
   if (openPx >= minPx && openPx <= maxPx) {
     const oy = yOfPrice(openPx);
     ctx.save();
     ctx.strokeStyle = pal.amber;
-    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]);
     ctx.beginPath();
     ctx.moveTo(padL, oy);
     ctx.lineTo(w - padR, oy);
@@ -2457,11 +2859,11 @@ function drawModalHistoryChart(winData, rec) {
     ctx.restore();
   }
 
-  // TWAP dashed line
-  ctx.save();
-  ctx.strokeStyle = pal.twap;
-  ctx.lineWidth = 1.4;
-  ctx.setLineDash([4, 3]);
+  // Primary settlement line: Chainlink 60s TWAP with area fill (identical to workspace)
+  const twapGrad = ctx.createLinearGradient(0, padT, 0, padT + priceH);
+  twapGrad.addColorStop(0, pal.spotFillTop);
+  twapGrad.addColorStop(1, pal.spotFillBot);
+
   ctx.beginPath();
   pts.forEach((p, idx) => {
     const x = xOfSec(p.elapsed);
@@ -2469,88 +2871,174 @@ function drawModalHistoryChart(winData, rec) {
     if (idx === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
-  ctx.stroke();
-  ctx.restore();
+  ctx.lineTo(xOfSec(pts[pts.length - 1].elapsed), padT + priceH);
+  ctx.lineTo(xOfSec(pts[0].elapsed), padT + priceH);
+  ctx.closePath();
+  ctx.fillStyle = twapGrad;
+  ctx.fill();
 
-  // Spot line
   ctx.beginPath();
   pts.forEach((p, idx) => {
     const x = xOfSec(p.elapsed);
-    const y = yOfPrice(p.spot);
+    const y = yOfPrice(p.poly_spot);
     if (idx === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = pal.spot;
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = pal.twap;
+  ctx.lineWidth = 2.2;
+  ctx.lineJoin = "round";
   ctx.stroke();
 
-  // Prob pane
-  [0.2, 0.5, 0.8].forEach((pr) => {
+  // Optional de-basis Binance spot overlay aligned to the exact same starting baseline
+  if (modalShowDeBasisSpot) {
+    ctx.save();
+    ctx.beginPath();
+    pts.forEach((p, idx) => {
+      const x = xOfSec(p.elapsed);
+      const y = yOfPrice(p.spot_aligned);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = pal.spot;
+    ctx.lineWidth = 1.4;
+    ctx.globalAlpha = 0.82;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Divider + Prob pane (aligned with workspace 0% / 25% / 50% / 75% / 100%)
+  ctx.strokeStyle = pal.divider;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, probTop - 18);
+  ctx.lineTo(w - padR, probTop - 18);
+  ctx.stroke();
+
+  ctx.fillStyle = pal.axis;
+  ctx.font = "600 10.5px Inter, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "bottom";
+  ctx.fillText("UP 市场隐含概率 (%)", padL + 4, probTop - 4);
+  ctx.font = "500 10.5px 'JetBrains Mono', monospace";
+
+  [0.0, 0.25, 0.5, 0.75, 1.0].forEach((pr) => {
     const y = yOfProb(pr);
-    ctx.strokeStyle = pal.gridSoft;
+    ctx.save();
+    if (pr === 0.5) {
+      ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.45)" : "rgba(100, 116, 139, 0.35)";
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([4, 4]);
+    } else {
+      ctx.strokeStyle = pal.gridSoft;
+      ctx.lineWidth = 1;
+    }
     ctx.beginPath();
     ctx.moveTo(padL, y);
     ctx.lineTo(w - padR, y);
     ctx.stroke();
+    ctx.restore();
+
+    const lbl = `${Math.round(pr * 100)}%`;
+    ctx.fillStyle = pr === 0.5 ? pal.label : pal.axis;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(lbl, padL - 8, y);
+
+    ctx.textAlign = "left";
+    ctx.fillText(lbl, w - padR + 8, y);
   });
 
-  ctx.beginPath();
-  let hasUp = false;
-  pts.forEach((p) => {
-    if (p.up_mid === null) return;
-    const x = xOfSec(p.elapsed);
-    const y = yOfProb(p.up_mid);
-    if (!hasUp) {
-      ctx.moveTo(x, y);
-      hasUp = true;
-    } else ctx.lineTo(x, y);
-  });
-  if (hasUp) {
+  const probPts = pts.filter((p) => p.up_mid !== null);
+  if (probPts.length > 0) {
+    const probGrad = ctx.createLinearGradient(0, probTop, 0, probTop + probH);
+    probGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.16)" : "rgba(5, 150, 105, 0.12)");
+    probGrad.addColorStop(1, "rgba(16, 185, 129, 0.00)");
+
+    ctx.beginPath();
+    probPts.forEach((p, idx) => {
+      const x = xOfSec(p.elapsed);
+      const y = yOfProb(p.up_mid);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.lineTo(xOfSec(probPts[probPts.length - 1].elapsed), probTop + probH);
+    ctx.lineTo(xOfSec(probPts[0].elapsed), probTop + probH);
+    ctx.closePath();
+    ctx.fillStyle = probGrad;
+    ctx.fill();
+
+    ctx.beginPath();
+    probPts.forEach((p, idx) => {
+      const x = xOfSec(p.elapsed);
+      const y = yOfProb(p.up_mid);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
     ctx.strokeStyle = pal.up;
-    ctx.lineWidth = 1.6;
+    ctx.lineWidth = 2.0;
+    ctx.lineJoin = "round";
     ctx.stroke();
+
+    const lastP = probPts[probPts.length - 1];
+    const lx = xOfSec(lastP.elapsed);
+    const ly = yOfProb(lastP.up_mid);
+    ctx.font = "600 10.5px Consolas, 'JetBrains Mono', monospace";
+    ctx.fillStyle = pal.up;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${(lastP.up_mid * 100).toFixed(1)}%`, Math.min(w - padR - 42, lx + 6), Math.max(probTop + 8, Math.min(probTop + probH - 8, ly)));
   }
 
-  // Action event markers along timeline (subtle baseline dots + selected action spotlight)
+  // Action event markers along timeline: ONLY plot executed fills (no dots/lines for non-fills)
   const actions = Array.isArray(winData?.actions) ? winData.actions : [];
+  const actionMetaList = classifyModalActions(actions, winData?.fills || []);
+
   actions.forEach((a, idx) => {
+    const meta = actionMetaList[idx] || {};
+    if (!meta.isFill) return;
+
     const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
     const elSec = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
     const ax = xOfSec(elSec);
-    const actType = String(a.action || "").toLowerCase();
     const isSel = modalSelectedActionIdx === idx;
-    const evtColor = actType === "fill" ? pal.up : actType === "cancel" ? pal.down : pal.spot;
+    const sideUpper = String(a.side || "").toUpperCase();
+    const isDownSide = sideUpper === "DOWN" || sideUpper === "DN";
+    const evtColor = isDownSide ? pal.down : pal.up;
+    const haloColor = isDownSide ? "rgba(244, 63, 94, 0.20)" : "rgba(16, 185, 129, 0.20)";
 
     ctx.save();
+    let nearest = pts[0];
+    let minDt = Infinity;
+    pts.forEach((pt) => {
+      const dt = Math.abs(pt.elapsed - elSec);
+      if (dt < minDt) {
+        minDt = dt;
+        nearest = pt;
+      }
+    });
+
     if (isSel) {
       ctx.strokeStyle = evtColor;
       ctx.lineWidth = 1.6;
       ctx.setLineDash([4, 3]);
       ctx.beginPath();
       ctx.moveTo(ax, padT);
-      ctx.lineTo(ax, h - padB);
+      ctx.lineTo(ax, padT + priceH);
+      ctx.moveTo(ax, probTop);
+      ctx.lineTo(ax, probTop + probH);
       ctx.stroke();
 
-      // Spotlight marker on nearest price point
-      let nearest = pts[0];
-      let minDt = Infinity;
-      pts.forEach((pt) => {
-        const dt = Math.abs(pt.elapsed - elSec);
-        if (dt < minDt) {
-          minDt = dt;
-          nearest = pt;
-        }
-      });
       if (nearest) {
-        const ny = yOfPrice(nearest.spot);
+        const ny = yOfPrice(nearest.poly_spot);
         ctx.setLineDash([]);
         ctx.beginPath();
-        ctx.arc(ax, ny, 7.5, 0, Math.PI * 2);
-        ctx.fillStyle = actType === "fill" ? "rgba(16, 185, 129, 0.22)" : actType === "cancel" ? "rgba(244, 63, 94, 0.22)" : "rgba(37, 99, 235, 0.20)";
+        ctx.arc(ax, ny, 8.0, 0, Math.PI * 2);
+        ctx.fillStyle = haloColor;
         ctx.fill();
 
         ctx.beginPath();
-        ctx.arc(ax, ny, 4.2, 0, Math.PI * 2);
+        ctx.arc(ax, ny, 4.6, 0, Math.PI * 2);
         ctx.fillStyle = evtColor;
         ctx.fill();
         ctx.strokeStyle = pal.cardBg;
@@ -2561,7 +3049,7 @@ function drawModalHistoryChart(winData, rec) {
           const npy = yOfProb(nearest.up_mid);
           ctx.setLineDash([4, 3]);
           ctx.strokeStyle = evtColor;
-          ctx.lineWidth = 1.4;
+          ctx.lineWidth = 1.3;
           ctx.beginPath();
           ctx.moveTo(padL, npy);
           ctx.lineTo(w - padR, npy);
@@ -2569,12 +3057,12 @@ function drawModalHistoryChart(winData, rec) {
 
           ctx.setLineDash([]);
           ctx.beginPath();
-          ctx.arc(ax, npy, 6.5, 0, Math.PI * 2);
-          ctx.fillStyle = actType === "fill" ? "rgba(16, 185, 129, 0.22)" : actType === "cancel" ? "rgba(244, 63, 94, 0.22)" : "rgba(37, 99, 235, 0.20)";
+          ctx.arc(ax, npy, 7.0, 0, Math.PI * 2);
+          ctx.fillStyle = haloColor;
           ctx.fill();
 
           ctx.beginPath();
-          ctx.arc(ax, npy, 4.0, 0, Math.PI * 2);
+          ctx.arc(ax, npy, 4.2, 0, Math.PI * 2);
           ctx.fillStyle = evtColor;
           ctx.fill();
           ctx.strokeStyle = pal.cardBg;
@@ -2583,17 +3071,52 @@ function drawModalHistoryChart(winData, rec) {
         }
       }
     } else {
-      ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.16)" : "rgba(15, 23, 42, 0.08)";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = isDownSide
+        ? pal.isDark
+          ? "rgba(244, 63, 94, 0.22)"
+          : "rgba(225, 29, 72, 0.15)"
+        : pal.isDark
+          ? "rgba(16, 185, 129, 0.22)"
+          : "rgba(5, 150, 105, 0.15)";
+      ctx.lineWidth = 1.1;
       ctx.beginPath();
       ctx.moveTo(ax, padT);
-      ctx.lineTo(ax, h - padB);
+      ctx.lineTo(ax, padT + priceH);
+      ctx.moveTo(ax, probTop);
+      ctx.lineTo(ax, probTop + probH);
       ctx.stroke();
 
-      ctx.beginPath();
-      ctx.arc(ax, h - padB, 3, 0, Math.PI * 2);
-      ctx.fillStyle = evtColor;
-      ctx.fill();
+      if (nearest) {
+        const ny = yOfPrice(nearest.poly_spot);
+        ctx.beginPath();
+        ctx.arc(ax, ny, 6.5, 0, Math.PI * 2);
+        ctx.fillStyle = haloColor;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(ax, ny, 4.2, 0, Math.PI * 2);
+        ctx.fillStyle = evtColor;
+        ctx.fill();
+        ctx.strokeStyle = pal.cardBg;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        if (nearest.up_mid !== null) {
+          const npy = yOfProb(nearest.up_mid);
+          ctx.beginPath();
+          ctx.arc(ax, npy, 6.0, 0, Math.PI * 2);
+          ctx.fillStyle = haloColor;
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(ax, npy, 3.8, 0, Math.PI * 2);
+          ctx.fillStyle = evtColor;
+          ctx.fill();
+          ctx.strokeStyle = pal.cardBg;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
     }
     ctx.restore();
   });
@@ -2602,24 +3125,37 @@ function drawModalHistoryChart(winData, rec) {
   if (modalHoverIdx !== null && pts[modalHoverIdx]) {
     const hp = pts[modalHoverIdx];
     const hx = xOfSec(hp.elapsed);
-    const hy = yOfPrice(hp.spot);
+    const hy = yOfPrice(hp.poly_spot);
     ctx.save();
     ctx.strokeStyle = pal.isDark ? "rgba(248, 250, 252, 0.35)" : "rgba(15, 23, 42, 0.25)";
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
     ctx.moveTo(hx, padT);
-    ctx.lineTo(hx, h - padB);
+    ctx.lineTo(hx, padT + priceH);
+    ctx.moveTo(hx, probTop);
+    ctx.lineTo(hx, probTop + probH);
     ctx.stroke();
     ctx.restore();
 
     ctx.beginPath();
     ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = pal.spot;
+    ctx.fillStyle = pal.twap;
     ctx.fill();
     ctx.strokeStyle = pal.cardBg;
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    if (hp.up_mid !== null) {
+      const hpy = yOfProb(hp.up_mid);
+      ctx.beginPath();
+      ctx.arc(hx, hpy, 4.0, 0, Math.PI * 2);
+      ctx.fillStyle = pal.up;
+      ctx.fill();
+      ctx.strokeStyle = pal.cardBg;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
   }
 }
 
@@ -2640,9 +3176,10 @@ function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
   });
 
   const pt = modalChartGeom.pts[bestIdx];
-  const openPx = modalChartGeom.openPx || pt.spot;
-  const bps = openPx > 0 ? ((pt.spot - openPx) / openPx) * 10000 : 0;
+  const openPx = modalChartGeom.openPx || pt.poly_spot;
+  const bps = openPx > 0 ? ((pt.poly_spot - openPx) / openPx) * 10000 : 0;
   const sign = bps > 0 ? "+" : "";
+  const basisDiff = pt.spot > 0 && pt.poly_spot > 0 ? pt.spot - pt.poly_spot : null;
 
   const actionBanner = actionMeta
     ? `<div class="tt-row" style="padding-bottom:4px;margin-bottom:4px;border-bottom:1px dashed var(--border)">
@@ -2657,15 +3194,18 @@ function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
       <span class="${bps >= 0 ? "up" : "down"}">${sign}${bps.toFixed(1)} bps</span>
     </div>
     ${actionBanner}
-    <div class="tt-row"><span>Binance 实时现货</span><b>${fmtUsd(pt.spot)}</b></div>
     <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
+    <div class="tt-row"><span>Binance 实时现货</span><b>${fmtUsd(pt.spot)}${basisDiff !== null ? ` (${basisDiff >= 0 ? "+" : ""}$${basisDiff.toFixed(1)})` : ""}</b></div>
     <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
   `;
+  tooltip.style.left = "0px";
   tooltip.hidden = false;
 
   const hx = modalChartGeom.xOfSec(elapsedSec);
-  const ttW = 235;
-  const leftPos = Math.min(rect.width - ttW - 10, Math.max(10, hx + 14));
+  const ttW = Math.max(220, tooltip.offsetWidth || 280);
+  const rightLimit = rect.width - (modalChartGeom.padR || 52) - 8;
+  const rawLeft = hx + 16 + ttW > rightLimit ? hx - ttW - 16 : hx + 16;
+  const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, rawLeft));
   tooltip.style.left = `${leftPos}px`;
   tooltip.style.top = `12px`;
 }
@@ -3142,6 +3682,10 @@ function initInteractions() {
     });
   }
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modalBackdrop && !modalBackdrop.hidden) {
+      closeRoundModal();
+      return;
+    }
     if (e.key === "Escape" && connGuideModal && !connGuideModal.hidden) {
       closeConnGuide();
     }

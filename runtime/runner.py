@@ -17,12 +17,24 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
 from core.policy import plan_decision, determine_objective_side
+from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from sim.matcher import QueueMatcher, make_complementary, is_books_consistent
 
 
 class PaperRunner:
+    @staticmethod
+    def _extract_book_prob(book: Optional[OrderBook]) -> Optional[float]:
+        """Extract implied probability from a book without treating None as 0.5."""
+        if book is None:
+            return None
+        for attr in ("mid", "best_bid", "best_ask"):
+            val = getattr(book, attr, None)
+            if val is not None:
+                return float(val)
+        return None
+
     def __init__(self, ledger_dir=None):
         self.ledger_dir = Path(ledger_dir) if ledger_dir else config.CURRENT_LEDGER_DIR
         self.summary_file = self.ledger_dir / "summary.jsonl"
@@ -137,8 +149,8 @@ class PaperRunner:
         self.entries_count = 0
         self.quote_attempts = 0
         self.entry_order_ids = set()
+        self.last_entry_fill_t = None
         self.min_opp_ask_seen = None
-        self._active_entry_is_post_shock = False
         self.regime_counts = {}
         self.regime_dwell = {}
         self._last_regime = None
@@ -158,6 +170,7 @@ class PaperRunner:
                 "poly_down": 0.5
             }
         ] if open_px > 0 else []
+        self.last_prob_up = 0.5
         self.last_poly_up = 0.5
         self.last_poly_down = 0.5
         self.first_60s_high = self.last_poly_spot
@@ -200,6 +213,9 @@ class PaperRunner:
                 if self.entries_count == 0 and self.entry_regime is None:
                     self.entry_regime = self._last_regime
                 self.entries_count += 1
+                # Grant each new entry stage its own fresh quote_attempts budget
+                self.quote_attempts = 0
+                self.last_entry_fill_t = float(now)
         fill = {
             "t": round(now, 2), "side": side, "price": price,
             "size": size, "kind": kind, "purpose": purpose,
@@ -233,7 +249,10 @@ class PaperRunner:
         if not bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True)):
             book_up, book_down = make_complementary(book_up, book_down)
         open_px = getattr(self, "open_price", 0.0)
-        vol_bps = float(getattr(spot, "realized_vol_bps", 15.0) or 15.0)
+        vol_bps = max(
+            float(getattr(spot, "realized_vol_bps", 15.0) or 15.0),
+            float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0)),
+        )
 
         # None means the feed's freshness guard rejected its cached TWAP.
         poly_fresh = poly_spot is not None and poly_spot > 0
@@ -279,8 +298,27 @@ class PaperRunner:
             spot.basis_ema = None
             spot.open_price = self.binance_open_price
 
-        poly_up = getattr(book_up, "mid", None) or getattr(book_up, "best_bid", None) or getattr(book_up, "best_ask", None) or 0.5
-        poly_down = getattr(book_down, "mid", None) or getattr(book_down, "best_bid", None) or getattr(book_down, "best_ask", None) or round(1.0 - poly_up, 4)
+        p_fair = estimate_p_fair(
+            spot, open_px, tau, vol_bps,
+            poly_price=poly_spot if poly_fresh else None,
+        )
+        self.last_prob_up = p_fair
+
+        raw_up = self._extract_book_prob(book_up)
+        raw_dn = self._extract_book_prob(book_down)
+        if raw_up is not None and raw_dn is not None:
+            poly_up, poly_down = raw_up, raw_dn
+        elif raw_up is not None:
+            poly_up = raw_up
+            poly_down = round(max(0.0, min(1.0, 1.0 - raw_up)), 4)
+        elif raw_dn is not None:
+            poly_down = raw_dn
+            poly_up = round(max(0.0, min(1.0, 1.0 - raw_dn)), 4)
+        else:
+            prev_up = getattr(self, "last_poly_up", None)
+            prev_dn = getattr(self, "last_poly_down", None)
+            poly_up = float(prev_up) if prev_up is not None else 0.5
+            poly_down = float(prev_dn) if prev_dn is not None else round(1.0 - poly_up, 4)
         self.last_poly_up = poly_up
         self.last_poly_down = poly_down
 
@@ -309,7 +347,8 @@ class PaperRunner:
                 if abs(float(getattr(spot, "ret_change_15s_bps", 0.0) or 0.0)) < 1e-9:
                     spot.ret_change_15s_bps = round(bin_bps - float(old_pt.get("return_bps", 0.0) or 0.0), 3)
                 if abs(float(getattr(spot, "up_mid_change_15s", 0.0) or 0.0)) < 1e-9:
-                    spot.up_mid_change_15s = round(poly_up - float(old_pt.get("poly_up", 0.5) or 0.5), 4)
+                    old_up = old_pt.get("poly_up")
+                    spot.up_mid_change_15s = round(poly_up - (float(old_up) if old_up is not None else 0.5), 4)
         if ref_px > 0:
             if now - self.window_start <= 60.0:
                 self.first_60s_high = max(getattr(self, "first_60s_high", ref_px), ref_px)
@@ -443,10 +482,13 @@ class PaperRunner:
         # must see the real (possibly negative) balance and stop opening.
         available_cap = self._initial_capital + self.total_pnl
         committed_cost = self.pos_up.cash + self.pos_down.cash
+        last_entry_t = getattr(self, "last_entry_fill_t", None)
+        secs_since_entry = max(0.0, now - float(last_entry_t)) if last_entry_t is not None else 9999.0
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
             COMMITTED_WINDOW_COST=committed_cost,
+            SECONDS_SINCE_LAST_ENTRY=secs_since_entry,
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
             BASIS_READY=basis_ready,
@@ -463,6 +505,7 @@ class PaperRunner:
             decision = plan_decision(
                 self.pos_up, self.pos_down, book_up, book_down, spot, tau, eval_params,
                 circuit_breaker_active=cb_active, circuit_breaker_reason=cb_reason,
+                p_fair=p_fair,
                 entries_count=self.entries_count,
                 regime_info=regime_info,
                 quote_attempts=getattr(self, "quote_attempts", 0)
@@ -492,12 +535,7 @@ class PaperRunner:
             self._last_timeline_key = tl_key
             self._last_timeline_t = now
         
-        if not self.working_orders:
-            self._active_entry_is_post_shock = False
-        pref_side = (
-            None if getattr(self, "_active_entry_is_post_shock", False)
-            else determine_objective_side(spot, tau, eval_params)
-        )
+        pref_side = determine_objective_side(spot, tau, eval_params)
         to_cancel, action = plan_order_actions(
             self.working_orders, decision, now,
             max_queue_wait_s=float(config.PARAMS.get("MAX_QUEUE_WAIT_S", 15.0)),
@@ -564,11 +602,19 @@ class PaperRunner:
                         f"(决策价 {action.price:.2f} -> 逐档 VWAP {vwap:.4f})，拒绝伪无风险锁仓"
                     )
             if action.action == "taker_buy" and filled > 1e-6:
-                slip = vwap - float(action.price if action.price is not None else vwap)
+                sig_px = float(action.price if action.price is not None else vwap)
+                slip = vwap - sig_px
+                min_entry_px = float(config.PARAMS.get("ENTRY_MIN_PRICE", 0.20))
+                max_adverse_drop = float(config.PARAMS.get("TAKER_MAX_ADVERSE_DROP", 0.05))
                 if slip > 0.02:
                     reject_reason = (
-                        f"VWAP 滑点过大 (决策价 {action.price:.2f} -> "
+                        f"VWAP 滑点过大 (决策价 {sig_px:.2f} -> "
                         f"逐档 VWAP {vwap:.4f}, 滑点 {slip:+.4f})，拒绝吃单"
+                    )
+                elif vwap < min_entry_px - 1e-6 or (sig_px - vwap) >= max_adverse_drop - 1e-6:
+                    reject_reason = (
+                        f"300ms 延迟内盘口闪崩接飞刀拦截 (决策价 {sig_px:.2f} -> "
+                        f"现成交 VWAP {vwap:.4f})，拒绝吃单"
                     )
             if filled > 1e-6 and reject_reason is None:
                 px = round(vwap, 6)
@@ -619,9 +665,9 @@ class PaperRunner:
                     "reason": reject_reason or "empty/one-sided book, no visible liquidity"
                 })
 
-        # 2. Maker quote placement
+        # 2. Maker quote placement (entry, pyramid add, and reversal flip all use purpose="entry")
         elif action and action.action == "quote":
-            purpose = "hedge" if abs(self.pos_up.shares - self.pos_down.shares) > 1e-6 else "entry"
+            purpose = "entry"
             self._next_order_id += 1
             oid = self._next_order_id
             new_order = Order(
@@ -639,10 +685,8 @@ class PaperRunner:
             target_book = book_up if action.side == "Up" else book_down
             self.matcher.register_order(new_order, target_book)
             self.working_orders.append(new_order)
-            self._active_entry_is_post_shock = (
-                purpose == "entry" and "Post-Shock" in (decision.reason or "")
-            )
-            self.quote_attempts = getattr(self, "quote_attempts", 0) + 1
+            if purpose == "entry":
+                self.quote_attempts = getattr(self, "quote_attempts", 0) + 1
             ahead_sz = self.matcher.queue_ahead.get(new_order.id, 0.0)
             self.actions.append({
                 "t": round(now, 2), "action": "quote", "side": action.side,
@@ -672,8 +716,9 @@ class PaperRunner:
                 remaining_working.append(o)
         self.working_orders = remaining_working
 
-        # Update atomic live.json
-        self._write_live(now, spot, book_up, book_down)
+        # Update atomic live.json (skipped in offline replay for ~15x speedup)
+        if not replay_mode:
+            self._write_live(now, spot, book_up, book_down)
 
     def close_window(self, close_px: float, official_winner: str = None,
                      winner_source: str = "spot_fallback"):
@@ -702,7 +747,8 @@ class PaperRunner:
         proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
         total_cost = self.pos_up.cash + self.pos_down.cash
         net_pnl = round(proceeds - total_cost, 4)
-        self.last_round_abs_move = round(abs(close_px - self.open_price), 2)
+        self._last_settled_slug = self.current_slug
+        self.last_round_abs_move = self._compute_same_chain_abs_move(close_px, winner_source)
         if winner == "Up":
             self.consecutive_up = getattr(self, "consecutive_up", 0) + 1
             self.consecutive_down = 0
@@ -770,6 +816,20 @@ class PaperRunner:
         # Clear working orders
         self.working_orders = []
 
+    def _compute_same_chain_abs_move(self, close_px: float, winner_source: str) -> float:
+        """Compute prior-round move magnitude without mixing Binance spot and Chainlink strike."""
+        if winner_source in ("twap", "ledger") and close_px > 0 and self.open_price > 0:
+            return round(abs(close_px - self.open_price), 2)
+        if not getattr(self, "poly_open_is_provisional", False) and self.open_price > 0:
+            if getattr(self, "poly_spot_fresh", False) and getattr(self, "last_poly_spot", 0.0) > 0:
+                return round(abs(self.last_poly_spot - self.open_price), 2)
+            if getattr(self, "_basis_ema", None) is not None and close_px > 0:
+                return round(abs((close_px - float(self._basis_ema)) - self.open_price), 2)
+        bin_open = float(getattr(self, "binance_open_price", 0.0) or 0.0)
+        if bin_open > 0 and close_px > 0:
+            return round(abs(close_px - bin_open), 2)
+        return round(abs(close_px - self.open_price), 2)
+
     def reconcile_record(self, slug: str, open_px: float, close_px: float,
                          winner: str, winner_source: str = "twap"):
         """Update prices in summary.jsonl and the window archive.
@@ -806,6 +866,8 @@ class PaperRunner:
                     r["proceeds"] = round(proceeds, 4)
                     r["net_pnl"] = new_pnl
                     r["result"] = "win" if new_pnl > 1e-4 else ("loss" if new_pnl < -1e-4 else "flat")
+                    if winner_source == "twap" and slug == getattr(self, "_last_settled_slug", None) and open_px > 0 and close_px > 0:
+                        self.last_round_abs_move = round(abs(close_px - open_px), 2)
                 updated.append(json.dumps(r, ensure_ascii=False))
             except Exception:
                 updated.append(line)

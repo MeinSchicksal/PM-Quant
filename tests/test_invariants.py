@@ -365,8 +365,9 @@ class TestMathematicalInvariants(unittest.TestCase):
         book = OrderBook(bids=[(0.48, 50.0)], asks=[(0.50, 50.0)])
         spot = SpotState(timestamp=1000.0, price=75000.0, open_price=75000.0)
         
-        # entries_count = 1 (an entry already filled this round)
-        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, entries_count=1)
+        # entries_count = MAX_ENTRIES_PER_WINDOW (window entry cap already reached)
+        max_entries = int(config.PARAMS["MAX_ENTRIES_PER_WINDOW"])
+        dec_locked = plan_decision(pos_flat, pos_flat, book, book, spot, tau_s=250.0, params=config.PARAMS, entries_count=max_entries)
         self.assertEqual(dec_locked.action, "wait")
         self.assertIn("Max entries per window reached", dec_locked.reason)
 

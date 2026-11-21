@@ -1,11 +1,70 @@
-"""Objective Microstructure Metrics & Physical Lead Arithmetic.
+"""Objective Microstructure Metrics, Physical Lead & Asian TWAP Settlement Pricing.
 
 Computes realized volatility (EWMA), drift signal-to-noise ratio (SNR),
-and pure arithmetic spot/60s-TWAP displacement from window strike.
-No parametric probability estimation (no Black-Scholes / normal CDF) is used.
+pure arithmetic displacement from window strike, and Asian 60s-TWAP
+settlement probability P* using basis-adjusted spot and realized TWAP lock-in.
 """
 import math
 from typing import Tuple, List, Optional
+
+
+def normal_cdf(x: float) -> float:
+    """Standard Normal Cumulative Distribution Function using error function."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: float) -> float:
+    """Estimate risk-neutral settlement probability p_fair for Up winning (S_T >= S_0)."""
+    if tau_s <= 0.5:
+        return 0.99 if spot >= open_price else 0.01
+    if open_price <= 0 or spot <= 0:
+        return 0.50
+    sigma_tau = max(1e-5, (vol_bps / 10000.0) * math.sqrt(tau_s / 300.0))
+    d = math.log(spot / open_price) / sigma_tau
+    prob = normal_cdf(d)
+    return max(0.01, min(0.99, round(prob, 4)))
+
+
+def estimate_p_fair(
+    spot,
+    open_px: float,
+    tau_s: float,
+    vol_bps: float,
+    poly_price: Optional[float] = None
+) -> float:
+    """Estimate probability that Chainlink 60s TWAP settles >= window strike `open_px`.
+
+    Uses basis-adjusted live spot (`spot.price - spot.basis_ema`) when official
+    strike and basis calibration are ready, incorporates the already-locked
+    `[end-60, t]` average during the final 60s, and falls back strictly to
+    single-chain Binance pricing when basis calibration is unavailable.
+    """
+    spot_px = float(getattr(spot, "price", 0.0) or 0.0)
+    basis_ema = getattr(spot, "basis_ema", None)
+    realized_60 = getattr(spot, "twap_realized_60s", None)
+
+    if basis_ema is not None and spot_px > 0 and open_px > 0:
+        cl_est = max(1e-6, spot_px - float(basis_ema))
+        if tau_s <= 0.5:
+            final_est = float(realized_60) if (realized_60 and float(realized_60) > 0) else cl_est
+            return 0.99 if final_est >= open_px else 0.01
+        if tau_s <= 60.0:
+            u = max(0.0, 60.0 - max(0.0, tau_s))
+            avg_realized = float(realized_60) if (realized_60 and float(realized_60) > 0) else cl_est
+            expected_close = (u * avg_realized + tau_s * cl_est) / 60.0
+            sigma_5m = vol_bps / 10000.0
+            std_close = max(1e-5, sigma_5m * math.sqrt((max(0.0, tau_s) / 300.0) / 3.0) * (max(0.0, tau_s) / 60.0))
+            prob = normal_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
+            return max(0.01, min(0.99, round(prob, 4)))
+        eff_tau = max(10.0, tau_s - 40.0)
+        return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps)
+
+    bin_open = getattr(spot, "binance_open_price", None)
+    ref_open = float(bin_open) if (bin_open and float(bin_open) > 0) else float(open_px or 0.0)
+    if ref_open > 0 and spot_px > 0:
+        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
+        return estimate_fair_prob(spot_px, ref_open, eff_tau, vol_bps)
+    return 0.50
 
 
 def compute_objective_lead(spot, open_px: float, tau_s: float) -> Tuple[float, float, float]:

@@ -224,8 +224,9 @@ class TestV23Realism(unittest.TestCase):
         self.assertEqual(dec_partial.action, "wait")
         self.assertFalse(dec_partial.urgent_cancel)
 
-        # Full 5-share lot sets urgent_cancel=True
-        dec_full = plan_decision(Position(5.0, 2.40), Position(0.0, 0.0), b_up, b_dn, sp_calm, 180.0, config.PARAMS)
+        # Full max-lot position sets urgent_cancel=True
+        max_shares = config.PARAMS["LOT_SIZE"] * config.PARAMS["MAX_LOTS"]
+        dec_full = plan_decision(Position(max_shares, max_shares * 0.48), Position(0.0, 0.0), b_up, b_dn, sp_calm, 180.0, config.PARAMS)
         self.assertTrue(dec_full.urgent_cancel)
 
         # Partial fill during toxic velocity shock sets urgent_cancel=True
@@ -249,7 +250,7 @@ class TestV23Realism(unittest.TestCase):
         b_dn_tight = OrderBook(bids=[(0.56, 20.0)], asks=[(0.58, 20.0)])
         dec_chop = plan_decision(Position(0, 0), Position(0, 0), b_up_tight, b_dn_tight, sp_chop, 180.0, config.PARAMS)
         self.assertEqual(dec_chop.action, "wait")
-        self.assertIn("过滤零附近震荡噪音", dec_chop.reason)
+        self.assertIn("无足够净边际", dec_chop.reason)
 
     def test_explicit_poly_open_provisional_and_gamma_gz_preserved(self):
         """Explicit poly_open_provisional stays True even if stitched open != binance_open, and gamma gz isn't overwritten by twap."""
@@ -284,8 +285,9 @@ class TestV23Realism(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runner = PaperRunner(ledger_dir=tmp)
             runner.start_window("btc-updown-5m-1000", 1000.0, 1300.0, open_px=75000.0, binance_open_px=75000.0)
-            # Basis $0.80 keeps Deep Arbitrage inactive so we isolate min_opp_ask_seen VWAP tracking
+            # Basis $0.80 & max entries reached keep secondary entries inactive so we isolate 5-share VWAP tracking
             runner.pos_up = Position(5.0, 4.00)
+            runner.entries_count = int(config.PARAMS["MAX_ENTRIES_PER_WINDOW"])
 
             b_up = OrderBook(bids=[(0.50, 20.0)], asks=[(0.52, 20.0)], source_t=1150.0)
             # Insufficient total ask depth (1 share < 5 shares) -> ignored

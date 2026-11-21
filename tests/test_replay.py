@@ -107,7 +107,7 @@ class TestEventDrivenReplay(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        with overridden_params({"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MWDE_MIN_LEAD_BPS": 1.0, "MWDE_TAKER_PAIR_COST": 0.50}):
+        with overridden_params({"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MIN_TAKER_EDGE": 0.99}):
             results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         r = results[0]
@@ -135,20 +135,20 @@ class TestEventDrivenReplay(unittest.TestCase):
                     "timestamp": self.start + 70, "received_at": self.start + 70.2,
                 }) + "\n")
 
-        with overridden_params({"MWDE_MIN_LEAD_BPS": 1.0, "MWDE_TAKER_PAIR_COST": 0.50}):
+        with overridden_params({"MIN_TAKER_EDGE": 0.99}):
             results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["replay_traded"])
         self.assertEqual(results[0]["replay_pnl"], 0.0)
 
     def test_param_overrides_are_restored_on_error(self):
-        original = config.PARAMS["LWAA_MIN_LEAD_BPS"]
+        original = config.PARAMS["LWAA_MIN_PROB"]
         with self.assertRaises(RuntimeError):
-            with overridden_params({"LWAA_MIN_LEAD_BPS": 2.0, "NOT_A_REAL_PARAM": 1}):
-                self.assertEqual(config.PARAMS["LWAA_MIN_LEAD_BPS"], 2.0)
+            with overridden_params({"LWAA_MIN_PROB": 0.5, "NOT_A_REAL_PARAM": 1}):
+                self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], 0.5)
                 self.assertEqual(config.PARAMS["NOT_A_REAL_PARAM"], 1)
                 raise RuntimeError("boom")
-        self.assertEqual(config.PARAMS["LWAA_MIN_LEAD_BPS"], original)
+        self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], original)
         self.assertNotIn("NOT_A_REAL_PARAM", config.PARAMS)
 
 

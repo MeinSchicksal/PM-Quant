@@ -20,6 +20,7 @@ import config
 from runtime.market_feed import MarketFeed
 from runtime.runner import PaperRunner
 from runtime.trade_stream import TradeStreamClient
+from runtime.ws_feeds import BinanceSpotWSClient, PolymarketBookWSClient
 
 PID_FILE = config.RUNTIME_DIR / "pipeline.pid"
 
@@ -55,6 +56,9 @@ class PipelineDriver:
         self.runner = PaperRunner()
         ws_proxy = (self.feed.session.proxies or {}).get("https") or (self.feed.session.proxies or {}).get("http")
         self.trade_stream = TradeStreamClient(record_raw=True, proxy=ws_proxy)
+        self.spot_ws = BinanceSpotWSClient(proxy=ws_proxy)
+        self.book_ws = PolymarketBookWSClient(proxy=ws_proxy)
+        self.feed.attach_ws_clients(spot_ws=self.spot_ws, book_ws=self.book_ws)
         self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg")
         self._reconcile_future = None
         self._open_calib_future = None
@@ -85,10 +89,11 @@ class PipelineDriver:
 
     def stop(self):
         self.running = False
-        try:
-            self.trade_stream.stop()
-        except Exception:
-            pass
+        for client in (self.trade_stream, self.spot_ws, self.book_ws):
+            try:
+                client.stop()
+            except Exception:
+                pass
         try:
             self.feed.close()
         except Exception:
@@ -111,6 +116,8 @@ class PipelineDriver:
         print("Press Ctrl+C to terminate gracefully.\n")
 
         self.trade_stream.start()
+        self.spot_ws.start()
+        self.book_ws.start()
 
         active_tokens = {}
         last_slug = None
@@ -331,14 +338,17 @@ class PipelineDriver:
                     print(f"[Pipeline] Tokens: {tokens_label} | Poly Strike S0: ${poly_open:,.2f} ({'official' if is_official_open else 'provisional'}) | Binance S0: ${binance_open:,.2f}")
 
                     # Update WebSocket subscription targets
-                    token_list = [active_tokens.get("token_up"), active_tokens.get("token_down")]
-                    self.trade_stream.set_active_targets([slug], [t for t in token_list if t])
+                    token_list = [t for t in (active_tokens.get("token_up"), active_tokens.get("token_down")) if t]
+                    self.trade_stream.set_active_targets([slug], token_list)
+                    self.book_ws.set_tokens(token_list)
 
                 # 2b. Retry token resolution if initially pending
                 if not (active_tokens.get("token_up") and active_tokens.get("token_down")):
                     active_tokens = self.feed.resolve_tokens(slug)
                     if active_tokens.get("token_up"):
-                        self.trade_stream.set_active_targets([slug], [active_tokens.get("token_up"), active_tokens.get("token_down")])
+                        t_retry = [t for t in (active_tokens.get("token_up"), active_tokens.get("token_down")) if t]
+                        self.trade_stream.set_active_targets([slug], t_retry)
+                        self.book_ws.set_tokens(t_retry)
 
                 if did_rollover or getattr(self.runner, "_last_step_time", None) is None:
                     loop_start = time.time()
@@ -397,7 +407,9 @@ class PipelineDriver:
                                 active_tokens.get("token_up"), active_tokens.get("token_down"),
                                 pw_tokens.get("token_up"), pw_tokens.get("token_down")
                             ]
-                            self.trade_stream.set_active_targets(combined_slugs, [t for t in combined_tokens if t])
+                            combined_clean = [t for t in combined_tokens if t]
+                            self.trade_stream.set_active_targets(combined_slugs, combined_clean)
+                            self.book_ws.set_tokens(combined_clean)
                     except Exception:
                         pass
                     finally:
@@ -430,12 +442,18 @@ class PipelineDriver:
                         tok = active_tokens.get("token_up" if side_name == "Up" else "token_down")
                         if not tok:
                             return None
+                        ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5)
+                        if ws_bk is not None:
+                            return ws_bk
                         return self.feed.fetch_order_book(tok, side_name)
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)
                     net_summary["ws_trades"] = int(self.trade_stream.trade_count)
                     net_summary["ws_reconnects"] = int(self.trade_stream.reconnect_count)
+                    net_summary["spot_ws_connected"] = bool(self.spot_ws.connected)
+                    net_summary["book_ws_connected"] = bool(self.book_ws.connected)
+                    net_summary["book_ws_msgs"] = int(self.book_ws.msg_count)
                     if self.trade_stream.last_error:
                         net_summary["ws_last_error"] = self.trade_stream.last_error
                     self.runner.step(
@@ -485,10 +503,11 @@ class PipelineDriver:
                 print(f"\n[Pipeline] Tick warning: {e}")
                 time.sleep(1.0)
 
-        try:
-            self.trade_stream.stop()
-        except Exception:
-            pass
+        for client in (self.trade_stream, self.spot_ws, self.book_ws):
+            try:
+                client.stop()
+            except Exception:
+                pass
         try:
             self.feed.close()
         except Exception:

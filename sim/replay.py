@@ -191,7 +191,11 @@ def replay_window(
          if start <= float(r.get("t", 0.0)) <= end and float(r.get("price") or 0.0) > 0),
         open_px,
     )
-    runner.start_window(slug, start, end, open_px, binance_open_px=first_bin)
+    runner.start_window(
+        slug, start, end, open_px,
+        binance_open_px=first_bin,
+        poly_open_provisional=(open_px <= 0),
+    )
 
     # Timeline: every recorded book update in either token, restricted to the
     # window. One tick per book update keeps the replay at recording cadence.

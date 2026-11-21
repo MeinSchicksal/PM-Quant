@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.31">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.43">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -19,7 +19,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v2.4</span>
+      <span class="brand-version" id="page-version">v2.6</span>
     </div>
 
     <div class="sidebar-top">
@@ -375,176 +375,234 @@
         </div>
       </section>
 
-      <!-- Live Price Fluctuation & Strategy Arbitration Chart Panel -->
-      <section class="panel live-chart-panel" aria-label="本轮价格走势与策略仲裁">
-        <div class="chart-header">
-          <div class="chart-header-top">
-            <div class="chart-title-block">
-              <h2 class="chart-main-title">本轮秒级行情波动与盘口隐含概率轨迹 (BTC/USD)</h2>
-              <div class="chart-legend" id="chart-legend">
-                <span class="legend-chip" id="legend-poly" title="Chainlink 60 秒 TWAP，本图价格轨迹序列">
-                  <span class="legend-line twap-sw"></span>Chainlink 60s TWAP
-                </span>
-                <span class="legend-chip" id="legend-prob" title="Polymarket 订单簿 UP 买卖中间价隐含概率">
-                  <span class="legend-line prob-sw"></span>UP 市场概率 (%)
-                </span>
+      <!-- Live Cockpit Grid: Left (Wide Chart + Side-by-Side UP/DOWN) | Right (Full-Height Execution Rail) -->
+      <div class="market-cockpit-grid">
+        <div class="cockpit-main-col">
+          <!-- Live Price Fluctuation & Strategy Arbitration Chart Panel -->
+          <section class="panel live-chart-panel" aria-label="本轮价格走势与策略仲裁">
+            <div class="chart-header">
+              <div class="chart-header-top">
+                <div class="chart-title-block">
+                  <h2 class="chart-main-title">本轮秒级行情波动与盘口隐含概率轨迹 (BTC/USD)</h2>
+                  <div class="chart-legend" id="chart-legend">
+                    <span class="legend-chip" id="legend-poly" title="Chainlink 60 秒 TWAP，本图价格轨迹序列">
+                      <span class="legend-line twap-sw"></span>Chainlink 60s TWAP
+                    </span>
+                    <span class="legend-chip" id="legend-prob" title="Polymarket 订单簿 UP 买卖中间价隐含概率">
+                      <span class="legend-line prob-sw"></span>UP 市场概率 (%)
+                    </span>
+                  </div>
+                </div>
+
+                <div class="chart-controls">
+                  <button type="button" class="clear-pin-btn" id="chart-clear-pin-btn" hidden title="清除图表上的成交交叉延长线 (快捷键 Esc)">
+                    <span>清除延长线</span>
+                    <kbd>Esc</kbd>
+                  </button>
+                  <div class="chart-mode-toggle" id="chart-mode-toggle" role="group" aria-label="图表视图切换">
+                    <button type="button" class="mode-btn active" data-mode="dual">双轨联动</button>
+                    <button type="button" class="mode-btn" data-mode="price">价格走势</button>
+                    <button type="button" class="mode-btn" data-mode="prob">盘口隐含</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- De-duplicated Structured Readout Bar + Strategy Decision Arbitration Banner -->
+              <div class="chart-subbar">
+                <div class="chart-stats-row">
+                  <span class="chart-stat-item" hidden><strong id="chart-stat-open">$0.00</strong><strong id="chart-stat-spot">$0.00</strong></span>
+                  <span class="chart-stat-item">60s TWAP <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
+                  <span class="stat-sep" aria-hidden="true"></span>
+                  <span class="chart-stat-item">最高 <strong class="up" id="chart-stat-high">$0.00</strong></span>
+                  <span class="chart-stat-item">最低 <strong class="down" id="chart-stat-low">$0.00</strong></span>
+                  <span class="chart-stat-item">振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
+                  <span class="stat-sep" aria-hidden="true"></span>
+                  <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
+                </div>
               </div>
             </div>
 
-            <div class="chart-controls">
-              <div class="chart-mode-toggle" id="chart-mode-toggle" role="group" aria-label="图表视图切换">
-                <button type="button" class="mode-btn active" data-mode="dual">双轨联动</button>
-                <button type="button" class="mode-btn" data-mode="price">价格走势</button>
-                <button type="button" class="mode-btn" data-mode="prob">盘口隐含</button>
+            <div class="canvas-container">
+              <canvas id="live-price-canvas" height="510"></canvas>
+              <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+            </div>
+          </section>
+
+          <!-- Dual-Sided Implied Probability Tug-of-War Meter -->
+          <section class="panel prob-tug-card" aria-label="市场隐含胜率实时博弈">
+            <div class="prob-tug-header">
+              <div class="prob-tug-side up">
+                <span class="prob-side-tag">▲ UP 市场胜率</span>
+                <strong class="prob-side-pct" id="prob-tug-up-pct">--%</strong>
+              </div>
+              <span class="prob-tug-title">盘口隐含胜率实时博弈 · 50% 均衡线</span>
+              <div class="prob-tug-side down">
+                <strong class="prob-side-pct" id="prob-tug-down-pct">--%</strong>
+                <span class="prob-side-tag">DOWN 市场胜率 ▼</span>
               </div>
             </div>
-          </div>
-
-          <!-- De-duplicated Structured Readout Bar + Strategy Decision Arbitration Banner -->
-          <div class="chart-subbar">
-            <div class="chart-stats-row">
-              <span class="chart-stat-item" hidden><strong id="chart-stat-open">$0.00</strong><strong id="chart-stat-spot">$0.00</strong></span>
-              <span class="chart-stat-item">60s TWAP <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
-              <span class="stat-sep" aria-hidden="true"></span>
-              <span class="chart-stat-item">最高 <strong class="up" id="chart-stat-high">$0.00</strong></span>
-              <span class="chart-stat-item">最低 <strong class="down" id="chart-stat-low">$0.00</strong></span>
-              <span class="chart-stat-item">振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
-              <span class="stat-sep" aria-hidden="true"></span>
-              <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
+            <div class="prob-tug-track" aria-hidden="true">
+              <div class="prob-tug-fill up-bar" id="up-prob-bar" style="flex-basis: 50%"></div>
+              <div class="prob-tug-fill down-bar" id="down-prob-bar"></div>
+              <span class="prob-tug-midtick"></span>
             </div>
+          </section>
+
+          <!-- Dual-Sided Position & Orderbook Panels (Side-by-Side UP | DOWN) -->
+          <div class="dual-grid">
+            <!-- UP Panel -->
+            <section class="panel quote-card side-up" id="card-up">
+              <div class="quote-card-head">
+                <div class="side-badge up">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
+                  <span>UP 看涨头寸与盘口</span>
+                </div>
+                <div class="side-settle-pnl" id="pnl-forecast-up">
+                  <span class="pnl-hint">空仓观望</span>
+                </div>
+              </div>
+
+              <div class="position-box">
+                <div class="pos-item">
+                  <span class="pos-label">已成交持仓</span>
+                  <strong class="pos-val" id="up-pos-shares">0.0 股</strong>
+                </div>
+                <div class="pos-item">
+                  <span class="pos-label">持仓成交均价</span>
+                  <strong class="pos-val" id="up-pos-avg">--</strong>
+                </div>
+                <div class="pos-item">
+                  <span class="pos-label">累计投入成本</span>
+                  <strong class="pos-val" id="up-pos-cost">$0.00</strong>
+                </div>
+              </div>
+
+              <div class="quote-book-block">
+                <div class="quote-levels-grid">
+                  <div class="level-box bid-box">
+                    <span class="level-label">买一 (Bid)</span>
+                    <span class="level-val-pair">
+                      <strong class="level-price-sm up" id="up-bid-px">--</strong>
+                      <small class="level-size-tag" id="up-bid-sz">-- 股</small>
+                    </span>
+                  </div>
+                  <div class="level-box ask-box">
+                    <span class="level-label">卖一 (Ask)</span>
+                    <span class="level-val-pair">
+                      <strong class="level-price-sm" id="up-ask-px">--</strong>
+                      <small class="level-size-tag" id="up-ask-sz">-- 股</small>
+                    </span>
+                  </div>
+                </div>
+                <div class="quote-meta-strip">
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">5档买卖量</span>
+                    <span class="q-meta-v" id="up-meta-depth">--</span>
+                  </div>
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">盘口隐含</span>
+                    <span class="q-meta-v" id="up-meta-implied">--</span>
+                  </div>
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">买卖价差</span>
+                    <span class="q-meta-v" id="up-meta-spread">--</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- DOWN Panel -->
+            <section class="panel quote-card side-down" id="card-down">
+              <div class="quote-card-head">
+                <div class="side-badge down">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
+                  <span>DOWN 看跌头寸与盘口</span>
+                </div>
+                <div class="side-settle-pnl" id="pnl-forecast-down">
+                  <span class="pnl-hint">空仓观望</span>
+                </div>
+              </div>
+
+              <div class="position-box">
+                <div class="pos-item">
+                  <span class="pos-label">已成交持仓</span>
+                  <strong class="pos-val" id="down-pos-shares">0.0 股</strong>
+                </div>
+                <div class="pos-item">
+                  <span class="pos-label">持仓成交均价</span>
+                  <strong class="pos-val" id="down-pos-avg">--</strong>
+                </div>
+                <div class="pos-item">
+                  <span class="pos-label">累计投入成本</span>
+                  <strong class="pos-val" id="down-pos-cost">$0.00</strong>
+                </div>
+              </div>
+
+              <div class="quote-book-block">
+                <div class="quote-levels-grid">
+                  <div class="level-box bid-box">
+                    <span class="level-label">买一 (Bid)</span>
+                    <span class="level-val-pair">
+                      <strong class="level-price-sm down" id="down-bid-px">--</strong>
+                      <small class="level-size-tag" id="down-bid-sz">-- 股</small>
+                    </span>
+                  </div>
+                  <div class="level-box ask-box">
+                    <span class="level-label">卖一 (Ask)</span>
+                    <span class="level-val-pair">
+                      <strong class="level-price-sm" id="down-ask-px">--</strong>
+                      <small class="level-size-tag" id="down-ask-sz">-- 股</small>
+                    </span>
+                  </div>
+                </div>
+                <div class="quote-meta-strip">
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">5档买卖量</span>
+                    <span class="q-meta-v" id="down-meta-depth">--</span>
+                  </div>
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">盘口隐含</span>
+                    <span class="q-meta-v" id="down-meta-implied">--</span>
+                  </div>
+                  <div class="q-meta-cell">
+                    <span class="q-meta-k">买卖价差</span>
+                    <span class="q-meta-v" id="down-meta-spread">--</span>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
 
-        <div class="canvas-container">
-          <canvas id="live-price-canvas" height="500"></canvas>
-          <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+        <div class="cockpit-feed-col">
+          <!-- Live Order Queue & Execution Feed -->
+          <section class="panel section-panel orders-workspace">
+            <div class="orders-head-compact">
+              <div class="orders-head-top">
+                <h2>在途挂单与撮合流水</h2>
+                <div class="orders-head-meta">
+                  <span class="order-pill" id="working-order-pill" hidden></span>
+                  <span class="badge-pill" id="live-action-count">0 笔</span>
+                </div>
+              </div>
+              <div class="orders-subbar">
+                <div class="action-filter-tabs" id="action-feed-filter" role="tablist" aria-label="流水筛选">
+                  <button type="button" class="af-btn active" data-af="all">全部</button>
+                  <button type="button" class="af-btn" data-af="fill">成交</button>
+                  <button type="button" class="af-btn" data-af="order">挂撤</button>
+                </div>
+                <span class="orders-hint">点击定位左图</span>
+              </div>
+            </div>
+
+            <div id="live-working-orders-box" class="working-orders-box" hidden></div>
+
+            <ol class="action-feed" id="live-action-feed">
+              <li class="action-empty">等待撮合引擎输出...</li>
+            </ol>
+          </section>
         </div>
-      </section>
-
-      <!-- Dual-Sided Position & Orderbook Panels -->
-      <div class="dual-grid">
-        <!-- UP Panel -->
-        <section class="panel quote-card side-up" id="card-up">
-          <div class="quote-card-head">
-            <div class="side-badge up">
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
-              <span>UP 看涨头寸与盘口</span>
-            </div>
-            <span class="side-settle-pnl" id="pnl-forecast-up">胜出预期: --</span>
-          </div>
-
-          <div class="position-box">
-            <div class="pos-item">
-              <span class="pos-label">已成交持仓</span>
-              <strong class="pos-val" id="up-pos-shares">0.0 股</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">持仓成交均价</span>
-              <strong class="pos-val" id="up-pos-avg">--</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">累计投入成本</span>
-              <strong class="pos-val" id="up-pos-cost">$0.00</strong>
-            </div>
-          </div>
-
-          <div class="quote-book-block">
-            <div class="quote-levels-grid">
-              <div class="level-box bid-box">
-                <span class="level-label">买一 (Bid)</span>
-                <span class="level-val-pair">
-                  <strong class="level-price-sm up" id="up-bid-px">--</strong>
-                  <small class="level-size-tag" id="up-bid-sz">-- 股</small>
-                </span>
-              </div>
-              <div class="level-box ask-box">
-                <span class="level-label">卖一 (Ask)</span>
-                <span class="level-val-pair">
-                  <strong class="level-price-sm" id="up-ask-px">--</strong>
-                  <small class="level-size-tag" id="up-ask-sz">-- 股</small>
-                </span>
-              </div>
-            </div>
-            <div class="quote-depth-row">
-              <div class="level-bar-wrap" aria-hidden="true">
-                <div class="level-bar-fill up-bar" id="up-prob-bar" style="width: 50%"></div>
-              </div>
-              <small class="level-status" id="up-book-status">--</small>
-            </div>
-          </div>
-        </section>
-
-        <!-- DOWN Panel -->
-        <section class="panel quote-card side-down" id="card-down">
-          <div class="quote-card-head">
-            <div class="side-badge down">
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
-              <span>DOWN 看跌头寸与盘口</span>
-            </div>
-            <span class="side-settle-pnl" id="pnl-forecast-down">胜出预期: --</span>
-          </div>
-
-          <div class="position-box">
-            <div class="pos-item">
-              <span class="pos-label">已成交持仓</span>
-              <strong class="pos-val" id="down-pos-shares">0.0 股</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">持仓成交均价</span>
-              <strong class="pos-val" id="down-pos-avg">--</strong>
-            </div>
-            <div class="pos-item">
-              <span class="pos-label">累计投入成本</span>
-              <strong class="pos-val" id="down-pos-cost">$0.00</strong>
-            </div>
-          </div>
-
-          <div class="quote-book-block">
-            <div class="quote-levels-grid">
-              <div class="level-box bid-box">
-                <span class="level-label">买一 (Bid)</span>
-                <span class="level-val-pair">
-                  <strong class="level-price-sm down" id="down-bid-px">--</strong>
-                  <small class="level-size-tag" id="down-bid-sz">-- 股</small>
-                </span>
-              </div>
-              <div class="level-box ask-box">
-                <span class="level-label">卖一 (Ask)</span>
-                <span class="level-val-pair">
-                  <strong class="level-price-sm" id="down-ask-px">--</strong>
-                  <small class="level-size-tag" id="down-ask-sz">-- 股</small>
-                </span>
-              </div>
-            </div>
-            <div class="quote-depth-row">
-              <div class="level-bar-wrap" aria-hidden="true">
-                <div class="level-bar-fill down-bar" id="down-prob-bar" style="width: 50%"></div>
-              </div>
-              <small class="level-status" id="down-book-status">--</small>
-            </div>
-          </div>
-        </section>
       </div>
-
-      <!-- Live Order Queue & Execution Feed -->
-      <section class="panel section-panel orders-workspace">
-        <div class="section-head">
-          <div class="section-title-group">
-            <h2>本轮在途挂单与撮合流水</h2>
-            <p class="section-subtitle">实时展示 FIFO 撮合队列排队进度与本窗口内全部报单、撤单及成交动作</p>
-          </div>
-          <div class="workspace-head-actions">
-            <span class="order-pill" id="working-order-pill">当前无在途排队挂单</span>
-            <span class="badge-pill" id="live-action-count">0 笔动作</span>
-          </div>
-        </div>
-
-        <div id="live-working-orders-box" class="working-orders-box" hidden></div>
-
-        <ol class="action-feed" id="live-action-feed">
-          <li class="action-empty">等待撮合引擎输出...</li>
-        </ol>
-      </section>
     </section>
 
     <!-- ====================================================================
@@ -609,17 +667,19 @@
        ROUND DETAIL REVIEW MODAL (5分钟轮次全景复盘弹窗)
        ====================================================================== -->
   <div id="round-detail-modal" class="modal-backdrop" hidden>
-    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-round-title">
-      <div class="modal-header">
+    <div class="modal-dialog modal-dialog-review" role="dialog" aria-modal="true" aria-labelledby="modal-round-title">
+      <div class="modal-header modal-review-header">
         <div class="modal-header-left">
           <h2 class="modal-title" id="modal-round-title">5 分钟轮次复盘详情</h2>
           <span class="winner-pill pending" id="modal-round-winner">--</span>
         </div>
-        <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
-          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
-        </button>
+        <div class="modal-header-right">
+          <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+          </button>
+        </div>
       </div>
-      <div class="modal-body" id="modal-round-body">
+      <div class="modal-body modal-review-body" id="modal-round-body">
         <div class="action-empty">正在加载 5 分钟微观行情与交易复盘数据...</div>
       </div>
     </div>
@@ -785,6 +845,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.32"></script>
+  <script src="/static/app.js?v=3.2.43"></script>
 </body>
 </html>

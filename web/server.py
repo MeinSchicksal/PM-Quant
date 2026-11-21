@@ -38,8 +38,10 @@ def _num(value, default=0.0):
 def _clean_action(raw):
     """Keep all fields needed to explain what the robot actually did and market context."""
     action = raw.get("action", "fill")
-    if action not in ("quote", "fill", "cancel"):
+    if action not in ("quote", "fill", "cancel", "taker_reject", "taker_partial"):
         action = "fill"
+    if action in ("fill", "taker_partial") and (_num(raw.get("price")) <= 0 or _num(raw.get("size")) <= 0):
+        action = "taker_reject"
     return {
         "t": _num(raw.get("t")),
         "action": action,
@@ -320,8 +322,8 @@ class QuantHandler(BaseHTTPRequestHandler):
                     closest_d = min(decisions, key=lambda d: abs(_num(d.get("t")) - t_val), default=None)
                     if closest_d and abs(_num(closest_d.get("t")) - t_val) < 2.0:
                         item["reason"] = closest_d.get("reason", "")
-                # Match closest fill for micro prices
-                if (item.get("poly_up") is None or item.get("spot_price") is None) and fills:
+                # Match closest fill for micro prices (only for actual executed fills)
+                if item.get("action") in ("fill", "taker_partial") and (item.get("poly_up") is None or item.get("spot_price") is None) and fills:
                     closest_f = min(fills, key=lambda f: abs(_num(f.get("t")) - t_val), default=None)
                     if closest_f and abs(_num(closest_f.get("t")) - t_val) < 2.0:
                         for k in ("poly_up", "poly_down", "spot_price", "tau_s"):

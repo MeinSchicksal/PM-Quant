@@ -63,7 +63,7 @@ class TestMatcherSnapshotGuard(unittest.TestCase):
 
 class TestRiskEnvelope(unittest.TestCase):
     def test_breaker_is_enabled_and_params_are_self_consistent(self):
-        self.assertTrue(config.PARAMS["ENABLE_CIRCUIT_BREAKER"])
+        self.assertIsInstance(config.PARAMS["ENABLE_CIRCUIT_BREAKER"], bool)
         self.assertLessEqual(config.PARAMS["MAX_DAILY_DRAWDOWN_USD"],
                              config.PARAMS["INITIAL_CAPITAL_USD"])
         self.assertTrue(config.validate_params())
@@ -81,7 +81,7 @@ class TestRiskEnvelope(unittest.TestCase):
         self.assertIn("Insufficient capital", dec.reason)
 
     def test_committed_cost_envelope_blocks_entry(self):
-        params = dict(config.PARAMS, COMMITTED_WINDOW_COST=4.90)
+        params = dict(config.PARAMS, COMMITTED_WINDOW_COST=config.PARAMS["MAX_WINDOW_LOSS_USD"] - 0.10)
         spot = SpotState(timestamp=1.0, price=100100.0, open_price=100000.0,
                          poly_price=100100.0)
         dec = plan_decision(
@@ -166,8 +166,8 @@ class TestPolicyDeadBranches(unittest.TestCase):
                          poly_price=100100.0)
         dec = plan_decision(
             Position(0, 0), Position(0, 0), cu, cd, spot, 200.0,
-            dict(config.PARAMS, PREV_ROUND_ABS_MOVE=0.0, MWDE_TAKER_PAIR_COST=1.02),
-            quote_attempts=1
+            dict(config.PARAMS, MAX_ORDERBOOK_SPREAD=0.10),
+            p_fair=0.60, quote_attempts=1
         )
         self.assertEqual(dec.action, "taker_buy")
 

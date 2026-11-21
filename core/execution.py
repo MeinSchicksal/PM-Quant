@@ -85,7 +85,7 @@ def plan_order_actions(
                     o.cancel_reason = "急剧变盘/紧急避险撤单"
                     to_cancel.append(o)
                     continue
-                if preferred_side is not None and o.side != preferred_side:
+                if o.purpose != "hedge" and preferred_side is not None and o.side != preferred_side:
                     o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
                     to_cancel.append(o)
                     continue
