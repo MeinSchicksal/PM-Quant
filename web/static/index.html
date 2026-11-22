@@ -2,10 +2,12 @@
 <html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.43">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.48">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -19,7 +21,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v2.6</span>
+      <span class="brand-version" id="page-version">v2.8</span>
     </div>
 
     <div class="sidebar-top">
@@ -60,21 +62,31 @@
       </div>
       <div class="conn-card">
         <div class="conn-head">
-          <div class="status-pill status-ready" id="conn-pill" title="数据源通信状态">
+          <div class="status-pill status-ready" id="conn-pill" title="本地看板与交易管道状态">
             <span class="status-dot"></span>
             <span id="conn-text">服务在线</span>
           </div>
-          <span class="telemetry-badge" id="net-count">数据源正常</span>
+          <span class="telemetry-badge" id="net-count">检测中</span>
         </div>
         <div class="conn-row">
-          <span class="source-dot"></span>
+          <span class="source-dot" id="dot-spot"></span>
+          <span class="conn-name">Binance 现货</span>
+          <strong class="source-metric-val" id="src-spot-val">--</strong>
+        </div>
+        <div class="conn-row">
+          <span class="source-dot" id="dot-book"></span>
           <span class="conn-name">Polymarket 盘口</span>
-          <strong class="source-metric-val" id="src-poly-lat">-- ms</strong>
+          <strong class="source-metric-val" id="src-book-val">--</strong>
         </div>
         <div class="conn-row">
-          <span class="source-dot"></span>
+          <span class="source-dot" id="dot-trades"></span>
+          <span class="conn-name">Polymarket 成交</span>
+          <strong class="source-metric-val" id="src-trades-val">--</strong>
+        </div>
+        <div class="conn-row">
+          <span class="source-dot" id="dot-chainlink"></span>
           <span class="conn-name">Chainlink 预言机</span>
-          <strong class="source-metric-val" id="src-binance-lat">-- ms</strong>
+          <strong class="source-metric-val" id="src-chainlink-val">--</strong>
         </div>
 
         <div class="conn-subhead">网络遥测</div>
@@ -89,6 +101,20 @@
         <div class="conn-row">
           <span class="conn-name">累计</span>
           <strong class="source-metric-val" id="side-net-total">0.0 MB</strong>
+        </div>
+
+        <div class="conn-subhead">服务器与存储</div>
+        <div class="conn-row">
+          <span class="conn-name">内存</span>
+          <strong class="source-metric-val" id="side-sys-ram">--</strong>
+        </div>
+        <div class="conn-row">
+          <span class="conn-name">磁盘</span>
+          <strong class="source-metric-val" id="side-sys-disk">--</strong>
+        </div>
+        <div class="conn-row conn-row-clickable" id="side-storage-row" title="点击查看数据占用与清理设置">
+          <span class="conn-name">数据</span>
+          <strong class="source-metric-val" id="side-sys-data">--</strong>
         </div>
       </div>
     </div>
@@ -112,6 +138,12 @@
         </div>
 
         <div class="control-tray">
+          <button id="settings-btn" class="icon-btn" type="button" aria-label="系统设置与数据占用" title="系统设置与数据占用">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+            </svg>
+          </button>
           <button id="theme-btn" class="icon-btn" type="button" aria-label="切换明暗主题" title="切换明暗主题 (快捷键 T)">
             <svg class="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="4"/>
@@ -187,12 +219,29 @@
         </div>
       </section>
 
+      <!-- Row 1b: Compact Server & Storage Health Strip (all resolutions; click to open settings) -->
+      <section class="panel server-health-strip" id="server-health-strip" role="button" tabindex="0" aria-label="服务器运行与存储状态，点击查看设置">
+        <div class="sh-left">
+          <span class="sh-dot" id="sh-dot"></span>
+          <strong id="sh-proc">服务器状态检测中</strong>
+          <span class="sh-sep">·</span>
+          <span id="sh-feeds">数据源 --</span>
+        </div>
+        <div class="sh-metrics">
+          <span class="sh-chip" id="sh-ram">内存 --</span>
+          <span class="sh-chip" id="sh-disk">磁盘 --</span>
+          <span class="sh-chip" id="sh-data">数据 --</span>
+          <span class="sh-action">存储设置 ›</span>
+        </div>
+      </section>
+
       <!-- Row 2: Golden-Ratio 2-Column Hero Grid (Left: Net PnL & Capital Scorecard | Right: Wide Equity Curve) -->
       <div class="overview-hero-grid">
         <!-- Card 1: Net PnL & Capital Structure -->
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益">
           <div class="card-head">
             <h2>累计已结算净收益</h2>
+            <span class="today-pnl-pill" id="hero-today-pill" title="按北京时间 (UTC+8) 统计今日已结算收益">今日 --</span>
           </div>
 
           <div class="pnl-primary-block">
@@ -842,9 +891,72 @@
     </div>
   </div>
 
+  <!-- ======================================================================
+       SYSTEM & STORAGE SETTINGS MODAL (系统设置与数据占用情况)
+       ====================================================================== -->
+  <div id="settings-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="settings-modal-title">系统设置与数据占用</h2>
+          <span class="badge-pill" id="settings-guard-badge">磁盘安全</span>
+        </div>
+        <button type="button" class="modal-close-btn" id="settings-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body settings-modal-body" id="settings-modal-body">
+        <div class="settings-section">
+          <div class="settings-section-head">
+            <h3>服务器磁盘与内存水位</h3>
+            <span class="settings-sub" id="settings-host-meta">检测中...</span>
+          </div>
+          <div class="settings-bars">
+            <div class="settings-bar-row">
+              <div class="settings-bar-top"><span>系统磁盘容量</span><strong id="set-disk-val">--</strong></div>
+              <div class="settings-track"><div class="settings-fill" id="set-disk-bar" style="width:0%"></div></div>
+            </div>
+            <div class="settings-bar-row">
+              <div class="settings-bar-top"><span>数据目录配额 (data/)</span><strong id="set-quota-val">--</strong></div>
+              <div class="settings-track"><div class="settings-fill" id="set-quota-bar" style="width:0%"></div></div>
+            </div>
+            <div class="settings-bar-row">
+              <div class="settings-bar-top"><span>系统内存 (RAM)</span><strong id="set-ram-val">--</strong></div>
+              <div class="settings-track"><div class="settings-fill" id="set-ram-bar" style="width:0%"></div></div>
+            </div>
+          </div>
+          <div class="settings-alert" id="settings-guard-alert" hidden></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
+            <h3>当前数据分类占用</h3>
+            <span class="settings-sub" id="settings-total-files">--</span>
+          </div>
+          <div class="settings-storage-grid" id="settings-storage-grid">
+            <div class="storage-item"><span>加载中...</span><strong>--</strong></div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
+            <h3>自动防写满与保留策略</h3>
+            <span class="settings-sub">summary.jsonl 永久保留</span>
+          </div>
+          <div class="settings-policy-list" id="settings-policy-list"></div>
+          <div class="settings-actions">
+            <button type="button" class="settings-btn-secondary" id="settings-refresh-btn">刷新占用统计</button>
+            <button type="button" class="settings-btn-primary" id="settings-cleanup-btn">立即清理过期数据</button>
+          </div>
+          <div class="settings-feedback" id="settings-cleanup-msg"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.43"></script>
+  <script src="/static/app.js?v=3.2.47"></script>
 </body>
 </html>

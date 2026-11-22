@@ -22,6 +22,25 @@ def _wait(reason: str, urgent: bool = False) -> Decision:
     return Decision(action="wait", reason=reason, urgent_cancel=urgent)
 
 
+def _has_heavy_ask_wall(book: OrderBook, params: Dict[str, float]) -> bool:
+    """Detect overwhelming ask-side selling pressure on top-5 book depth.
+
+    Prevents posting a passive Maker bid directly in front of a massive selling
+    wall (ask_d5 >= 200 shares AND ask_d5 / bid_d5 >= 4.0).
+    """
+    max_imbalance = float(params.get("MAKER_MAX_ASK_IMBALANCE", 4.0))
+    min_wall = float(params.get("MAKER_MIN_WALL_SHARES", 200.0))
+    if max_imbalance <= 0 or min_wall <= 0:
+        return False
+    bids = getattr(book, "bids", None) or []
+    asks = getattr(book, "asks", None) or []
+    if not bids or not asks:
+        return False
+    bid_d5 = sum(float(sz) for _, sz in bids[:5])
+    ask_d5 = sum(float(sz) for _, sz in asks[:5])
+    return ask_d5 >= min_wall and (ask_d5 / max(1.0, bid_d5)) >= max_imbalance
+
+
 def _compute_p_fair(spot: SpotState, tau_s: float, params: Dict[str, float]) -> float:
     """Compute Asian 60s-TWAP settlement probability P*(Up) with empirical vol floor."""
     vol_floor = float(params.get("MIN_MODEL_VOL_BPS", 14.0))
@@ -127,9 +146,13 @@ def _plan_inventory_management(
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
     anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
     vel_bps = abs(float(getattr(spot, "velocity_bps", 0.0) or 0.0))
+    max_entry_vol = float(params.get("MAX_ENTRY_VOL_BPS", 75.0))
+    live_vol = float(getattr(spot, "realized_vol_bps", 15.0) or 15.0)
+    is_storm_vol = max_entry_vol > 0 and live_vol > max_entry_vol
     is_toxic_or_stale = (
         bool(getattr(spot, "is_toxic_shock", False))
         or vel_bps >= anti_toxic_bps
+        or is_storm_vol
         or bool(getattr(spot, "is_stale", False))
     )
 
@@ -161,18 +184,20 @@ def _plan_inventory_management(
         max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
 
         if books_ok:
-            # 1) Confirmed Pyramid Add on winning unhedged Leg-1 (check gross side shares, never net gap)
+            # 1) Confirmed Pyramid Add on winning unhedged Leg-1 (Taker-only by default in v2.8)
+            pyr_min_tau = float(params.get("PYRAMID_MIN_TAU_S", 45.0))
+            pyr_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
             if (
                 bool(params.get("ENABLE_PYRAMID_ADD", False))
                 and opp_shares < 1e-4
                 and held_total_shares < max_shares_cap - 1e-4
-                and tau_s <= float(params.get("PYRAMID_MAX_TAU_S", 180.0))
-                and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.65))
+                and pyr_min_tau <= tau_s <= float(params.get("PYRAMID_MAX_TAU_S", 180.0))
+                and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.70))
                 and held_book.spread <= max_book_spread + 1e-6
             ):
                 p_min_px = float(params.get("PYRAMID_MIN_PRICE", 0.35))
                 p_max_px = float(params.get("PYRAMID_MAX_PRICE", 0.72))
-                p_tk_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", 0.09))
+                p_tk_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", 0.065))
                 p_mk_edge = float(params.get("PYRAMID_MIN_MAKER_EDGE", 0.06))
                 if available_cap >= lot_size * p_max_px and committed + lot_size * p_max_px <= window_budget + 1e-9:
                     ask = held_book.best_ask
@@ -186,11 +211,17 @@ def _plan_inventory_management(
                                 price=ask,
                                 size=lot_size,
                                 utility=round(tk_edge, 4),
-                                reason=f"v2.6 顺势确认加仓 IOC: {held_side} ask=${ask:.2f} (P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
+                                reason=f"v2.8 顺势确认加仓 IOC: {held_side} ask=${ask:.2f} (P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
                             )
                     bid = held_book.best_bid
                     mk_cap = min(p_max_px, 0.70)
-                    if quote_attempts < max_quote_attempts and bid is not None and p_min_px <= bid <= mk_cap:
+                    if (
+                        pyr_allow_maker
+                        and not _has_heavy_ask_wall(held_book, params)
+                        and quote_attempts < max_quote_attempts
+                        and bid is not None
+                        and p_min_px <= bid <= mk_cap
+                    ):
                         mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= mk_cap) else round(bid, 2)
                         mk_edge = p_fair_held - mk_px
                         if mk_px <= mk_cap and mk_edge >= p_mk_edge:
@@ -200,7 +231,7 @@ def _plan_inventory_management(
                                 price=mk_px,
                                 size=lot_size,
                                 utility=round(mk_edge, 4),
-                                reason=f"v2.6 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
+                                reason=f"v2.8 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
                             )
 
             # 2) Independent Opposite-Side Flip when Leg-1 collapsed
@@ -214,7 +245,7 @@ def _plan_inventory_management(
             ):
                 f_min_px = float(params.get("ENTRY_MIN_PRICE", 0.20))
                 f_max_px = float(params.get("ENTRY_MAX_PRICE", 0.75))
-                f_tk_edge = float(params.get("FLIP_MIN_TAKER_EDGE", 0.09))
+                f_tk_edge = float(params.get("FLIP_MIN_TAKER_EDGE", 0.065))
                 f_mk_edge = float(params.get("FLIP_MIN_MAKER_EDGE", 0.06))
                 if available_cap >= lot_size * f_max_px and committed + lot_size * f_max_px <= window_budget + 1e-9:
                     ask = opp_book.best_ask
@@ -228,10 +259,15 @@ def _plan_inventory_management(
                                 price=ask,
                                 size=lot_size,
                                 utility=round(tk_edge, 4),
-                                reason=f"v2.6 坍塌反手吃单 IOC: {opp_side} ask=${ask:.2f} (P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
+                                reason=f"v2.8 坍塌反手吃单 IOC: {opp_side} ask=${ask:.2f} (P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
                             )
                     bid = opp_book.best_bid
-                    if quote_attempts < max_quote_attempts and bid is not None and f_min_px <= bid <= f_max_px:
+                    if (
+                        not _has_heavy_ask_wall(opp_book, params)
+                        and quote_attempts < max_quote_attempts
+                        and bid is not None
+                        and f_min_px <= bid <= f_max_px
+                    ):
                         mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= f_max_px) else round(bid, 2)
                         mk_edge = p_opp - mk_px
                         if mk_edge >= f_mk_edge:
@@ -241,7 +277,7 @@ def _plan_inventory_management(
                                 price=mk_px,
                                 size=lot_size,
                                 utility=round(mk_edge, 4),
-                                reason=f"v2.6 坍塌反手挂单 Maker: {opp_side} bid=${mk_px:.2f} (P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
+                                reason=f"v2.8 坍塌反手挂单 Maker: {opp_side} bid=${mk_px:.2f} (P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
                             )
 
     should_pull = (
@@ -347,11 +383,15 @@ def plan_decision(
             urgent=True,
         )
 
-    # 6. Anti-Toxicity Guard: cancel resting quotes on rapid Binance shock
+    # 6. Anti-Toxicity & Extreme Volatility Storm Guard
     anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
     vel_bps = abs(float(getattr(spot, "velocity_bps", 0.0) or 0.0))
     if getattr(spot, "is_toxic_shock", False) or vel_bps >= anti_toxic_bps:
-        return _wait(f"v2.3: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
+        return _wait(f"v2.8: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
+    max_entry_vol = float(params.get("MAX_ENTRY_VOL_BPS", 75.0))
+    live_vol = float(getattr(spot, "realized_vol_bps", 15.0) or 15.0)
+    if max_entry_vol > 0 and live_vol > max_entry_vol:
+        return _wait(f"v2.8: 极端巨震风暴避险 (5m波动率 {live_vol:.1f} > {max_entry_vol:.0f} bps)", urgent=True)
 
     # 7. Active Time Window & Readiness Guards
     max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 240.0)))
@@ -387,6 +427,7 @@ def plan_decision(
 
     best_taker = None
     best_maker = None
+    wall_blocked_msg = None
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
         if p_side < min_prob or tb.spread > max_book_spread + 1e-6:
@@ -400,12 +441,19 @@ def plan_decision(
                 best_taker = (taker_edge, side, ask, fee)
 
         bid = tb.best_bid
-        if quote_attempts < max_quote_attempts and bid is not None and min_entry_px <= bid <= max_entry_px:
+        if (
+            quote_attempts < max_quote_attempts
+            and bid is not None
+            and min_entry_px <= bid <= max_entry_px
+        ):
             maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
             maker_px = min(max_entry_px, max(min_entry_px, maker_px))
             maker_edge = p_side - maker_px
-            if maker_edge >= min_maker_edge and (best_maker is None or maker_edge > best_maker[0]):
-                best_maker = (maker_edge, side, maker_px, p_side)
+            if maker_edge >= min_maker_edge:
+                if _has_heavy_ask_wall(tb, params):
+                    wall_blocked_msg = f"v2.8: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
+                elif best_maker is None or maker_edge > best_maker[0]:
+                    best_maker = (maker_edge, side, maker_px, p_side)
 
     if best_taker is not None:
         edge, side, ask, fee = best_taker
@@ -416,7 +464,7 @@ def plan_decision(
             price=ask,
             size=size,
             utility=round(edge, 4),
-            reason=f"v2.3 净边际吃单 IOC: {side} ask=${ask:.2f} (P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            reason=f"v2.8 净边际吃单 IOC: {side} ask=${ask:.2f} (P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
         )
 
     if best_maker is not None:
@@ -427,10 +475,13 @@ def plan_decision(
             price=maker_px,
             size=size,
             utility=round(edge, 4),
-            reason=f"v2.3 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
+            reason=f"v2.8 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
         )
 
+    if wall_blocked_msg:
+        return _wait(wall_blocked_msg, urgent=False)
+
     return _wait(
-        f"v2.3: 盘口无足够净边际 (P*(Up)={p_up:.2f}, Up={bu}/{au}, Dn={bd}/{ad})",
+        f"v2.8: 盘口无足够净边际 (P*(Up)={p_up:.2f}, Up={bu}/{au}, Dn={bd}/{ad})",
         urgent=False,
     )

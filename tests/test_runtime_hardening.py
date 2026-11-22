@@ -528,6 +528,237 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         _, act = plan_order_actions([], bad_quote, now=1200.0, min_order_shares=5.0)
         self.assertIsNone(act)
 
+    def test_v27_uncapped_high_vol_and_fat_tail_student_t5_pricing(self):
+        from core.estimator import calculate_dynamic_realized_vol, normal_cdf, student_t5_cdf, estimate_p_fair
+
+        # 1. Real liquidation cascade (> 80 bps/5m) must NOT be artificially clamped at 80 bps
+        hist = [(1000.0 + i, 60000.0 * ((1.0 - 0.0012) if i % 2 else (1.0 + 0.0012))) for i in range(60)]
+        vol = calculate_dynamic_realized_vol(hist, baseline_vol_bps=14.0, half_life_s=20.0)
+        self.assertGreater(vol, 100.0, "High realized volatility must not be clamped at 80 bps")
+
+        # 2. Student-t5 fat-tail CDF is strictly more conservative than Gaussian at high z-scores
+        self.assertLess(student_t5_cdf(1.5), normal_cdf(1.5))
+        self.assertLess(student_t5_cdf(2.5), normal_cdf(2.5))
+
+        # 3. Cross-chain basis inversion guard: when BOTH Binance spot > BinOpen AND Chainlink TWAP > Open,
+        # an inflated basis_ema must NOT flip estimate_p_fair to bearish (< 0.50)
+        spot = SpotState(
+            timestamp=1230.0,
+            price=58959.51,
+            open_price=58825.48,
+            binance_open_price=58938.01,
+            basis_ema=142.18,
+            realized_vol_bps=25.0,
+        )
+        p_up = estimate_p_fair(spot, open_px=58825.48, tau_s=70.0, vol_bps=25.0, poly_price=58832.82)
+        self.assertGreaterEqual(p_up, 0.50, "Must not hallucinate Down when both Binance and Chainlink are above open")
+
+    def test_v28_pyramid_is_taker_only_and_requires_high_prob_and_tau(self):
+        import config
+        from core.policy import plan_decision
+
+        pos_up = Position(shares=5.0, cash=2.80)  # avg 0.56
+        pos_dn = Position(0.0, 0.0)
+        b_dn_tight = _book(0.32, 50.0, 0.34, 50.0)
+        b_dn_cheap = _book(0.43, 50.0, 0.45, 50.0)
+        spot = SpotState(timestamp=1200.0, price=65060.0, open_price=65000.0, realized_vol_bps=18.0)
+        params = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=30.0)
+
+        # A: Taker edge insufficient (0.72 - 0.68 - fee < 0.065) -> must NOT hang passive Maker pyramid bid
+        b_up_tight = _book(0.66, 50.0, 0.68, 50.0)
+        dec_a = plan_decision(pos_up, pos_dn, b_up_tight, b_dn_tight, spot, tau_s=80.0, params=params, p_fair=0.72, entries_count=1)
+        self.assertEqual(dec_a.action, "wait")
+
+        # B: Probability below 0.70 (0.68) -> blocked even with wide edge
+        b_up_cheap = _book(0.55, 50.0, 0.57, 50.0)
+        dec_b = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=80.0, params=params, p_fair=0.68, entries_count=1)
+        self.assertEqual(dec_b.action, "wait")
+
+        # C: tau < 45s -> blocked from pyramiding near expiry
+        dec_c = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=35.0, params=params, p_fair=0.74, entries_count=1)
+        self.assertEqual(dec_c.action, "wait")
+
+        # D: p_fair >= 0.70, tau >= 45s, Taker edge >= 0.065 -> executes Taker pyramid add
+        dec_d = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=80.0, params=params, p_fair=0.74, entries_count=1)
+        self.assertEqual(dec_d.action, "taker_buy")
+        self.assertEqual(dec_d.side, "Up")
+        self.assertIn("顺势确认加仓", dec_d.reason)
+
+    def test_v28_heavy_ask_wall_blocks_maker_but_allows_taker(self):
+        import config
+        from core.policy import plan_decision
+
+        pos_empty = Position(0.0, 0.0)
+        # Thin bid (20 sh) vs heavy ask wall (300 sh -> ratio 15x >= 4.0 and ask_d5 >= 200)
+        b_up_wall = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 300.0)], source_t=1200.0, received_at=1200.0)
+        b_dn = _book(0.49, 50.0, 0.51, 50.0)
+        spot = SpotState(timestamp=1200.0, price=65030.0, open_price=65000.0, realized_vol_bps=16.0)
+
+        # Edge enough for Maker (0.56 - 0.49 = 0.07) but not Taker (0.56 - 0.50 - 0.0156 = 0.044 < 0.065)
+        dec_mk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.56)
+        self.assertEqual(dec_mk.action, "wait")
+        self.assertIn("卖墙压盘", dec_mk.reason)
+
+        # Stronger edge (0.60 - 0.50 - 0.0156 = 0.0844 >= 0.065) still sweeps via Taker
+        dec_tk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.60)
+        self.assertEqual(dec_tk.action, "taker_buy")
+        self.assertEqual(dec_tk.side, "Up")
+
+    def test_v28_extreme_vol_storm_pauses_entries_but_allows_blackswan_lock(self):
+        import config
+        from core.policy import plan_decision
+
+        spot_storm = SpotState(timestamp=1200.0, price=65200.0, open_price=65000.0, realized_vol_bps=95.0)
+        b_up = _book(0.54, 50.0, 0.56, 50.0)
+        b_dn = _book(0.43, 50.0, 0.45, 50.0)
+
+        # New entry must pause during extreme volatility storm (> 75 bps/5m)
+        dec_new = plan_decision(
+            Position(0.0, 0.0), Position(0.0, 0.0), b_up, b_dn, spot_storm,
+            tau_s=120.0, params=config.PARAMS, p_fair=0.72,
+        )
+        self.assertEqual(dec_new.action, "wait")
+        self.assertIn("极端巨震风暴避险", dec_new.reason)
+
+        # Existing inventory still gets Black-Swan Lock protection during storm
+        b_dn_cheap = _book(0.04, 50.0, 0.05, 50.0)
+        b_up_high = _book(0.94, 50.0, 0.96, 50.0)
+        dec_lock = plan_decision(
+            Position(shares=5.0, cash=2.90), Position(0.0, 0.0), b_up_high, b_dn_cheap, spot_storm,
+            tau_s=120.0, params=config.PARAMS, p_fair=0.90, entries_count=1,
+        )
+        self.assertEqual(dec_lock.action, "taker_hedge")
+        self.assertEqual(dec_lock.side, "Down")
+
+    def test_v28_ws_event_driven_wake_event_and_exception_filter(self):
+        import asyncio
+        import threading
+        from runtime.ws_feeds import (
+            BinanceSpotWSClient,
+            PolymarketBookWSClient,
+            _install_ws_loop_exception_filter,
+        )
+
+        ev = threading.Event()
+        spot_ws = BinanceSpotWSClient(wake_event=ev, wake_delta_usd=1.0)
+        spot_ws.apply_message({"b": "60000.0", "a": "60000.0"}, now=1000.0)
+        self.assertTrue(ev.is_set(), "Initial spot price should trigger wake_event")
+
+        ev.clear()
+        spot_ws.apply_message({"b": "60000.3", "a": "60000.3"}, now=1000.1)
+        self.assertFalse(ev.is_set(), "Sub-$1 spot jitter should not wake loop")
+
+        spot_ws.apply_message({"b": "60001.5", "a": "60001.5"}, now=1000.2)
+        self.assertTrue(ev.is_set(), ">=$1 spot move should wake loop immediately")
+
+        ev.clear()
+        book_ws = PolymarketBookWSClient(wake_event=ev)
+        tok = "tok_wake"
+        book_ws.apply_message([{
+            "event_type": "book", "asset_id": tok,
+            "bids": [{"price": "0.49", "size": "50"}],
+            "asks": [{"price": "0.51", "size": "50"}],
+        }], now=1000.0)
+        self.assertTrue(ev.is_set(), "Book snapshot should wake loop")
+
+        ev.clear()
+        # Deep-level update (0.40 bid) does not change top-of-book -> no wake
+        book_ws.apply_message({
+            "event_type": "price_change",
+            "price_changes": [{"asset_id": tok, "price": "0.40", "size": "100", "side": "BUY"}],
+        }, now=1000.1)
+        self.assertFalse(ev.is_set(), "Deep-level book update should not wake loop")
+
+        # Top-of-book update (0.50 ask) -> wakes loop immediately
+        book_ws.apply_message({
+            "event_type": "price_change",
+            "price_changes": [{"asset_id": tok, "price": "0.50", "size": "30", "side": "SELL"}],
+        }, now=1000.2)
+        self.assertTrue(ev.is_set(), "Top-of-book price change should wake loop immediately")
+
+        # Exception filter suppresses websockets 15.x recv_messages AttributeError only
+        loop = asyncio.new_event_loop()
+        try:
+            seen = []
+            loop.default_exception_handler = lambda ctx: seen.append(ctx)
+            _install_ws_loop_exception_filter(loop)
+            loop.call_exception_handler({
+                "message": "Exception in callback Connection.connection_lost()",
+                "exception": AttributeError("'ClientConnection' object has no attribute 'recv_messages'"),
+            })
+            self.assertEqual(len(seen), 0, "recv_messages AttributeError must be silently suppressed")
+            loop.call_exception_handler({
+                "message": "real error",
+                "exception": RuntimeError("boom"),
+            })
+            self.assertEqual(len(seen), 1, "Unrelated exceptions must still reach default handler")
+        finally:
+            loop.close()
+
+    def test_runtime_hardening_patches_timeout_atomic_retry_quickedit_and_reprobe(self):
+        import types
+        import tempfile
+        import shutil
+        from pathlib import Path
+        from unittest.mock import patch
+        import main as pm_main
+        from web.server import QuantHandler, _HardenedHTTPServer
+        from runtime.market_feed import MarketFeed
+
+        # 1. Slowloris / port-scanner request timeout guard
+        self.assertEqual(getattr(QuantHandler, "timeout", None), 10)
+        self.assertGreaterEqual(_HardenedHTTPServer.request_queue_size, 16)
+
+        # 2. _atomic_replace retries transient Windows PermissionError cleanly
+        tmp = Path(tempfile.mkdtemp(prefix="pm_atom_"))
+        try:
+            src = tmp / "a.tmp"
+            dst = tmp / "a.jsonl"
+            src.write_text("ok", encoding="utf-8")
+            calls = {"n": 0}
+            orig_replace = Path.replace
+
+            def flaky_replace(self_p, target_p):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise PermissionError("simulated reader lock")
+                return orig_replace(self_p, target_p)
+
+            with patch.object(Path, "replace", flaky_replace):
+                PaperRunner._atomic_replace(src, dst, retries=5)
+            self.assertEqual(calls["n"], 3)
+            self.assertEqual(dst.read_text(encoding="utf-8"), "ok")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # 3. Windows QuickEdit helper never raises even in headless/redirected test runner
+        pm_main._disable_windows_quick_edit()
+
+        # 4. MarketFeed.reprobe_connectivity syncs worker session + all 3 WS clients on route flip
+        with patch.object(MarketFeed, "_test_connectivity", return_value=None):
+            feed = MarketFeed(proxy="http://127.0.0.1:7897")
+        try:
+            feed.session.proxies = {}
+            w_sess = feed._get_worker_session()
+            self.assertEqual(w_sess.proxies, {})
+            ws_s = types.SimpleNamespace(proxy=None)
+            ws_b = types.SimpleNamespace(proxy=None)
+            ws_t = types.SimpleNamespace(proxy=None)
+            feed.attach_ws_clients(spot_ws=ws_s, book_ws=ws_b, trade_ws=ws_t)
+
+            def _flip_to_proxy():
+                feed.session.proxies = {"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"}
+
+            with patch.object(feed, "_test_connectivity", side_effect=_flip_to_proxy):
+                changed = feed.reprobe_connectivity(now=1000.0)
+            self.assertTrue(changed)
+            self.assertEqual(feed._get_worker_session().proxies.get("https"), "http://127.0.0.1:7897")
+            self.assertEqual(ws_s.proxy, "http://127.0.0.1:7897")
+            self.assertEqual(ws_b.proxy, "http://127.0.0.1:7897")
+            self.assertEqual(ws_t.proxy, "http://127.0.0.1:7897")
+        finally:
+            feed.close()
+
 
 if __name__ == "__main__":
     unittest.main()

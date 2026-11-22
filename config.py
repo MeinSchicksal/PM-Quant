@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v2.5).
+"""PM-Quant Configuration & Single Source of Truth (v2.8).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -6,13 +6,13 @@ No version logic or branching should exist in downstream modules.
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.6"
+VERSION = "v2.8"
 BATCH_ID = VERSION
 
 # Root Directory
 ROOT = Path(__file__).resolve().parent
 
-# Core Physical & Economic Parameters (v2.6: WS Low-Latency + Pyramid Confirm + Reversal Flip + Black-Swan Lock)
+# Core Physical & Economic Parameters (v2.8: Event-Driven WS + Fat-Tail Student-t5 + Ask-Wall & Storm Guard)
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
@@ -32,7 +32,10 @@ PARAMS = {
     "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets
     "ENTRY_MAX_PRICE": 0.75,          # Avoid extreme negative-skew high-price bets
     "MIN_MAKER_EDGE": 0.05,           # Minimum modelled edge for zero-fee Maker bids (P* - maker_px >= 0.05)
-    "MIN_TAKER_EDGE": 0.09,           # Minimum net edge after fee for Taker IOC (P* - ask - fee >= 0.09)
+    "MIN_TAKER_EDGE": 0.065,          # Calibrated net edge after fee for Taker IOC under fat-tail Student-t(5)
+    "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
+    "MAKER_MIN_WALL_SHARES": 200.0,
+    "MAX_ENTRY_VOL_BPS": 75.0,        # Extreme liquidation cascade storm guard (pause new entries when 5m vol > 75 bps)
     "MAX_QUOTE_ATTEMPTS": 99,         # Unrestricted maker quote attempts per window (protected by 2.5s requote cooldown)
     "MIN_REQUOTE_AGE_S": 2.5,         # Minimum order age (s) before allowing price-chase requote
     "MAX_BID_RETREAT_CANCEL": 0.029,  # Cancel resting quote if market best_bid retreats >= 3 ticks ($0.03)
@@ -46,19 +49,21 @@ PARAMS = {
     "ENABLE_BLACKSWAN_LOCK": True,    # Lock risk-free profit when opp_ask <= $0.06 & pair_cost <= $0.85 (94%+ winners)
     "BLACKSWAN_LOCK_MAX_OPP_ASK": 0.06,
     "BLACKSWAN_LOCK_MAX_PAIR_COST": 0.85,
-    "ENABLE_PYRAMID_ADD": True,       # Add 2nd lot on confirmed winner (tau <= 180s, P* >= 0.65, px in [$0.35,$0.72])
+    "ENABLE_PYRAMID_ADD": True,       # Add 2nd lot on confirmed winner (Taker-only, P* >= 0.70, tau in [45s, 180s])
+    "PYRAMID_ALLOW_MAKER": False,     # Ban passive Maker pyramid bids to eliminate reversal knife-catching
     "SECONDARY_ENTRY_COOLDOWN_S": 15.0,  # Min seconds after Leg-1 fill before allowing pyramid add or reversal flip
     "PYRAMID_MAX_TAU_S": 180.0,
-    "PYRAMID_MIN_PROB": 0.65,
+    "PYRAMID_MIN_TAU_S": 45.0,
+    "PYRAMID_MIN_PROB": 0.70,
     "PYRAMID_MIN_PRICE": 0.35,
     "PYRAMID_MAX_PRICE": 0.72,
     "PYRAMID_MIN_MAKER_EDGE": 0.06,
-    "PYRAMID_MIN_TAKER_EDGE": 0.09,
+    "PYRAMID_MIN_TAKER_EDGE": 0.065,
     "ENABLE_REVERSAL_FLIP": True,     # Independent opposite-side entry when Leg-1 collapses (P* <= 0.30, P_opp >= 0.65)
     "FLIP_MAX_HELD_PROB": 0.30,
     "FLIP_MIN_OPP_PROB": 0.65,
     "FLIP_MIN_MAKER_EDGE": 0.06,
-    "FLIP_MIN_TAKER_EDGE": 0.09,
+    "FLIP_MIN_TAKER_EDGE": 0.065,
     "ALLOW_TAKER_UNWIND": True,       # Only extreme tail defensive salvage is allowed
     "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry when P* < 0.12
     "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
@@ -101,6 +106,20 @@ PARAMS = {
     "LWAA_MIN_PROB": 0.52,
     "LWAA_MIN_EDGE": 0.05,
     "LWAA_MAX_ENTRY_PRICE": 0.75,
+
+    # 7. Data Retention & Disk-Full Auto-Guard (summary.jsonl is NEVER deleted)
+    "RECORD_RAW_MARKET": True,          # Master toggle for raw data/1_market recording (auto-paused if disk critical)
+    "MARKET_RETENTION_DAYS": 3,         # Keep recent 3 days of raw data/1_market/{events,oracle,books,spot}
+    "WINDOW_REPLAY_RETENTION_DAYS": 7,  # Keep recent 7 days of windows/*.json.gz detail replays
+    "MIN_KEEP_REPLAY_FILES": 30,        # Under disk pressure, still try to keep at least 30 newest replay files
+    "RUNTIME_LOG_RETENTION_DAYS": 7,    # Keep recent 7 days of runtime logs
+    "CLEANUP_INTERVAL_S": 1800.0,       # Check disk capacity & run retention cleanup every 30 minutes
+    "DISK_SOFT_LIMIT_PCT": 75.0,        # Target disk usage % to stop pressure eviction
+    "DISK_HARD_LIMIT_PCT": 85.0,        # Trigger emergency oldest-first cleanup when disk usage >= 85%
+    "DISK_CRITICAL_PAUSE_PCT": 93.0,    # Pause raw 1_market writes if disk usage still >= 93% after cleanup
+    "MIN_FREE_DISK_GB": 3.0,            # Trigger emergency cleanup if free disk drops below 3.0 GB
+    "CRITICAL_FREE_DISK_GB": 0.8,       # Pause raw 1_market writes if free disk still < 0.8 GB after cleanup
+    "MAX_DATA_DIR_MB": 4096.0,          # Rolling quota cap (4 GB) for the entire data/ directory
 }
 
 

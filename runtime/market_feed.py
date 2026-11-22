@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import OrderBook, SpotState
 from core.estimator import calculate_dual_horizon_vol, calculate_adaptive_spread_params
+from runtime.retention import is_raw_recording_allowed
 
 
 class MarketFeed:
@@ -38,11 +39,17 @@ class MarketFeed:
 
         # Configure proxy fallback
         self.proxy = proxy if proxy is not None else os.environ.get("PM_PROXY", "http://127.0.0.1:7897")
+        self._proxy_gen = 0
+        self._consecutive_spot_fails = 0
+        self._last_reprobe_t = 0.0
+        self._reprobe_lock = threading.Lock()
         self._test_connectivity()
 
         self.slug_cache = {}
-        # 30-minute rolling spot buffer (~3600 ticks at 0.5s cadence) for dual-horizon volatility
-        self.spot_history = deque(maxlen=3600)
+        # 30-minute rolling spot buffer (~18000 ticks at up to 10 Hz event-driven cadence)
+        self.spot_history = deque(maxlen=18000)
+        self._last_spot_rec_t = 0.0
+        self._last_spot_rec_px = 0.0
         self._last_binance_px = 0.0
         self._last_binance_t = 0.0
         self._last_spot_source = "binance_vision"
@@ -61,11 +68,13 @@ class MarketFeed:
         self._poly_session = None
         self._spot_ws = None
         self._book_ws = None
+        self._trade_ws = None
 
         # Real-time network speed, latency, and traffic accounting
         self.net_stats = {
             "poly_latency_ms": 0.0,
             "binance_latency_ms": 0.0,
+            "chainlink_latency_ms": 0.0,
             "downstream_kbps": 0.0,
             "total_bytes": 0,
             "bytes_window": 0,
@@ -80,10 +89,12 @@ class MarketFeed:
         if lock is not None:
             lock.acquire()
         try:
-            if source == "poly":
+            if source == "poly" and lat_ms > 0:
                 self.net_stats["poly_latency_ms"] = round(lat_ms, 1)
-            elif source == "binance":
+            elif source == "binance" and lat_ms > 0:
                 self.net_stats["binance_latency_ms"] = round(lat_ms, 1)
+            elif source == "chainlink" and lat_ms > 0:
+                self.net_stats["chainlink_latency_ms"] = round(lat_ms, 1)
 
             self.net_stats["total_bytes"] += byte_count
             self.net_stats["bytes_window"] += byte_count
@@ -103,10 +114,16 @@ class MarketFeed:
     def get_net_summary(self) -> dict:
         poly_lat = self.net_stats.get("poly_latency_ms", 0.0)
         binance_lat = self.net_stats.get("binance_latency_ms", 0.0)
-        avg_lat = round((poly_lat + binance_lat) / 2.0, 1) if (poly_lat and binance_lat) else (poly_lat or binance_lat)
+        cl_lat = self.net_stats.get("chainlink_latency_ms", 0.0)
+        cl_ts = getattr(self, "_last_poly_btc_t", 0.0)
+        cl_age = round(max(0.0, time.time() - cl_ts), 1) if cl_ts > 0 else None
+        valid_lats = [x for x in (poly_lat, binance_lat, cl_lat) if x and x > 0]
+        avg_lat = round(sum(valid_lats) / len(valid_lats), 1) if valid_lats else 0.0
         return {
             "poly_latency_ms": poly_lat,
             "binance_latency_ms": binance_lat,
+            "chainlink_latency_ms": cl_lat,
+            "chainlink_age_s": cl_age,
             "avg_latency_ms": avg_lat,
             "downstream_kbps": self.net_stats.get("downstream_kbps", 0.0),
             "total_mb": round(self.net_stats.get("total_bytes", 0) / (1024 * 1024), 2),
@@ -119,8 +136,8 @@ class MarketFeed:
         clob_test = "https://clob.polymarket.com/time"
         # Prefer direct connection if both endpoints succeed without proxy (lowest latency)
         try:
-            r1 = self.session.get(spot_test, timeout=2.5)
-            r2 = self.session.get(clob_test, timeout=2.5)
+            r1 = self.session.get(spot_test, proxies={}, timeout=2.5)
+            r2 = self.session.get(clob_test, proxies={}, timeout=2.5)
             if r1.status_code == 200 and r2.status_code == 200:
                 self.session.proxies = {}
                 return
@@ -138,8 +155,44 @@ class MarketFeed:
                 pass
         self.session.proxies = {}
 
+    def reprobe_connectivity(self, now: Optional[float] = None) -> bool:
+        """Re-probe direct vs proxy connectivity after sustained outage and sync all sessions/WS clients."""
+        t = time.time() if now is None else float(now)
+        lock = getattr(self, "_reprobe_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            return False
+        try:
+            if (t - getattr(self, "_last_reprobe_t", 0.0)) < 30.0:
+                return False
+            self._last_reprobe_t = t
+            old_proxies = dict(self.session.proxies or {})
+            self._test_connectivity()
+            new_proxies = dict(self.session.proxies or {})
+            if new_proxies != old_proxies:
+                self._proxy_gen = getattr(self, "_proxy_gen", 0) + 1
+                if getattr(self, "_poly_session", None) is not None:
+                    self._poly_session.proxies = dict(new_proxies)
+                ws_proxy = new_proxies.get("https") or new_proxies.get("http")
+                for ws_client in (
+                    getattr(self, "_spot_ws", None),
+                    getattr(self, "_book_ws", None),
+                    getattr(self, "_trade_ws", None),
+                ):
+                    if ws_client is not None:
+                        ws_client.proxy = ws_proxy
+                route_label = ws_proxy or "direct"
+                print(f"\n[MarketFeed] Connectivity route switched to: {route_label}")
+                return True
+            return False
+        finally:
+            if lock is not None:
+                lock.release()
+
     def record_raw_event(self, category: str, record: dict):
         """Append an immutable record to data/1_market/<category>/<date>/."""
+        # Always preserve tiny official settlement records; heavy streams obey retention/disk-full guard
+        if category != "settlements" and not is_raw_recording_allowed():
+            return
         try:
             today = time.strftime("%Y-%m-%d", time.gmtime())
             target_dir = config.MARKET_DIR / category / today
@@ -217,6 +270,22 @@ class MarketFeed:
             
         return {}
 
+    @staticmethod
+    def _poly_twap_params(start_t: float, include_end: bool = True) -> dict:
+        iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        params = {
+            "symbol": "BTC",
+            "eventStartTime": iso_start,
+            "variant": "fiveminute",
+            "twapEnabled": "true",
+            "twapLookbackSeconds": "60",
+        }
+        if include_end:
+            params["endDate"] = datetime.datetime.fromtimestamp(
+                start_t + 300, datetime.timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+        return params
+
     def fetch_window_open_price(self, start_t: float) -> Tuple[float, float]:
         """Fetch BTC reference open price: (poly_official_twap_open, binance_spot_open).
         
@@ -229,18 +298,8 @@ class MarketFeed:
 
         # 1. Primary: Polymarket official Chainlink BTC/USD TWAP
         try:
-            iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            iso_end = datetime.datetime.fromtimestamp(start_t + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             poly_url = "https://polymarket.com/api/crypto/crypto-price"
-            params = {
-                "symbol": "BTC",
-                "eventStartTime": iso_start,
-                "variant": "fiveminute",
-                "endDate": iso_end,
-                "twapEnabled": "true",
-                "twapLookbackSeconds": "60"
-            }
-            resp = self.session.get(poly_url, params=params, timeout=(1.2, 1.8))
+            resp = self.session.get(poly_url, params=self._poly_twap_params(start_t, include_end=True), timeout=(1.2, 1.8))
             if resp.status_code == 200:
                 body = resp.json()
                 open_px = body.get("openPrice")
@@ -300,18 +359,8 @@ class MarketFeed:
     def fetch_window_settlement_price(self, start_t: float) -> Optional[Tuple[float, float, str]]:
         """Fetch official settlement open, close, and winner from Polymarket's crypto-price API."""
         try:
-            iso_start = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            iso_end = datetime.datetime.fromtimestamp(start_t + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             poly_url = "https://polymarket.com/api/crypto/crypto-price"
-            params = {
-                "symbol": "BTC",
-                "eventStartTime": iso_start,
-                "variant": "fiveminute",
-                "endDate": iso_end,
-                "twapEnabled": "true",
-                "twapLookbackSeconds": "60"
-            }
-            resp = self.session.get(poly_url, params=params, timeout=(1.2, 2.0))
+            resp = self.session.get(poly_url, params=self._poly_twap_params(start_t, include_end=True), timeout=(1.2, 2.0))
             if resp.status_code == 200:
                 body = resp.json()
                 if body.get("completed") and body.get("closePrice") is not None:
@@ -332,7 +381,6 @@ class MarketFeed:
         current_t = now or time.time()
         if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
             self._poly_btc_poller_active = True
-            import threading
             def _worker():
                 try:
                     # Reuse a dedicated persistent Session owned exclusively by this single-flight poller
@@ -345,20 +393,15 @@ class MarketFeed:
                         sess.headers.update(self.session.headers)
                         sess.proxies = dict(self.session.proxies)
                         self._poly_session = sess
-                    now_iso = datetime.datetime.fromtimestamp(current_t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                     url = "https://polymarket.com/api/crypto/crypto-price"
-                    params = {
-                        "symbol": "BTC",
-                        "eventStartTime": now_iso,
-                        "variant": "fiveminute",
-                        "twapEnabled": "true",
-                        "twapLookbackSeconds": "60"
-                    }
-                    resp = self._poly_session.get(url, params=params, timeout=(1.2, 1.8))
+                    t0 = time.perf_counter()
+                    resp = self._poly_session.get(url, params=self._poly_twap_params(current_t, include_end=False), timeout=(1.2, 1.8))
+                    cl_lat_ms = (time.perf_counter() - t0) * 1000.0
                     if resp.status_code == 200:
                         body = resp.json()
                         px = body.get("openPrice")
                         if px and float(px) > 0:
+                            self._record_net("chainlink", cl_lat_ms, len(resp.content))
                             lock = getattr(self, "_poly_lock", None)
                             if lock:
                                 lock.acquire()
@@ -397,8 +440,9 @@ class MarketFeed:
         return px
 
     def _get_worker_session(self) -> requests.Session:
-        """Return a thread-local requests.Session for safe concurrent HTTP fetching."""
+        """Return a thread-local requests.Session synced to the active proxy generation."""
         sess = getattr(self._thread_local, "session", None)
+        cur_gen = getattr(self, "_proxy_gen", 0)
         if sess is None:
             sess = requests.Session()
             adapter = HTTPAdapter(pool_connections=6, pool_maxsize=6)
@@ -407,6 +451,10 @@ class MarketFeed:
             sess.headers.update(self.session.headers)
             sess.proxies = dict(self.session.proxies)
             self._thread_local.session = sess
+            self._thread_local.proxy_gen = cur_gen
+        elif getattr(self._thread_local, "proxy_gen", -1) != cur_gen:
+            sess.proxies = dict(self.session.proxies)
+            self._thread_local.proxy_gen = cur_gen
         return sess
 
     def close(self):
@@ -471,6 +519,7 @@ class MarketFeed:
 
         if live_px is not None and live_px > 0:
             current_px = live_px
+            self._consecutive_spot_fails = 0
             self._last_binance_px = current_px
             self._last_binance_t = t
             self._last_spot_source = src
@@ -478,6 +527,13 @@ class MarketFeed:
             self.spot_history.append((t, current_px))
         else:
             is_stale = True
+            self._consecutive_spot_fails = getattr(self, "_consecutive_spot_fails", 0) + 1
+            if self._consecutive_spot_fails >= 3 and (t - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
+                if getattr(self, "_executor", None) is not None:
+                    try:
+                        self._executor.submit(self.reprobe_connectivity, t)
+                    except Exception:
+                        pass
             current_px = float(getattr(self, "_last_binance_px", 0.0) or 0.0)
             spot_ts = float(getattr(self, "_last_binance_t", 0.0) or 0.0)
             src = "stale"
@@ -506,11 +562,16 @@ class MarketFeed:
         _, _, regime = calculate_adaptive_spread_params(realized_vol_bps)
 
         if not is_stale and current_px > 0:
-            self.record_raw_event("oracle", {
-                "t": round(t, 2), "kind": "spot", "price": current_px,
-                "source": src, "return_bps": round(return_bps, 2),
-                "realized_vol_bps": realized_vol_bps, "regime": regime
-            })
+            prev_rec_t = getattr(self, "_last_spot_rec_t", 0.0)
+            prev_rec_px = getattr(self, "_last_spot_rec_px", 0.0)
+            if (t - prev_rec_t) >= 0.45 or abs(current_px - prev_rec_px) >= 0.5:
+                self._last_spot_rec_t = t
+                self._last_spot_rec_px = current_px
+                self.record_raw_event("oracle", {
+                    "t": round(t, 2), "kind": "spot", "price": current_px,
+                    "source": src, "return_bps": round(return_bps, 2),
+                    "realized_vol_bps": realized_vol_bps, "regime": regime
+                })
 
         return SpotState(
             timestamp=spot_ts,
@@ -613,10 +674,11 @@ class MarketFeed:
         return OrderBook(bids=[], asks=[], last_trade_price=None,
                          source_t=0.0, received_at=0.0)
 
-    def attach_ws_clients(self, spot_ws=None, book_ws=None):
-        """Attach optional real-time WebSocket clients for low-latency spot & CLOB books."""
+    def attach_ws_clients(self, spot_ws=None, book_ws=None, trade_ws=None):
+        """Attach optional real-time WebSocket clients for low-latency spot, book & trades."""
         self._spot_ws = spot_ws
         self._book_ws = book_ws
+        self._trade_ws = trade_ws
 
     def fetch_tick_bundle(
         self,
@@ -651,7 +713,7 @@ class MarketFeed:
 
         if ws_spot is not None:
             live_px, ws_ts, src = ws_spot
-            spot_lat = max(1.0, (t - ws_ts) * 1000.0)
+            spot_lat = float(getattr(spot_ws, "rtt_ms", 0.0) or 0.0)
             spot_bytes = 96
         else:
             live_px, src, spot_lat, spot_bytes = f_spot.result()
@@ -677,13 +739,14 @@ class MarketFeed:
                 "last_trade_price": book.last_trade_price,
             }
 
+        ws_book_rtt = float(getattr(book_ws, "rtt_ms", 0.0) or 0.0) if book_ws is not None else 0.0
         if ws_up is not None:
-            up_book, up_lat, up_bytes, up_ev = ws_up, max(1.0, (t - ws_up.received_at) * 1000.0), 256, _book_to_raw_ev(ws_up, token_up)
+            up_book, up_lat, up_bytes, up_ev = ws_up, ws_book_rtt, 256, _book_to_raw_ev(ws_up, token_up)
         else:
             up_book, up_lat, up_bytes, up_ev = f_up.result()
 
         if ws_dn is not None:
-            dn_book, dn_lat, dn_bytes, dn_ev = ws_dn, max(1.0, (t - ws_dn.received_at) * 1000.0), 256, _book_to_raw_ev(ws_dn, token_down)
+            dn_book, dn_lat, dn_bytes, dn_ev = ws_dn, ws_book_rtt, 256, _book_to_raw_ev(ws_dn, token_down)
         else:
             dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result()
 

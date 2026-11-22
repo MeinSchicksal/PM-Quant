@@ -3,11 +3,17 @@
 Exposes only cash results and human-readable order actions. Market internals,
 model decisions and parameters remain in the local journals, not the web API.
 """
+import os
 import sys
 import json
 import math
 import time
 import gzip
+import hmac
+import base64
+import shutil
+import datetime
+import platform
 import mimetypes
 import threading
 from pathlib import Path
@@ -19,8 +25,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from runtime.pipeline import PID_FILE, is_pid_running
+from runtime.retention import (
+    cleanup_old_data,
+    get_disk_guard_state,
+    get_storage_breakdown,
+    is_raw_recording_allowed,
+)
 
 STATIC_DIR = config.ROOT / "web" / "static"
+_SERVER_START_T = time.time()
+_STORAGE_CACHE = {"t": 0.0, "data": None}
+_STORAGE_LOCK = threading.Lock()
 
 # Below this many traded windows a regime cell cannot separate a 5-cent edge
 # from noise (per-window sd is roughly 0.25-1.5 USD), so the dashboard marks
@@ -245,9 +261,259 @@ def _read_live():
         return None
 
 
+def _get_cached_storage(max_age_s: float = 30.0, force: bool = False) -> dict:
+    now = time.time()
+    if not force:
+        with _STORAGE_LOCK:
+            if _STORAGE_CACHE["data"] is not None and (now - _STORAGE_CACHE["t"]) < max_age_s:
+                return dict(_STORAGE_CACHE["data"])
+    data = get_storage_breakdown()
+    with _STORAGE_LOCK:
+        _STORAGE_CACHE["t"] = now
+        _STORAGE_CACHE["data"] = data
+    return dict(data)
+
+
+def _read_host_memory() -> dict:
+    """Read host RAM & Swap usage without external dependencies (Linux + Windows)."""
+    out = {
+        "mem_total_mb": None,
+        "mem_used_mb": None,
+        "mem_used_pct": None,
+        "swap_total_mb": None,
+        "swap_used_mb": None,
+        "swap_used_pct": None,
+    }
+    try:
+        if sys.platform.startswith("linux") and Path("/proc/meminfo").exists():
+            kv = {}
+            for ln in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                parts = ln.split(":")
+                if len(parts) == 2:
+                    nums = parts[1].strip().split()
+                    if nums and nums[0].isdigit():
+                        kv[parts[0].strip()] = int(nums[0])  # KiB
+            mt = kv.get("MemTotal", 0)
+            ma = kv.get("MemAvailable", kv.get("MemFree", 0))
+            st = kv.get("SwapTotal", 0)
+            sf = kv.get("SwapFree", 0)
+            if mt > 0:
+                mu = max(0, mt - ma)
+                out["mem_total_mb"] = round(mt / 1024.0, 1)
+                out["mem_used_mb"] = round(mu / 1024.0, 1)
+                out["mem_used_pct"] = round((mu / mt) * 100.0, 1)
+            if st > 0:
+                su = max(0, st - sf)
+                out["swap_total_mb"] = round(st / 1024.0, 1)
+                out["swap_used_mb"] = round(su / 1024.0, 1)
+                out["swap_used_pct"] = round((su / st) * 100.0, 1)
+            else:
+                out["swap_total_mb"] = 0.0
+                out["swap_used_mb"] = 0.0
+                out["swap_used_pct"] = 0.0
+        elif sys.platform == "win32":
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            ms = _MEMORYSTATUSEX()
+            ms.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                mb = 1024.0 * 1024.0
+                mt = ms.ullTotalPhys / mb
+                mu = (ms.ullTotalPhys - ms.ullAvailPhys) / mb
+                out["mem_total_mb"] = round(mt, 1)
+                out["mem_used_mb"] = round(mu, 1)
+                out["mem_used_pct"] = round((mu / mt) * 100.0, 1) if mt > 0 else 0.0
+                pf_tot = max(0.0, (ms.ullTotalPageFile - ms.ullTotalPhys) / mb)
+                pf_used = max(0.0, ((ms.ullTotalPageFile - ms.ullAvailPageFile) - (ms.ullTotalPhys - ms.ullAvailPhys)) / mb)
+                out["swap_total_mb"] = round(pf_tot, 1)
+                out["swap_used_mb"] = round(min(pf_tot, pf_used), 1)
+                out["swap_used_pct"] = round((min(pf_tot, pf_used) / pf_tot) * 100.0, 1) if pf_tot > 0 else 0.0
+    except Exception:
+        pass
+    return out
+
+
+def _get_system_status(active=None, force_storage: bool = False) -> dict:
+    """Collect cross-platform server health, disk, memory, and pipeline heartbeat status."""
+    now = time.time()
+    mem = _read_host_memory()
+
+    disk_total_gb = disk_used_gb = disk_free_gb = disk_used_pct = None
+    try:
+        du = shutil.disk_usage(config.DATA_DIR)
+        gb = 1024.0 ** 3
+        disk_total_gb = round(du.total / gb, 2)
+        disk_used_gb = round(du.used / gb, 2)
+        disk_free_gb = round(du.free / gb, 2)
+        disk_used_pct = round((du.used / du.total) * 100.0, 1) if du.total > 0 else 0.0
+    except Exception:
+        pass
+
+    load_1m = load_5m = None
+    try:
+        if hasattr(os, "getloadavg"):
+            l1, l5, _ = os.getloadavg()
+            load_1m = round(l1, 2)
+            load_5m = round(l5, 2)
+    except OSError:
+        pass
+
+    uptime_s = round(max(0.0, now - _SERVER_START_T), 1)
+    host_uptime_s = None
+    try:
+        if sys.platform.startswith("linux") and Path("/proc/uptime").exists():
+            raw_up = Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
+            host_uptime_s = round(float(raw_up), 1)
+    except Exception:
+        pass
+
+    pipe_pid = None
+    pipe_running = False
+    try:
+        if PID_FILE.exists():
+            pid_val = int(PID_FILE.read_text(encoding="utf-8").strip())
+            pipe_pid = pid_val
+            pipe_running = bool(is_pid_running(pid_val) or pid_val == os.getpid())
+    except Exception:
+        pass
+
+    live_data = active if active is not None else _read_live()
+    hb_age = None
+    if live_data and live_data.get("now"):
+        hb_age = round(max(0.0, now - _num(live_data.get("now"))), 1)
+
+    if hb_age is not None and hb_age <= 15.0:
+        svc_status = "online"
+    elif pipe_running and (hb_age is None or hb_age <= 60.0):
+        svc_status = "lagging"
+    else:
+        svc_status = "offline"
+
+    storage = _get_cached_storage(force=force_storage)
+    guard = get_disk_guard_state()
+    guard["raw_recording_allowed"] = is_raw_recording_allowed()
+    return {
+        "service_status": svc_status,
+        "pipeline_running": pipe_running,
+        "pipeline_pid": pipe_pid,
+        "heartbeat_age_s": hb_age,
+        "web_uptime_s": uptime_s,
+        "host_uptime_s": host_uptime_s,
+        "cpu_count": os.cpu_count() or 1,
+        "load_1m": load_1m,
+        "load_5m": load_5m,
+        "platform": platform.system(),
+        "disk_total_gb": disk_total_gb,
+        "disk_used_gb": disk_used_gb,
+        "disk_free_gb": disk_free_gb,
+        "disk_used_pct": disk_used_pct,
+        "storage": storage,
+        "disk_guard": guard,
+        "retention": {
+            "record_raw_market": bool(config.PARAMS.get("RECORD_RAW_MARKET", True)),
+            "market_days": int(config.PARAMS.get("MARKET_RETENTION_DAYS", 3)),
+            "replay_days": int(config.PARAMS.get("WINDOW_REPLAY_RETENTION_DAYS", 7)),
+            "min_keep_replays": int(config.PARAMS.get("MIN_KEEP_REPLAY_FILES", 30)),
+            "log_days": int(config.PARAMS.get("RUNTIME_LOG_RETENTION_DAYS", 7)),
+            "cleanup_interval_s": float(config.PARAMS.get("CLEANUP_INTERVAL_S", 1800.0)),
+            "max_data_dir_mb": float(config.PARAMS.get("MAX_DATA_DIR_MB", 4096.0)),
+            "min_free_disk_gb": float(config.PARAMS.get("MIN_FREE_DISK_GB", 3.0)),
+            "disk_soft_limit_pct": float(config.PARAMS.get("DISK_SOFT_LIMIT_PCT", 75.0)),
+            "disk_hard_limit_pct": float(config.PARAMS.get("DISK_HARD_LIMIT_PCT", 85.0)),
+            "disk_critical_pause_pct": float(config.PARAMS.get("DISK_CRITICAL_PAUSE_PCT", 93.0)),
+        },
+        **mem,
+    }
+
+
+def _display_tz() -> datetime.timezone:
+    """Return display timezone (defaults to UTC+8 Beijing time for consistent daily stats)."""
+    try:
+        offset_h = float(os.environ.get("PM_TZ_OFFSET_HOURS", "8"))
+    except ValueError:
+        offset_h = 8.0
+    return datetime.timezone(datetime.timedelta(hours=offset_h))
+
+
+def _compute_daily_summary(traded_records: list, max_days: int = 14) -> tuple:
+    """Aggregate traded rounds by calendar day in display timezone (UTC+8 default)."""
+    tz = _display_tz()
+    today_key = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+    daily_map = {}
+    for w in traded_records:
+        ts = _num(w.get("end", w.get("start")))
+        day_k = datetime.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d") if ts > 0 else today_key
+        b = daily_map.setdefault(day_k, {"date": day_k, "pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
+        p = _num(w.get("net_pnl"))
+        b["pnl"] = round(b["pnl"] + p, 4)
+        b["traded"] += 1
+        if p > 1e-9:
+            b["wins"] += 1
+        elif p < -1e-9:
+            b["losses"] += 1
+    daily_summary = [daily_map[k] for k in sorted(daily_map.keys(), reverse=True)[:max_days]]
+    today_bucket = daily_map.get(today_key, {"pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
+    return today_key, today_bucket, daily_summary
+
+
+def _check_basic_auth(auth_header: str) -> bool:
+    """Validate optional HTTP Basic Auth when PM_WEB_PASS is configured."""
+    expected_pass = os.environ.get("PM_WEB_PASS", "")
+    if not expected_pass:
+        return True
+    expected_user = os.environ.get("PM_WEB_USER", "admin")
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+        user, pwd = decoded.split(":", 1)
+    except Exception:
+        return False
+    return hmac.compare_digest(user, expected_user) and hmac.compare_digest(pwd, expected_pass)
+
+
+class _HardenedHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with scanner-disconnect noise suppression."""
+    request_queue_size = 32
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError, OSError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class QuantHandler(BaseHTTPRequestHandler):
+    # Prevent Slowloris / public port-scanner idle sockets from leaking worker threads
+    timeout = 10
+
     def log_message(self, format, *args):
         pass
+
+    def _require_auth(self) -> bool:
+        if _check_basic_auth(self.headers.get("Authorization", "")):
+            return True
+        body = b"Unauthorized"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="PM-Quant"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
 
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -259,12 +525,29 @@ class QuantHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        if not self._require_auth():
+            return
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/cleanup":
+            res = cleanup_old_data()
+            sys_state = _get_system_status(force_storage=True)
+            self.send_json({"cleanup": res, "system": sys_state})
+        else:
+            self.send_json({"error": "Not found"}, status=404)
+
     def do_GET(self):
+        if not self._require_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
         if path == "/api/health":
             self.send_json({"status": "ok", "batch_id": config.BATCH_ID, "time": time.time()})
+        elif path == "/api/system":
+            qs = parse_qs(parsed.query)
+            force = qs.get("refresh", ["0"])[0] in ("1", "true", "yes")
+            self.send_json(_get_system_status(force_storage=force))
         elif path == "/api/batches":
             available = sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")])
             self.send_json({"batches": available, "current_batch": config.BATCH_ID})
@@ -459,10 +742,16 @@ class QuantHandler(BaseHTTPRequestHandler):
                 bucket["sample_ok"] = n >= ATTRIBUTION_MIN_SAMPLES
 
             latest = list(reversed(records))[:50]
-            rounds = [_public_round(w, _read_detail(ledger_dir, w.get("slug", ""))) for w in latest]
+            include_details = qs.get("include_details", ["0"])[0] in ("1", "true", "yes")
+            rounds = [
+                _public_round(w, _read_detail(ledger_dir, w.get("slug", "")) if include_details else {})
+                for w in latest
+            ]
             active = _read_live() if target_batch == config.BATCH_ID else None
             if active and not any(r.get("slug") == active.get("slug") for r in rounds):
                 rounds.insert(0, _public_round(active, active, active=True))
+
+            today_key, today_bucket, daily_summary = _compute_daily_summary(traded)
 
             decisive = wins + losses
             win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
@@ -493,6 +782,12 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "total_pnl": round(total_pnl, 4),
                 "total_won": round(total_won, 4),
                 "total_lost": round(total_lost, 4),
+                "today_date": today_key,
+                "today_pnl": round(today_bucket["pnl"], 4),
+                "today_traded": today_bucket["traded"],
+                "today_wins": today_bucket["wins"],
+                "today_losses": today_bucket["losses"],
+                "daily_summary": daily_summary,
                 "turnover": round(turnover, 4),
                 "win_rate": win_rate,
                 "win_rate_all": round((wins / count) * 100, 1) if count else 0.0,
@@ -513,6 +808,11 @@ class QuantHandler(BaseHTTPRequestHandler):
             rel_path = path.lstrip("/")
             if rel_path.startswith("static/"):
                 rel_path = rel_path[len("static/"):]
+            if rel_path in ("m", "m/", "mobile", "mobile/"):
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
             if not rel_path or rel_path == "index.html":
                 file_path = STATIC_DIR / "index.html"
             else:
@@ -539,11 +839,18 @@ class QuantHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
 
 
-def start_server_in_background(port=8900):
+def _resolve_bind_host(host=None) -> str:
+    if host:
+        return str(host)
+    return os.environ.get("PM_WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def start_server_in_background(port=8900, host=None):
     """Start investor dashboard HTTP server in a daemon background thread."""
-    server_address = ("127.0.0.1", port)
+    bind_host = _resolve_bind_host(host)
+    server_address = (bind_host, port)
     try:
-        httpd = ThreadingHTTPServer(server_address, QuantHandler)
+        httpd = _HardenedHTTPServer(server_address, QuantHandler)
     except OSError as e:
         print(f"[Web] 端口 {port} 已被占用 ({e})，复用既有看板服务。")
         return None
@@ -552,11 +859,15 @@ def start_server_in_background(port=8900):
     return httpd
 
 
-def run(port=8900):
-    # Loopback-only: the investor dashboard must not be exposed on the LAN.
-    server_address = ("127.0.0.1", port)
-    httpd = ThreadingHTTPServer(server_address, QuantHandler)
-    print(f"PM-Quant investor dashboard: http://127.0.0.1:{port}/")
+def run(port=8900, host=None):
+    # Defaults to loopback-only (127.0.0.1). Set PM_WEB_HOST=0.0.0.0 and PM_WEB_PASS=...
+    # on a remote server to enable password-protected mobile/remote access.
+    bind_host = _resolve_bind_host(host)
+    server_address = (bind_host, port)
+    httpd = _HardenedHTTPServer(server_address, QuantHandler)
+    disp_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
+    auth_note = " [BasicAuth 已开启]" if os.environ.get("PM_WEB_PASS") else ""
+    print(f"PM-Quant investor dashboard: http://{disp_host}:{port}/{auth_note}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

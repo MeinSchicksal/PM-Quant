@@ -65,11 +65,11 @@ class TestDynamicVolatilityEngine(unittest.TestCase):
         self.assertGreater(k, 1.2)     # widened uncertainty cushion
 
     def test_volatility_boundedness(self):
-        """Extreme artificial movements must remain strictly clamped in [2.0, 80.0] bps."""
+        """Extreme artificial movements must remain strictly clamped in [2.0, 300.0] bps."""
         now = 1000.0
         wild_pts = [(now - 10 + i, 75000.0 * (1.1 ** i)) for i in range(10)]
         vol = calculate_dynamic_realized_vol(wild_pts)
-        self.assertLessEqual(vol, 80.0)
+        self.assertLessEqual(vol, 300.0)
         self.assertGreaterEqual(vol, 2.0)
 
 

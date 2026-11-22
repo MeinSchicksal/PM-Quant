@@ -9,6 +9,7 @@ import json
 import time
 import signal
 import datetime
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from runtime.market_feed import MarketFeed
+from runtime.retention import cleanup_old_data
 from runtime.runner import PaperRunner
 from runtime.trade_stream import TradeStreamClient
 from runtime.ws_feeds import BinanceSpotWSClient, PolymarketBookWSClient
@@ -55,14 +57,17 @@ class PipelineDriver:
         self.feed = MarketFeed()
         self.runner = PaperRunner()
         ws_proxy = (self.feed.session.proxies or {}).get("https") or (self.feed.session.proxies or {}).get("http")
-        self.trade_stream = TradeStreamClient(record_raw=True, proxy=ws_proxy)
-        self.spot_ws = BinanceSpotWSClient(proxy=ws_proxy)
-        self.book_ws = PolymarketBookWSClient(proxy=ws_proxy)
-        self.feed.attach_ws_clients(spot_ws=self.spot_ws, book_ws=self.book_ws)
+        self._wake_event = threading.Event()
+        self.trade_stream = TradeStreamClient(record_raw=True, proxy=ws_proxy, wake_event=self._wake_event)
+        self.spot_ws = BinanceSpotWSClient(proxy=ws_proxy, wake_event=self._wake_event)
+        self.book_ws = PolymarketBookWSClient(proxy=ws_proxy, wake_event=self._wake_event)
+        self.feed.attach_ws_clients(spot_ws=self.spot_ws, book_ws=self.book_ws, trade_ws=self.trade_stream)
         self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg")
         self._reconcile_future = None
         self._open_calib_future = None
         self._prewarm_future = None
+        self._cleanup_future = None
+        self._last_cleanup_t = 0.0
         self.running = True
         self._write_pid()
 
@@ -87,8 +92,7 @@ class PipelineDriver:
             except Exception:
                 pass
 
-    def stop(self):
-        self.running = False
+    def _shutdown_resources(self):
         for client in (self.trade_stream, self.spot_ws, self.book_ws):
             try:
                 client.stop()
@@ -103,6 +107,12 @@ class PipelineDriver:
                 self._bg_executor.shutdown(wait=False)
             except Exception:
                 pass
+
+    def stop(self):
+        self.running = False
+        if getattr(self, "_wake_event", None) is not None:
+            self._wake_event.set()
+        self._shutdown_resources()
 
     def run(self):
         # Line-buffer stdout so `python main.py start > pipeline.log` tails in
@@ -152,6 +162,8 @@ class PipelineDriver:
             except Exception:
                 pass
         last_reconcile_t = 0.0
+        last_status_log_t = 0.0
+        is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         prewarmed_next = {}
 
         while self.running:
@@ -164,7 +176,31 @@ class PipelineDriver:
                 tau_s = info["tau_s"]
                 close_px = 0.0  # only valid for a round settled in this iteration
 
-                # 0. Non-blocking Background Reconciler: Confirm official Gamma/UMA settlement & Chainlink TWAP
+                # 0. Non-blocking Background Retention Cleanup (hourly disk hygiene; preserves summary.jsonl)
+                if self._cleanup_future is not None and self._cleanup_future.done():
+                    try:
+                        cres = self._cleanup_future.result()
+                        if cres and (cres.get("removed_files", 0) > 0 or cres.get("removed_dirs", 0) > 0):
+                            mode_tag = " [磁盘压力自动瘦身]" if cres.get("pressure_triggered") else ""
+                            print(
+                                f"\n[Pipeline] Auto-cleanup{mode_tag} freed {cres['freed_mb']:.2f} MB "
+                                f"({cres['removed_dirs']} dirs, {cres['removed_files']} files; summary.jsonl preserved)"
+                            )
+                        if cres and cres.get("disk_guard_paused"):
+                            print(f"\n[Pipeline] WARNING: {cres.get('disk_guard_reason')}")
+                    except Exception:
+                        pass
+                    finally:
+                        self._cleanup_future = None
+
+                cleanup_interval = float(config.PARAMS.get("CLEANUP_INTERVAL_S", 3600.0))
+                if self._cleanup_future is None and cleanup_interval > 0 and (
+                    self._last_cleanup_t <= 0.0 or (loop_start - self._last_cleanup_t) >= cleanup_interval
+                ):
+                    self._last_cleanup_t = loop_start
+                    self._cleanup_future = self._bg_executor.submit(cleanup_old_data)
+
+                # 0b. Non-blocking Background Reconciler: Confirm official Gamma/UMA settlement & Chainlink TWAP
                 if self._reconcile_future is not None and self._reconcile_future.done():
                     try:
                         rec_results = self._reconcile_future.result()
@@ -425,6 +461,9 @@ class PipelineDriver:
 
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
+                    # Clear wake flag right before sampling WS snapshots so any push
+                    # arriving during this tick triggers an immediate next wakeup.
+                    self._wake_event.clear()
                     poly_spot = self.feed.get_polymarket_btc_price(loop_start)
                     spot, b_up, b_dn = self.feed.fetch_tick_bundle(
                         self.runner.open_price,
@@ -449,11 +488,16 @@ class PipelineDriver:
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)
+                    net_summary["trades_latency_ms"] = float(getattr(self.trade_stream, "rtt_ms", 0.0) or 0.0)
                     net_summary["ws_trades"] = int(self.trade_stream.trade_count)
                     net_summary["ws_reconnects"] = int(self.trade_stream.reconnect_count)
                     net_summary["spot_ws_connected"] = bool(self.spot_ws.connected)
                     net_summary["book_ws_connected"] = bool(self.book_ws.connected)
                     net_summary["book_ws_msgs"] = int(self.book_ws.msg_count)
+                    net_summary["book_empty"] = bool(
+                        (b_up.best_bid is None and b_up.best_ask is None)
+                        or (b_dn.best_bid is None and b_dn.best_ask is None)
+                    )
                     if self.trade_stream.last_error:
                         net_summary["ws_last_error"] = self.trade_stream.last_error
                     self.runner.step(
@@ -464,7 +508,7 @@ class PipelineDriver:
                         delayed_book_fetcher=_delayed_book
                     )
 
-                    # Formatted terminal status line
+                    # Formatted terminal status line (TTY: live overwrite; background/systemd: 60s clean heartbeat)
                     last_dec = self.runner.decisions[-1] if self.runner.decisions else {}
                     act = last_dec.get("action", "hold")
                     side = last_dec.get("side") or ""
@@ -474,26 +518,41 @@ class PipelineDriver:
                     if cb_info.get("cooling_rounds_left"):
                         cb_tag += f"({cb_info['cooling_rounds_left']})"
 
-                    print(
-                        f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:3.0f}s | "
+                    status_line = (
+                        f"[{time.strftime('%H:%M:%S')}] tau: {tau_s:3.0f}s | "
                         f"BTC: ${spot.price:,.2f} ({spot.return_bps:+5.1f}bps, vol:{spot.realized_vol_bps:.1f}) | "
                         f"Pos: UP {self.runner.pos_up.shares:.0f} / DN {self.runner.pos_down.shares:.0f} | "
                         f"CB: {cb_tag} | "
                         f"Act: {act.upper()} {side} {px_str} "
-                        f"{'(' + last_dec.get('reason', '')[:25] + ')' if last_dec.get('reason') else ''}",
-                        end="", flush=True
+                        f"{'(' + last_dec.get('reason', '')[:25] + ')' if last_dec.get('reason') else ''}"
                     )
+                    if is_tty:
+                        print(f"\r{status_line}", end="", flush=True)
+                    elif (loop_start - last_status_log_t) >= 60.0 or act not in ("wait", "hold"):
+                        last_status_log_t = loop_start
+                        print(status_line, flush=True)
                 else:
-                    print(
-                        f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:4.0f}s | "
-                        f"Waiting for Polymarket contract deployment for {slug}...",
-                        end="", flush=True
-                    )
+                    self._wake_event.clear()
+                    if is_tty:
+                        print(
+                            f"\r[{time.strftime('%H:%M:%S')}] tau: {tau_s:4.0f}s | "
+                            f"Waiting for Polymarket contract deployment for {slug}...",
+                            end="", flush=True
+                        )
+                    elif (loop_start - last_status_log_t) >= 60.0:
+                        last_status_log_t = loop_start
+                        print(f"[{time.strftime('%H:%M:%S')}] Waiting for contract deployment for {slug}...", flush=True)
 
-                # Maintain 0.5-second (2 Hz) high-frequency cadence
+                # Event-driven cadence: react within ~100ms on WS spot/book/trade push,
+                # while keeping a 0.5s heartbeat ceiling when the market is quiet.
+                min_interval_s = 0.10
+                max_interval_s = 0.50
                 elapsed = time.time() - loop_start
-                sleep_s = max(0.05, 0.5 - elapsed)
-                time.sleep(sleep_s)
+                if elapsed < min_interval_s:
+                    time.sleep(min_interval_s - elapsed)
+                remaining = max_interval_s - (time.time() - loop_start)
+                if remaining > 0 and self.running:
+                    self._wake_event.wait(timeout=remaining)
 
             except KeyboardInterrupt:
                 print("\n\n[Pipeline] Termination signal received. Stopping...")
@@ -503,20 +562,7 @@ class PipelineDriver:
                 print(f"\n[Pipeline] Tick warning: {e}")
                 time.sleep(1.0)
 
-        for client in (self.trade_stream, self.spot_ws, self.book_ws):
-            try:
-                client.stop()
-            except Exception:
-                pass
-        try:
-            self.feed.close()
-        except Exception:
-            pass
-        if getattr(self, "_bg_executor", None) is not None:
-            try:
-                self._bg_executor.shutdown(wait=False)
-            except Exception:
-                pass
+        self._shutdown_resources()
         if last_slug:
             print(
                 f"\n[Pipeline] WARNING: window {last_slug} was still open at shutdown and is "

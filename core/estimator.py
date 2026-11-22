@@ -13,15 +13,28 @@ def normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+def student_t5_cdf(x: float) -> float:
+    """Exact closed-form Student-t (df=5) CDF for fat-tailed BTC jump protection.
+
+    Strictly more conservative than Gaussian normal_cdf across all |x| > 0,
+    preventing thin-tail overconfidence during crypto volatility spikes.
+    """
+    t = x / math.sqrt(5.0)
+    theta = math.atan(t)
+    c = 1.0 / math.sqrt(1.0 + t * t)
+    s = t * c
+    return 0.5 + (theta + s * c * (1.0 + (2.0 / 3.0) * c * c)) / math.pi
+
+
 def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: float) -> float:
-    """Estimate risk-neutral settlement probability p_fair for Up winning (S_T >= S_0)."""
+    """Estimate fat-tailed settlement probability p_fair for Up winning (S_T >= S_0)."""
     if tau_s <= 0.5:
         return 0.99 if spot >= open_price else 0.01
     if open_price <= 0 or spot <= 0:
         return 0.50
     sigma_tau = max(1e-5, (vol_bps / 10000.0) * math.sqrt(tau_s / 300.0))
     d = math.log(spot / open_price) / sigma_tau
-    prob = normal_cdf(d)
+    prob = student_t5_cdf(d)
     return max(0.01, min(0.99, round(prob, 4)))
 
 
@@ -36,15 +49,28 @@ def estimate_p_fair(
 
     Uses basis-adjusted live spot (`spot.price - spot.basis_ema`) when official
     strike and basis calibration are ready, incorporates the already-locked
-    `[end-60, t]` average during the final 60s, and falls back strictly to
-    single-chain Binance pricing when basis calibration is unavailable.
+    `[end-60, t]` average during the final 60s, protects against cross-chain
+    basis-drift sign inversion, and falls back strictly to single-chain Binance
+    pricing when basis calibration is unavailable.
     """
     spot_px = float(getattr(spot, "price", 0.0) or 0.0)
     basis_ema = getattr(spot, "basis_ema", None)
     realized_60 = getattr(spot, "twap_realized_60s", None)
+    bin_open_raw = getattr(spot, "binance_open_price", None)
+    bin_open = float(bin_open_raw) if (bin_open_raw and float(bin_open_raw) > 0) else 0.0
 
     if basis_ema is not None and spot_px > 0 and open_px > 0:
         cl_est = max(1e-6, spot_px - float(basis_ema))
+        # Guard against basis-EMA pullback inversion: if BOTH Binance live return
+        # and fresh Chainlink TWAP are strictly on one side of open, cl_est must
+        # not hallucinate the opposite direction due to a transient 60s basis lag.
+        if poly_price is not None and float(poly_price) > 0 and bin_open > 0:
+            bin_diff = spot_px - bin_open
+            poly_diff = float(poly_price) - open_px
+            cl_diff = cl_est - open_px
+            if (bin_diff > 0 and poly_diff > 0 and cl_diff < 0) or (bin_diff < 0 and poly_diff < 0 and cl_diff > 0):
+                cl_est = open_px
+
         if tau_s <= 0.5:
             final_est = float(realized_60) if (realized_60 and float(realized_60) > 0) else cl_est
             return 0.99 if final_est >= open_px else 0.01
@@ -54,13 +80,12 @@ def estimate_p_fair(
             expected_close = (u * avg_realized + tau_s * cl_est) / 60.0
             sigma_5m = vol_bps / 10000.0
             std_close = max(1e-5, sigma_5m * math.sqrt((max(0.0, tau_s) / 300.0) / 3.0) * (max(0.0, tau_s) / 60.0))
-            prob = normal_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
+            prob = student_t5_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
             return max(0.01, min(0.99, round(prob, 4)))
         eff_tau = max(10.0, tau_s - 40.0)
         return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps)
 
-    bin_open = getattr(spot, "binance_open_price", None)
-    ref_open = float(bin_open) if (bin_open and float(bin_open) > 0) else float(open_px or 0.0)
+    ref_open = bin_open if bin_open > 0 else float(open_px or 0.0)
     if ref_open > 0 and spot_px > 0:
         eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
         return estimate_fair_prob(spot_px, ref_open, eff_tau, vol_bps)
@@ -164,8 +189,8 @@ def calculate_dynamic_realized_vol(
     vol_5m = ewma_vol_1s * math.sqrt(300.0)
     vol_bps = vol_5m * 10000.0
     
-    # Bounded between 2.0 bps and 80.0 bps
-    return max(2.0, min(80.0, round(vol_bps, 2)))
+    # Uncapped high-vol ceiling (300 bps / 5m) so real liquidation cascades are not underestimated
+    return max(2.0, min(300.0, round(vol_bps, 2)))
 
 
 def calculate_dual_horizon_vol(

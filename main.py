@@ -12,10 +12,11 @@ Usage:
   python main.py replay    - 回放历史微观订单流录制数据
   python main.py stress [N] [seed] - 合成行情压力测试(15种场景×N条路径+敏感性+连续序列)
   python main.py seal      - 归档封存当前实验批次代码与快照
+  python main.py cleanup [--dry-run] [--market-days=3] [--replay-days=7]
+                           - 清理过期原始行情与回放包 (永久保留 summary.jsonl 收益记录)
   python main.py status    - 查看当前系统版本身份与核心经济学参数
 """
 import sys
-import json
 import shutil
 from pathlib import Path
 
@@ -26,13 +27,39 @@ if str(ROOT) not in sys.path:
 import config
 
 
+def _disable_windows_quick_edit() -> bool:
+    """Disable Windows Console QuickEdit mode so stray mouse clicks cannot freeze the live loop."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        if not handle or handle == -1:
+            return False
+        mode = ctypes.c_ulong()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+        if new_mode != mode.value:
+            return bool(kernel32.SetConsoleMode(handle, new_mode))
+        return True
+    except Exception:
+        return False
+
+
 def cmd_start(port: int = 8900, open_browser: bool = True):
     """Start all-in-one system: web dashboard server + trading pipeline + browser."""
     import time
+    import signal
     import threading
     import webbrowser
     from web.server import start_server_in_background
     from runtime.pipeline import PipelineDriver
+
+    _disable_windows_quick_edit()
 
     print("==================================================================")
     print(f"        PM-Quant 全自动纸面量化交易与对冲系统 ({config.VERSION})        ")
@@ -52,11 +79,23 @@ def cmd_start(port: int = 8900, open_browser: bool = True):
 
     print("[*] 启动 Paper 交易与对冲管道 (Pipeline Driver, no live order adapter)...")
     print("[*] 提示: 按 Ctrl+C 可一键平稳退出所有交易与看板服务。\n")
+    driver = None
     try:
         driver = PipelineDriver()
+
+        def _graceful_stop(sig, frame):
+            if driver is not None:
+                driver.stop()
+
+        signal.signal(signal.SIGINT, _graceful_stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, _graceful_stop)
+
         driver.run()
     except KeyboardInterrupt:
         print("\n\n[PM-Quant] 收到终止信号，正在关闭系统...")
+        if driver is not None:
+            driver.stop()
     finally:
         if httpd:
             try:
@@ -110,8 +149,17 @@ def cmd_stop():
 
 
 def cmd_run():
+    import signal
     from runtime.pipeline import PipelineDriver
+    _disable_windows_quick_edit()
     driver = PipelineDriver()
+
+    def _graceful_stop(sig, frame):
+        driver.stop()
+
+    signal.signal(signal.SIGINT, _graceful_stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _graceful_stop)
     driver.run()
 
 
@@ -218,6 +266,36 @@ def cmd_stress():
 def cmd_seal():
     from runtime.supervisor import seal_batch
     seal_batch()
+
+
+def cmd_cleanup(args):
+    from runtime.retention import cleanup_old_data, get_storage_breakdown
+
+    dry_run = False
+    market_days = None
+    replay_days = None
+    for arg in args:
+        low = arg.lower()
+        if low in ("--dry-run", "-n"):
+            dry_run = True
+        elif low.startswith("--market-days="):
+            market_days = int(low.split("=", 1)[1])
+        elif low.startswith("--replay-days="):
+            replay_days = int(low.split("=", 1)[1])
+        else:
+            print(f"[ERROR] Unknown cleanup option: {arg}")
+            sys.exit(2)
+
+    before = get_storage_breakdown()
+    res = cleanup_old_data(market_days=market_days, replay_days=replay_days, dry_run=dry_run)
+    after = get_storage_breakdown()
+    tag = "预演(dry-run)" if dry_run else "已完成"
+    print(f"=== PM-Quant 数据清理 ({tag}) ===")
+    print(f"保留策略 : 原始行情 {res['market_retention_days']} 天 | 详情回放 {res['replay_retention_days']} 天 | 日志 {res['log_retention_days']} 天 (summary.jsonl 永久保留)")
+    print(f"清理统计 : {res['removed_dirs']} 个目录, {res['removed_files']} 个文件, 释放 {res['freed_mb']:.2f} MB")
+    print(f"磁盘占用 : {before['total_mb']:.2f} MB -> {after['total_mb']:.2f} MB (1_market={after['market_mb']:.2f} MB, 2_ledgers={after['ledgers_mb']:.2f} MB)")
+    if res["errors"]:
+        print(f"警告 ({len(res['errors'])}): {res['errors'][:3]}")
 
 
 def cmd_status():
@@ -387,6 +465,8 @@ def main():
         cmd_stress()
     elif cmd == "seal":
         cmd_seal()
+    elif cmd == "cleanup":
+        cmd_cleanup(rest)
     elif cmd == "status":
         cmd_status()
     else:

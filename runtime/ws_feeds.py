@@ -8,7 +8,7 @@ import asyncio
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from core.types import OrderBook
 
@@ -26,12 +26,45 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _install_ws_loop_exception_filter(loop: asyncio.AbstractEventLoop):
+    """Suppress harmless websockets 15.x teardown AttributeError on failed proxy handshakes."""
+    def _handler(lp, context):
+        exc = context.get("exception")
+        if isinstance(exc, AttributeError) and "recv_messages" in str(exc):
+            return
+        lp.default_exception_handler(context)
+    loop.set_exception_handler(_handler)
+
+
+async def _ws_ping_rtt_loop(ws, on_rtt, interval_s: float = 5.0):
+    """Measure real end-to-end WebSocket network RTT via RFC 6455 ping/pong frames."""
+    while True:
+        try:
+            t0 = time.perf_counter()
+            pong_waiter = await ws.ping()
+            await asyncio.wait_for(pong_waiter, timeout=4.0)
+            on_rtt(round((time.perf_counter() - t0) * 1000.0, 1))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(interval_s)
+
+
 class BinanceSpotWSClient:
     """Real-time BTC/USDT bookTicker WebSocket client with idle watchdog."""
 
-    def __init__(self, proxy: Optional[str] = None, idle_reconnect_s: float = 10.0):
+    def __init__(
+        self,
+        proxy: Optional[str] = None,
+        idle_reconnect_s: float = 10.0,
+        wake_event: Optional[threading.Event] = None,
+        wake_delta_usd: float = 1.0,
+    ):
         self.proxy = proxy
         self.idle_reconnect_s = max(0.05, float(idle_reconnect_s))
+        self._wake_event = wake_event
+        self._wake_delta_usd = max(0.01, float(wake_delta_usd))
         self.running = False
         self.connected = False
         self._thread: Optional[threading.Thread] = None
@@ -39,8 +72,10 @@ class BinanceSpotWSClient:
         self._lock = threading.Lock()
 
         self._price: float = 0.0
+        self._last_wake_px: float = 0.0
         self._updated_t: float = 0.0
         self._source: str = "binance_ws"
+        self.rtt_ms: float = 0.0
         self.msg_count: int = 0
         self.reconnect_count: int = 0
         self.last_error: str = ""
@@ -77,10 +112,16 @@ class BinanceSpotWSClient:
         if px <= 0.0:
             return False
         ts = time.time() if now is None else float(now)
+        should_wake = False
         with self._lock:
             self._price = px
             self._updated_t = ts
             self.msg_count += 1
+            if self._last_wake_px <= 0.0 or abs(px - self._last_wake_px) >= self._wake_delta_usd:
+                self._last_wake_px = px
+                should_wake = True
+        if should_wake and self._wake_event is not None:
+            self._wake_event.set()
         return True
 
     def get_latest(self, max_age_s: float = 2.0, now: Optional[float] = None) -> Optional[Tuple[float, float, str]]:
@@ -96,6 +137,7 @@ class BinanceSpotWSClient:
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        _install_ws_loop_exception_filter(self._loop)
         try:
             self._loop.run_until_complete(self._ws_worker())
         except Exception:
@@ -120,28 +162,35 @@ class BinanceSpotWSClient:
                     connect_kwargs["proxy"] = self.proxy
                 async with websockets.connect(url, **connect_kwargs) as ws:
                     self.connected = True
+                    ping_task = asyncio.create_task(
+                        _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
+                    )
                     last_activity_t = time.monotonic()
-                    while self.running:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                        except asyncio.TimeoutError:
-                            raw = None
-
-                        accepted = False
-                        if raw and isinstance(raw, str) and raw.strip():
+                    try:
+                        while self.running:
                             try:
-                                accepted = self.apply_message(json.loads(raw))
-                            except Exception:
-                                accepted = False
+                                raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                            except asyncio.TimeoutError:
+                                raw = None
 
-                        if accepted:
-                            last_activity_t = time.monotonic()
-                        elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
-                            raise TimeoutError(
-                                f"BinanceSpotWS idle watchdog: no tickers for {self.idle_reconnect_s:.1f}s"
-                            )
+                            accepted = False
+                            if raw and isinstance(raw, str) and raw.strip():
+                                try:
+                                    accepted = self.apply_message(json.loads(raw))
+                                except Exception:
+                                    accepted = False
+
+                            if accepted:
+                                last_activity_t = time.monotonic()
+                            elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
+                                raise TimeoutError(
+                                    f"BinanceSpotWS idle watchdog: no tickers for {self.idle_reconnect_s:.1f}s"
+                                )
+                    finally:
+                        ping_task.cancel()
             except Exception as exc:
                 self.connected = False
+                self.rtt_ms = 0.0
                 self.reconnect_count += 1
                 self.last_error = str(exc)
                 url_idx += 1
@@ -152,9 +201,15 @@ class BinanceSpotWSClient:
 class PolymarketBookWSClient:
     """Real-time Polymarket CLOB L2 orderbook WebSocket client."""
 
-    def __init__(self, proxy: Optional[str] = None, idle_reconnect_s: float = 20.0):
+    def __init__(
+        self,
+        proxy: Optional[str] = None,
+        idle_reconnect_s: float = 20.0,
+        wake_event: Optional[threading.Event] = None,
+    ):
         self.proxy = proxy
         self.idle_reconnect_s = max(0.05, float(idle_reconnect_s))
+        self._wake_event = wake_event
         self.running = False
         self.connected = False
         self._thread: Optional[threading.Thread] = None
@@ -166,6 +221,7 @@ class PolymarketBookWSClient:
         # asset_id -> {"bids": {px: sz}, "asks": {px: sz}, "last_trade": float|None, "t": float, "ready": bool}
         self._books: Dict[str, Dict[str, Any]] = {}
         self._last_ws_msg_t: float = 0.0
+        self.rtt_ms: float = 0.0
         self.msg_count: int = 0
         self.reconnect_count: int = 0
         self.last_error: str = ""
@@ -247,12 +303,17 @@ class PolymarketBookWSClient:
                 }
                 self._last_ws_msg_t = ts
                 self.msg_count += 1
+            if self._wake_event is not None:
+                self._wake_event.set()
             return True
 
         if etype == "price_change" or isinstance(msg.get("price_changes"), list):
             changes = msg.get("price_changes") or []
             updated = False
+            top_changed = False
             with self._lock:
+                prev_tops: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+                touched_aids = set()
                 for ch in changes:
                     if not isinstance(ch, dict):
                         continue
@@ -260,6 +321,11 @@ class PolymarketBookWSClient:
                     st = self._books.get(aid)
                     if not st or not st.get("ready"):
                         continue
+                    if aid not in prev_tops:
+                        prev_tops[aid] = (
+                            max(st["bids"]) if st["bids"] else None,
+                            min(st["asks"]) if st["asks"] else None,
+                        )
                     px = round(_safe_float(ch.get("price"), -1.0), 6)
                     sz = _safe_float(ch.get("size"), 0.0)
                     side = str(ch.get("side") or "").upper()
@@ -273,10 +339,24 @@ class PolymarketBookWSClient:
                     else:
                         book_side[px] = sz
                     st["t"] = ts
+                    touched_aids.add(aid)
                     updated = True
                 if updated:
                     self._last_ws_msg_t = ts
                     self.msg_count += 1
+                    for aid in touched_aids:
+                        st = self._books.get(aid)
+                        if not st:
+                            continue
+                        new_top = (
+                            max(st["bids"]) if st["bids"] else None,
+                            min(st["asks"]) if st["asks"] else None,
+                        )
+                        if new_top != prev_tops.get(aid):
+                            top_changed = True
+                            break
+            if top_changed and self._wake_event is not None:
+                self._wake_event.set()
             return updated
 
         if etype == "last_trade_price" and msg.get("asset_id"):
@@ -337,6 +417,7 @@ class PolymarketBookWSClient:
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        _install_ws_loop_exception_filter(self._loop)
         try:
             self._loop.run_until_complete(self._ws_worker())
         except Exception:
@@ -368,36 +449,42 @@ class PolymarketBookWSClient:
                 async with websockets.connect(POLY_CLOB_WS_URL, **connect_kwargs) as ws:
                     self.connected = True
                     await ws.send(json.dumps({"assets_ids": list(tokens), "type": "market"}))
+                    ping_task = asyncio.create_task(
+                        _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
+                    )
                     last_activity_t = time.monotonic()
+                    try:
+                        while self.running:
+                            with self._lock:
+                                cur_gen = self._token_gen
+                            if cur_gen != gen:
+                                # Token set changed (or crossed-book self-heal triggered) -> reconnect cleanly
+                                self.connected = False
+                                break
 
-                    while self.running:
-                        with self._lock:
-                            cur_gen = self._token_gen
-                        if cur_gen != gen:
-                            # Token set changed (or crossed-book self-heal triggered) -> reconnect cleanly
-                            self.connected = False
-                            break
-
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                        except asyncio.TimeoutError:
-                            raw = None
-
-                        accepted = False
-                        if raw and isinstance(raw, str) and raw.strip():
                             try:
-                                accepted = self.apply_message(json.loads(raw))
-                            except Exception:
-                                accepted = False
+                                raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                            except asyncio.TimeoutError:
+                                raw = None
 
-                        if accepted:
-                            last_activity_t = time.monotonic()
-                        elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
-                            raise TimeoutError(
-                                f"PolyBookWS idle watchdog: no book updates for {self.idle_reconnect_s:.1f}s"
-                            )
+                            accepted = False
+                            if raw and isinstance(raw, str) and raw.strip():
+                                try:
+                                    accepted = self.apply_message(json.loads(raw))
+                                except Exception:
+                                    accepted = False
+
+                            if accepted:
+                                last_activity_t = time.monotonic()
+                            elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
+                                raise TimeoutError(
+                                    f"PolyBookWS idle watchdog: no book updates for {self.idle_reconnect_s:.1f}s"
+                                )
+                    finally:
+                        ping_task.cancel()
             except Exception as exc:
                 self.connected = False
+                self.rtt_ms = 0.0
                 self.reconnect_count += 1
                 self.last_error = str(exc)
                 if self.running:

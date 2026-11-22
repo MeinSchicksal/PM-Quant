@@ -20,10 +20,22 @@ from core.policy import plan_decision, determine_objective_side
 from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
-from sim.matcher import QueueMatcher, make_complementary, is_books_consistent
+from sim.matcher import QueueMatcher, make_complementary
 
 
 class PaperRunner:
+    @staticmethod
+    def _atomic_replace(tmp_path: Path, target_path: Path, retries: int = 5):
+        """Atomically replace target_path with short backoff retries for Windows concurrent read locks."""
+        for attempt in range(max(1, int(retries))):
+            try:
+                tmp_path.replace(target_path)
+                return
+            except (PermissionError, OSError):
+                if attempt + 1 >= retries:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+
     @staticmethod
     def _extract_book_prob(book: Optional[OrderBook]) -> Optional[float]:
         """Extract implied probability from a book without treating None as 0.5."""
@@ -82,6 +94,10 @@ class PaperRunner:
         self._basis_ema = None
         self._basis_updated_t = 0.0
         self._basis_sample_count = 0
+        self._last_hist_t = 0.0
+        self._last_wait_dec_t = 0.0
+        self._last_live_write_t = 0.0
+        self._last_live_action_cnt = -1
         self._load_ledger_history()
 
     def _load_ledger_history(self):
@@ -159,6 +175,10 @@ class PaperRunner:
         self._last_regime_t = None
         self.entry_regime = None
         self._last_step_time = None
+        self._last_hist_t = 0.0
+        self._last_wait_dec_t = 0.0
+        self._last_live_write_t = 0.0
+        self._last_live_action_cnt = -1
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self.price_history = [
             {
@@ -230,6 +250,16 @@ class PaperRunner:
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
 
+    def _apply_maker_fill(self, ts: float, order: Order, fill_sz: float):
+        """Credit executed maker fill shares/cash onto inventory and journal it."""
+        if order.side == "Up":
+            self.pos_up.shares += fill_sz
+            self.pos_up.cash += (fill_sz * order.price)
+        else:
+            self.pos_down.shares += fill_sz
+            self.pos_down.cash += (fill_sz * order.price)
+        self._record_fill(ts, order.side, order.price, fill_sz, "maker", order.purpose, order_id=order.id)
+
     def step(
         self,
         now: float,
@@ -267,14 +297,29 @@ class PaperRunner:
         if not spot_stale and spot.price > 0:
             self.last_spot_price = spot.price
             self._spot_buf.append((now, float(spot.price)))
-            if len(self._spot_buf) > 120 or (self._spot_buf and now - self._spot_buf[0][0] > 65.0):
+            if self._spot_buf and now - self._spot_buf[0][0] > 65.0:
                 self._spot_buf = [(ts, px) for ts, px in self._spot_buf if now - ts <= 65.0]
 
-        if poly_fresh and not spot_stale and len(self._spot_buf) >= 5:
+        if (
+            poly_fresh
+            and not spot_stale
+            and len(self._spot_buf) >= 5
+            and (self._basis_ema is None or (now - self._basis_updated_t) >= 0.45)
+        ):
             bin_60s = [px for ts, px in self._spot_buf if now - ts <= 60.0]
             if bin_60s:
                 inst_basis = (sum(bin_60s) / len(bin_60s)) - float(poly_spot)
-                self._basis_ema = inst_basis if self._basis_ema is None else (0.9 * self._basis_ema + 0.1 * inst_basis)
+                if self._basis_ema is None:
+                    self._basis_ema = inst_basis
+                else:
+                    # Huber-clip single-sample basis jump once warmed up + slow low-pass EMA
+                    # so 60s V-shaped pullbacks do not jerk the exchange basis estimate.
+                    sample = inst_basis
+                    if self._basis_sample_count >= 10:
+                        delta = max(-35.0, min(35.0, inst_basis - self._basis_ema))
+                        sample = self._basis_ema + delta
+                    alpha = 0.03 if self._basis_sample_count >= 10 else 0.15
+                    self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
                 self._basis_updated_t = now
                 self._basis_sample_count += 1
 
@@ -357,19 +402,21 @@ class PaperRunner:
                 self.first_60s_high = max(getattr(self, "first_60s_high", ref_px), ref_px)
                 self.first_60s_low = min(getattr(self, "first_60s_low", ref_px), ref_px)
                 self.first_60s_range = round(self.first_60s_high - self.first_60s_low, 2)
-            self.price_history.append({
-                "t": round(now, 1),
-                "price": round(bin_px, 2),                                   # Binance spot, USD
-                "poly_price": round(poly_px, 2) if poly_px else None,       # Chainlink 60s TWAP, USD
-                "spot_price": round(bin_px, 2),
-                "poly_stale": not poly_fresh,
-                "return_bps": round(bin_bps, 2),
-                "poly_return_bps": round(poly_bps, 2),
-                "poly_up": round(poly_up, 4),
-                "poly_down": round(poly_down, 4)
-            })
-            if len(self.price_history) > 720:
-                self.price_history = self.price_history[-720:]
+            if replay_mode or len(self.price_history) <= 1 or (now - getattr(self, "_last_hist_t", 0.0)) >= 0.45:
+                self.price_history.append({
+                    "t": round(now, 1),
+                    "price": round(bin_px, 2),                                   # Binance spot, USD
+                    "poly_price": round(poly_px, 2) if poly_px else None,       # Chainlink 60s TWAP, USD
+                    "spot_price": round(bin_px, 2),
+                    "poly_stale": not poly_fresh,
+                    "return_bps": round(bin_bps, 2),
+                    "poly_return_bps": round(poly_bps, 2),
+                    "poly_up": round(poly_up, 4),
+                    "poly_down": round(poly_down, 4)
+                })
+                self._last_hist_t = now
+                if len(self.price_history) > 720:
+                    self.price_history = self.price_history[-720:]
 
         if net_stats:
             self.net_stats = net_stats
@@ -426,18 +473,37 @@ class PaperRunner:
                     if fill_sz > 0 or o.remaining < o.size - 1e-9:
                         print_touched_ids.add(o.id)
                     if fill_sz > 0:
-                        if o.side == "Up":
-                            self.pos_up.shares += fill_sz
-                            self.pos_up.cash += (fill_sz * o.price)
-                        else:
-                            self.pos_down.shares += fill_sz
-                            self.pos_down.cash += (fill_sz * o.price)
-                        self._record_fill(tp_t, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
+                        self._apply_maker_fill(tp_t, o, fill_sz)
             self.working_orders = [o for o in self.working_orders if o.remaining > 1e-6]
-        self.pending_cancels = [
-            o for o in self.pending_cancels
-            if o.remaining > 1e-6 and now < float(getattr(o, "cancel_effective_at", 0.0) or 0.0) - 1e-9
-        ]
+
+        # 0b. Crossed-book matching for already-resting orders BEFORE evaluating new decisions,
+        # so an existing Maker bid that was crossed by the new book fills first instead of
+        # triggering a duplicate Taker buy on the same tick.
+        if self.pending_cancels:
+            still_pending = []
+            for o in self.pending_cancels:
+                if o.remaining <= 1e-6 or now >= float(getattr(o, "cancel_effective_at", 0.0) or 0.0) - 1e-9:
+                    continue
+                if o.id not in print_touched_ids:
+                    target_book = book_up if o.side == "Up" else book_down
+                    fill_sz = self.matcher.match_order(o, target_book, now)
+                    if fill_sz > 0:
+                        self._apply_maker_fill(now, o, fill_sz)
+                if o.remaining > 1e-6:
+                    still_pending.append(o)
+            self.pending_cancels = still_pending
+
+        if self.working_orders:
+            pre_remaining = []
+            for o in self.working_orders:
+                if o.id not in print_touched_ids:
+                    target_book = book_up if o.side == "Up" else book_down
+                    fill_sz = self.matcher.match_order(o, target_book, now)
+                    if fill_sz > 0:
+                        self._apply_maker_fill(now, o, fill_sz)
+                if o.remaining > 1e-6:
+                    pre_remaining.append(o)
+            self.working_orders = pre_remaining
 
         if is_deadman_active and self.working_orders:
             for o in self.working_orders:
@@ -524,10 +590,19 @@ class PaperRunner:
                 regime_info=regime_info,
                 quote_attempts=getattr(self, "quote_attempts", 0)
             )
-        self.decisions.append({
-            "t": round(now, 2), "action": decision.action, "side": decision.side,
-            "price": decision.price, "size": decision.size, "reason": decision.reason
-        })
+        if (
+            replay_mode
+            or decision.action != "wait"
+            or not self.decisions
+            or self.decisions[-1].get("action") != decision.action
+            or self.decisions[-1].get("reason") != decision.reason
+            or (now - getattr(self, "_last_wait_dec_t", 0.0)) >= 0.45
+        ):
+            self.decisions.append({
+                "t": round(now, 2), "action": decision.action, "side": decision.side,
+                "price": decision.price, "size": decision.size, "reason": decision.reason
+            })
+            self._last_wait_dec_t = now
 
         # Record significant decision state transitions for the live announcement feed
         tl_key = (decision.action, decision.side, (decision.reason or "").split("(")[0][:36])
@@ -719,27 +794,7 @@ class PaperRunner:
                 "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
             })
 
-        # 3. Crossed-book matching for remaining resting maker orders AND in-flight cancelling orders
-        if self.pending_cancels:
-            still_pending = []
-            for o in self.pending_cancels:
-                if o.remaining <= 1e-6 or now >= float(getattr(o, "cancel_effective_at", 0.0) or 0.0) - 1e-9:
-                    continue
-                if o.id not in print_touched_ids:
-                    target_book = book_up if o.side == "Up" else book_down
-                    fill_sz = self.matcher.match_order(o, target_book, now)
-                    if fill_sz > 0:
-                        if o.side == "Up":
-                            self.pos_up.shares += fill_sz
-                            self.pos_up.cash += (fill_sz * o.price)
-                        else:
-                            self.pos_down.shares += fill_sz
-                            self.pos_down.cash += (fill_sz * o.price)
-                        self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
-                if o.remaining > 1e-6:
-                    still_pending.append(o)
-            self.pending_cancels = still_pending
-
+        # 3. Crossed-book matching for newly placed zero-latency orders (unit-test compatibility)
         remaining_working = []
         for o in self.working_orders:
             if o.id in print_touched_ids:
@@ -749,21 +804,21 @@ class PaperRunner:
             target_book = book_up if o.side == "Up" else book_down
             fill_sz = self.matcher.match_order(o, target_book, now)
             if fill_sz > 0:
-                if o.side == "Up":
-                    self.pos_up.shares += fill_sz
-                    self.pos_up.cash += (fill_sz * o.price)
-                else:
-                    self.pos_down.shares += fill_sz
-                    self.pos_down.cash += (fill_sz * o.price)
-                self._record_fill(now, o.side, o.price, fill_sz, "maker", o.purpose, order_id=o.id)
+                self._apply_maker_fill(now, o, fill_sz)
 
             if o.remaining > 1e-6:
                 remaining_working.append(o)
         self.working_orders = remaining_working
 
-        # Update atomic live.json (skipped in offline replay for ~15x speedup)
+        # Update atomic live.json (skipped in offline replay for ~15x speedup;
+        # throttled to 4 Hz on quiet ticks at 10 Hz event-driven cadence, instant on actions)
         if not replay_mode:
-            self._write_live(now, spot, book_up, book_down)
+            last_w = getattr(self, "_last_live_write_t", 0.0)
+            last_ac = getattr(self, "_last_live_action_cnt", -1)
+            if last_w <= 0.0 or (now - last_w) >= 0.25 or len(self.actions) != last_ac:
+                self._write_live(now, spot, book_up, book_down)
+                self._last_live_write_t = now
+                self._last_live_action_cnt = len(self.actions)
 
     def close_window(self, close_px: float, official_winner: str = None,
                      winner_source: str = "spot_fallback"):
@@ -919,7 +974,7 @@ class PaperRunner:
                 updated.append(line)
         tmp = self.summary_file.with_suffix(".jsonl.tmp")
         tmp.write_text("\n".join(updated) + "\n", encoding="utf-8")
-        tmp.replace(self.summary_file)
+        self._atomic_replace(tmp, self.summary_file)
         # Summary is the single accounting source of truth: rebuild the running
         # total and circuit-breaker state from the rewritten file instead of
         # applying a fragile in-memory delta.
@@ -1031,11 +1086,4 @@ class PaperRunner:
         }
         tmp = self.live_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        for attempt in range(3):
-            try:
-                tmp.replace(self.live_file)
-                break
-            except (PermissionError, OSError):
-                if attempt == 2:
-                    raise
-                time.sleep(0.01)
+        self._atomic_replace(tmp, self.live_file)

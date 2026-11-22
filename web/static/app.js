@@ -415,48 +415,146 @@ function updateNetworkTelemetry(live) {
   const kbpsEl = $("side-net-kbps");
   const latEl = $("side-net-latency");
   const totalEl = $("side-net-total");
-  const polyLatEl = $("src-poly-lat");
-  const binLatEl = $("src-binance-lat");
   const netCountEl = $("net-count");
 
   const rxKbps = net.downstream_kbps ?? net.rx_kbps ?? net.kbps ?? 0;
-  const polyMs = net.poly_latency_ms ?? cb.poly_latency_ms ?? net.latency_ms ?? 0;
-  const binMs = net.binance_latency_ms ?? cb.spot_latency_ms ?? 0;
-  const rttMs = net.avg_latency_ms ?? net.latency_ms ?? (polyMs && binMs ? (polyMs + binMs) / 2 : polyMs || binMs);
+  const polyMs = Number(net.poly_latency_ms ?? 0);
+  const binMs = Number(net.binance_latency_ms ?? 0);
+  const tradesMs = Number(net.trades_latency_ms ?? 0);
+  const clMs = Number(net.chainlink_latency_ms ?? 0);
+  const clAge = net.chainlink_age_s;
+  const realRtts = [polyMs, binMs, tradesMs, clMs].filter((x) => x > 0);
+  const rttMs = realRtts.length > 0 ? realRtts.reduce((a, b) => a + b, 0) / realRtts.length : 0;
 
   if (kbpsEl) kbpsEl.textContent = `${Number(rxKbps || 0).toFixed(1)} KB/s`;
   if (latEl) latEl.textContent = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
   if (totalEl) totalEl.textContent = `${Number(net.total_mb || 0).toFixed(2)} MB`;
 
-  if (polyLatEl) polyLatEl.textContent = polyMs ? `${Math.round(polyMs)} ms` : "就绪";
-  if (binLatEl) binLatEl.textContent = binMs ? `${Math.round(binMs)} ms` : "就绪";
-
-  const tripped = Boolean(cb.active || cb.tripped);
   const nowSec = live && live.server_time ? Number(live.server_time) : (Date.now() / 1000);
   const liveAge = (live && live.now) ? Math.abs(nowSec - Number(live.now)) : Infinity;
   const isIdle = !live || live.status === "idle" || liveAge > 10;
   const spotStale = Boolean(live && live.spot_stale);
   const polyStale = Boolean(live && live.poly_spot_stale);
+  const spotSrc = String((live && live.spot_source) || "").toLowerCase();
+  const spotWsOk = Boolean(net.spot_ws_connected);
+  const bookWsOk = Boolean(net.book_ws_connected);
+  const tradesWsOk = Boolean(net.ws_connected);
+  const bookUp = (live && live.book_up) || {};
+  const bookDn = (live && live.book_down) || {};
+  const bookEmpty =
+    Boolean(net.book_empty) ||
+    (bookUp.best_bid == null && bookUp.best_ask == null) ||
+    (bookDn.best_bid == null && bookDn.best_ask == null);
 
+  const setSourceState = (dotId, valId, state, text, title = "") => {
+    const dot = $(dotId);
+    const val = $(valId);
+    if (dot) dot.className = `source-dot ${state === "ok" ? "is-ok" : state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : ""}`;
+    if (val) {
+      val.textContent = text;
+      val.className = `source-metric-val ${state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : ""}`;
+      if (title) val.title = title;
+    }
+  };
+
+  let okCount = 0;
+  let warnCount = 0;
+  let badCount = 0;
+  const tally = (st) => {
+    if (st === "ok") okCount += 1;
+    else if (st === "warn") warnCount += 1;
+    else badCount += 1;
+  };
+
+  if (isIdle) {
+    setSourceState("dot-spot", "src-spot-val", "bad", "离线");
+    setSourceState("dot-book", "src-book-val", "bad", "离线");
+    setSourceState("dot-trades", "src-trades-val", "bad", "离线");
+    setSourceState("dot-chainlink", "src-chainlink-val", "bad", "离线");
+  } else {
+    // 1. Binance Spot Source
+    if (spotStale) {
+      tally("bad");
+      setSourceState("dot-spot", "src-spot-val", "bad", "断流", "Binance/OKX 现货超时 >3s");
+    } else if (spotWsOk && spotSrc === "binance_ws") {
+      tally("ok");
+      setSourceState("dot-spot", "src-spot-val", "ok", binMs > 0 ? `WS ${Math.round(binMs)}ms` : "WS 正常", "Binance WebSocket 实时推送");
+    } else {
+      tally("warn");
+      const fallbackTag = spotSrc === "okx" ? "OKX 降级" : "HTTP 降级";
+      setSourceState("dot-spot", "src-spot-val", "warn", binMs > 0 ? `${fallbackTag} ${Math.round(binMs)}ms` : fallbackTag, `现货 WS 断开，当前降级源: ${spotSrc || "REST"}`);
+    }
+
+    // 2. Polymarket CLOB Book Source
+    if (bookEmpty) {
+      tally("bad");
+      setSourceState("dot-book", "src-book-val", "bad", "空盘口", "Up/Down 订单簿为空");
+    } else if (bookWsOk) {
+      tally("ok");
+      setSourceState("dot-book", "src-book-val", "ok", polyMs > 0 ? `WS ${Math.round(polyMs)}ms` : "WS 正常", "Polymarket CLOB WebSocket 实时增量");
+    } else {
+      tally("warn");
+      setSourceState("dot-book", "src-book-val", "warn", polyMs > 0 ? `HTTP ${Math.round(polyMs)}ms` : "HTTP 降级", "盘口 WS 断开，降级为 HTTP 轮询");
+    }
+
+    // 3. Polymarket Trade Prints WS Source
+    if (tradesWsOk) {
+      tally("ok");
+      setSourceState("dot-trades", "src-trades-val", "ok", tradesMs > 0 ? `WS ${Math.round(tradesMs)}ms` : "WS 在线", `累计接收 ${net.ws_trades || 0} 笔成交打印`);
+    } else {
+      tally("bad");
+      setSourceState("dot-trades", "src-trades-val", "bad", "WS 断开", net.ws_last_error || "成交打印 WebSocket 断开重连中");
+    }
+
+    // 4. Chainlink 60s TWAP Oracle Source
+    if (polyStale) {
+      tally("warn");
+      const ageLbl = clAge != null ? `滞后 ${Math.round(clAge)}s` : "滞后 >10s";
+      setSourceState("dot-chainlink", "src-chainlink-val", "warn", ageLbl, "Chainlink 60s TWAP 超过 10s 未更新，使用现货+基差估算");
+    } else {
+      tally("ok");
+      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clMs > 0 ? `${Math.round(clMs)} ms` : "实时同步", "Polymarket 官方 Chainlink 60s TWAP");
+    }
+  }
+
+  const connPill = $("conn-pill");
+  const connText = $("conn-text");
+  if (connPill && connText) {
+    if (isIdle) {
+      connPill.className = "status-pill status-warn";
+      connText.textContent = "管道未启";
+    } else if (badCount > 0) {
+      connPill.className = "status-pill status-critical";
+      connText.textContent = "数据异常";
+    } else if (warnCount > 0) {
+      connPill.className = "status-pill status-warn";
+      connText.textContent = "链路降级";
+    } else {
+      connPill.className = "status-pill status-ready";
+      connText.textContent = "服务在线";
+    }
+  }
+
+  const tripped = Boolean(cb.active || cb.tripped);
   if (netCountEl) {
     if (isIdle) {
-      netCountEl.textContent = "管道待机/离线";
-      netCountEl.style.color = "var(--text-muted)";
+      netCountEl.textContent = "管道离线";
+      netCountEl.style.color = "var(--caption)";
       netCountEl.style.background = "var(--surface-2, rgba(148,163,184,0.14))";
     } else if (tripped) {
-      netCountEl.textContent = "风控告警";
+      netCountEl.textContent = "风控熔断";
       netCountEl.style.color = "var(--down)";
       netCountEl.style.background = "var(--down-soft)";
-    } else if (spotStale) {
-      netCountEl.textContent = "现货断流";
+    } else if (badCount > 0) {
+      netCountEl.textContent = `${okCount}/4 异常`;
       netCountEl.style.color = "var(--down)";
       netCountEl.style.background = "var(--down-soft)";
-    } else if (polyStale) {
-      netCountEl.textContent = "TWAP 滞后";
+    } else if (warnCount > 0) {
+      netCountEl.textContent = `${okCount}/4 降级`;
       netCountEl.style.color = "#d97706";
       netCountEl.style.background = "rgba(245,158,11,0.14)";
     } else {
-      netCountEl.textContent = "4 源正常";
+      netCountEl.textContent = "4/4 正常";
       netCountEl.style.color = "var(--up)";
       netCountEl.style.background = "var(--up-soft)";
     }
@@ -610,6 +708,15 @@ function updateOverview(live, hist) {
   if (pnlEl) {
     pnlEl.textContent = fmtUsd(totalPnl, true);
     pnlEl.className = `hero-num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}`;
+  }
+
+  const todayPill = $("hero-today-pill");
+  if (todayPill) {
+    const tdPnl = Number(hist.today_pnl || 0);
+    const tdW = Number(hist.today_wins || 0);
+    const tdL = Number(hist.today_losses || 0);
+    todayPill.textContent = `今日 ${fmtUsd(tdPnl, true)} · ${tdW}胜${tdL}负`;
+    todayPill.className = `today-pnl-pill ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
   }
 
   const settledBadge = $("hero-settled-count");
@@ -2368,6 +2475,26 @@ async function openRoundModal(slug) {
 
   try {
     const res = await fetch(`/api/window?slug=${encodeURIComponent(slug)}`, { cache: "no-store" });
+    if (!res.ok) {
+      if (res.status === 404 && rec) {
+        const pnlCls = rec.pnl > 1e-6 ? "up" : rec.pnl < -1e-6 ? "down" : "";
+        body.innerHTML = `
+          <div class="settings-section" style="margin: 6px 0;">
+            <div class="settings-section-head">
+              <h3>历史结算收益汇总（详情回放已自动清理）</h3>
+              <span class="settings-sub">${escapeHtml(winInfo.fullLabel)}</span>
+            </div>
+            <div class="settings-storage-grid">
+              <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(rec.pnl, true)}</div><div class="st-note">结算方向: ${escapeHtml(rec.winner || "--")}</div></div>
+              <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${rec.posUp} / DN ${rec.posDown}</div><div class="st-note">总成本 $${rec.cost.toFixed(2)} → 兑现 $${rec.proceeds.toFixed(2)}</div></div>
+            </div>
+            <div class="settings-sub" style="margin-top: 10px;">该场次的逐秒详情回放包已按保留策略自动释放，但永久收益账本（summary.jsonl）已完整保留。</div>
+          </div>
+        `;
+        return;
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
     const winData = await res.json();
     cachedModalWindow = winData;
     updateModalHeaderBadges(slug, rec, winData);
@@ -3515,6 +3642,92 @@ function updateSmoothCountdowns() {
   if (bar) bar.style.width = `${((elapsed / 300) * 100).toFixed(1)}%`;
 }
 
+let cachedSystemStatus = null;
+let lastSystemFetchMs = 0;
+
+function updateSystemStatusWidgets(sys, live) {
+  if (!sys) return;
+  cachedSystemStatus = sys;
+  const st = sys.storage || {};
+  const gd = sys.disk_guard || {};
+
+  if ($("side-sys-ram")) {
+    $("side-sys-ram").textContent = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined
+      ? `${sys.mem_used_pct}%`
+      : "--";
+  }
+  if ($("side-sys-disk")) {
+    $("side-sys-disk").textContent = sys.disk_used_pct !== null && sys.disk_used_pct !== undefined
+      ? `${sys.disk_used_pct}% · 剩${sys.disk_free_gb}G`
+      : "--";
+  }
+  if ($("side-sys-data")) {
+    $("side-sys-data").textContent = `${Number(st.total_mb || 0).toFixed(0)} MB ›`;
+  }
+
+  const dot = $("sh-dot");
+  const procEl = $("sh-proc");
+  const feedsEl = $("sh-feeds");
+  const ramEl = $("sh-ram");
+  const diskEl = $("sh-disk");
+  const dataEl = $("sh-data");
+
+  const svc = sys.service_status || "offline";
+  const hb = sys.heartbeat_age_s;
+  if (dot) dot.className = `sh-dot ${svc === "online" ? "ok" : svc === "lagging" ? "warn" : "bad"}`;
+  if (procEl) {
+    if (gd.paused) {
+      procEl.textContent = "磁盘危急 · 已暂停录行情";
+    } else if (svc === "online") {
+      procEl.textContent = `服务器在线${hb !== null && hb !== undefined ? ` (${hb.toFixed(0)}s)` : ""}`;
+    } else if (svc === "lagging") {
+      procEl.textContent = "心跳延迟";
+    } else {
+      procEl.textContent = "交易进程离线";
+    }
+  }
+
+  if (feedsEl) {
+    const net = (live && live.network) || {};
+    let okCnt = 0;
+    if (net.spot_ws_connected) okCnt += 1;
+    if (net.book_ws_connected && !net.book_empty) okCnt += 1;
+    if (net.ws_connected) okCnt += 1;
+    if (net.chainlink_age_s !== null && net.chainlink_age_s !== undefined && net.chainlink_age_s <= 12) okCnt += 1;
+    feedsEl.textContent = `数据源 ${okCnt}/4`;
+  }
+
+  if (ramEl) {
+    const p = Number(sys.mem_used_pct || 0);
+    ramEl.textContent = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined ? `内存 ${p.toFixed(0)}%` : "内存 --";
+    ramEl.className = `sh-chip ${p >= 88 ? "bad" : p >= 75 ? "warn" : ""}`;
+  }
+  if (diskEl) {
+    const p = Number(sys.disk_used_pct || 0);
+    diskEl.textContent = sys.disk_free_gb !== null && sys.disk_free_gb !== undefined ? `磁盘 ${p.toFixed(0)}% (剩${sys.disk_free_gb}G)` : "磁盘 --";
+    diskEl.className = `sh-chip ${p >= 85 || Number(sys.disk_free_gb || 99) < 3 ? "bad" : p >= 75 ? "warn" : ""}`;
+  }
+  if (dataEl) {
+    dataEl.textContent = `数据 ${Number(st.total_mb || 0).toFixed(0)}MB`;
+    dataEl.className = `sh-chip ${gd.paused ? "bad" : ""}`;
+  }
+}
+
+async function fetchSystemStatus(force = false) {
+  const nowMs = Date.now();
+  if (!force && cachedSystemStatus && nowMs - lastSystemFetchMs < 10000) {
+    updateSystemStatusWidgets(cachedSystemStatus, cachedLive);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/system${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+    if (!res.ok) return;
+    const sys = await res.json();
+    lastSystemFetchMs = nowMs;
+    updateSystemStatusWidgets(sys, cachedLive);
+  } catch (_) {}
+}
+
 // ============================================================================
 // DATA POLLING & EVENT BINDINGS
 // ============================================================================
@@ -3558,6 +3771,7 @@ async function fetchAll(isManual = false) {
     updateMarket(live);
     updateSmoothCountdowns();
     renderHistoryTable(hist);
+    fetchSystemStatus(isManual);
 
     if (isManual) {
       showToast("实时行情与历史结算账本已同步", "up");
@@ -3681,9 +3895,196 @@ function initInteractions() {
       if (e.target === regimeGuideModal) closeRegimeGuide();
     });
   }
+
+  // System & Storage Settings Modal
+  const settingsBtn = $("settings-btn");
+  const settingsModal = $("settings-modal");
+  const settingsClose = $("settings-close-btn");
+  const settingsRefreshBtn = $("settings-refresh-btn");
+  const settingsCleanupBtn = $("settings-cleanup-btn");
+  const closeSettingsModal = () => {
+    if (settingsModal) settingsModal.hidden = true;
+  };
+  const setFillBar = (el, pct) => {
+    if (!el) return;
+    const p = Math.max(0, Math.min(100, Number(pct || 0)));
+    el.style.width = `${p}%`;
+    el.className = "settings-fill" + (p >= 85 ? " bad" : (p >= 70 ? " warn" : ""));
+  };
+  const renderSystemSettings = (sys) => {
+    if (!sys) return;
+    const st = sys.storage || {};
+    const ret = sys.retention || {};
+    const gd = sys.disk_guard || {};
+
+    const badge = $("settings-guard-badge");
+    if (badge) {
+      if (gd.paused) {
+        badge.textContent = "已暂停原始录制";
+        badge.style.color = "var(--down)";
+      } else if (gd.pressure_triggered || Number(sys.disk_used_pct || 0) >= Number(ret.disk_soft_limit_pct || 75)) {
+        badge.textContent = "容量偏紧 · 自动防护中";
+        badge.style.color = "#d97706";
+      } else {
+        badge.textContent = "容量健康";
+        badge.style.color = "var(--up)";
+      }
+    }
+
+    const hostMeta = $("settings-host-meta");
+    if (hostMeta) {
+      const cpuStr = `CPU ${sys.cpu_count || 1}核` + (sys.load_1m !== null && sys.load_1m !== undefined ? ` · 负载 ${sys.load_1m}` : "");
+      const pidStr = sys.pipeline_running ? `交易进程正常 (PID ${sys.pipeline_pid || "--"})` : "交易进程未运行";
+      hostMeta.textContent = `${pidStr} · ${cpuStr}`;
+    }
+
+    if ($("set-disk-val") && sys.disk_total_gb) {
+      $("set-disk-val").textContent = `已用 ${sys.disk_used_gb} / ${sys.disk_total_gb} GB (剩 ${sys.disk_free_gb} GB · ${sys.disk_used_pct}%)`;
+      setFillBar($("set-disk-bar"), sys.disk_used_pct);
+    }
+
+    const quotaMb = Number(ret.max_data_dir_mb || 4096);
+    const totalMb = Number(st.total_mb || 0);
+    const quotaPct = quotaMb > 0 ? Math.min(100, (totalMb / quotaMb) * 100) : 0;
+    if ($("set-quota-val")) {
+      $("set-quota-val").textContent = `${totalMb.toFixed(2)} MB / ${(quotaMb / 1024).toFixed(1)} GB (${quotaPct.toFixed(1)}%)`;
+      setFillBar($("set-quota-bar"), quotaPct);
+    }
+
+    if ($("set-ram-val") && sys.mem_total_mb) {
+      const swapTxt = sys.swap_total_mb > 0 ? ` · Swap ${(sys.swap_used_mb / 1024).toFixed(2)}/${(sys.swap_total_mb / 1024).toFixed(2)}G` : "";
+      $("set-ram-val").textContent = `${(sys.mem_used_mb / 1024).toFixed(2)} / ${(sys.mem_total_mb / 1024).toFixed(2)} GB (${sys.mem_used_pct}%)${swapTxt}`;
+      setFillBar($("set-ram-bar"), sys.mem_used_pct);
+    }
+
+    const alertEl = $("settings-guard-alert");
+    if (alertEl) {
+      if (gd.paused && gd.reason) {
+        alertEl.hidden = false;
+        alertEl.textContent = gd.reason;
+      } else {
+        alertEl.hidden = true;
+      }
+    }
+
+    if ($("settings-total-files")) {
+      $("settings-total-files").textContent = `总计 ${totalMb.toFixed(2)} MB · ${st.total_files || 0} 个文件`;
+    }
+
+    const grid = $("settings-storage-grid");
+    if (grid) {
+      const items = [
+        { name: "原始行情录制 (1_market)", val: `${Number(st.market_mb || 0).toFixed(2)} MB`, note: `${st.market_files || 0} 文件 · 保留 ${ret.market_days || 3} 天` },
+        { name: "近期详情回放 (windows/*.gz)", val: `${Number(st.replays_mb || 0).toFixed(2)} MB`, note: `${st.replay_files || 0} 场 · 保留 ${ret.replay_days || 7} 天` },
+        { name: "永久收益账本 (summary.jsonl)", val: `${Number(st.summary_mb || 0).toFixed(3)} MB`, note: `${st.summary_files || 0} 个版本 · 永久不删` },
+        { name: "报告与运行日志", val: `${(Number(st.reports_mb || 0) + Number(st.runtime_mb || 0)).toFixed(2)} MB`, note: `报告 ${Number(st.reports_mb || 0).toFixed(1)}M / 日志 ${Number(st.runtime_mb || 0).toFixed(1)}M` },
+      ];
+      grid.innerHTML = items.map((it) => `
+        <div class="storage-item">
+          <div class="st-name"><span>${it.name}</span></div>
+          <div class="st-val">${it.val}</div>
+          <div class="st-note">${it.note}</div>
+        </div>
+      `).join("");
+    }
+
+    const pol = $("settings-policy-list");
+    if (pol) {
+      const intMin = Math.round(Number(ret.cleanup_interval_s || 1800) / 60);
+      pol.innerHTML = `
+        <div>原始行情保留：<strong>${ret.market_days || 3} 天</strong> (${gd.raw_recording_allowed ? "录制中" : "已暂停"})</div>
+        <div>近期回放保留：<strong>${ret.replay_days || 7} 天</strong> (紧张时保底 ${ret.min_keep_replays || 30} 场)</div>
+        <div>自动巡检周期：<strong>每 ${intMin} 分钟</strong></div>
+        <div>目录配额上限：<strong>${(quotaMb / 1024).toFixed(1)} GB</strong></div>
+        <div>磁盘警戒瘦身：<strong>≥ ${ret.disk_hard_limit_pct || 85}% 或剩 &lt; ${ret.min_free_disk_gb || 3} GB</strong></div>
+        <div>极限熔断保护：<strong>≥ ${ret.disk_critical_pause_pct || 93}% 暂停录行情</strong></div>
+      `;
+    }
+  };
+
+  const setSettingsFeedback = (text, isError = false) => {
+    const el = $("settings-cleanup-msg");
+    if (!el) return;
+    el.textContent = text;
+    el.className = `settings-feedback${isError ? " is-error" : ""}`;
+  };
+
+  const loadSystemSettings = async (forceRefresh = false) => {
+    try {
+      const resp = await fetch(`/api/system${forceRefresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      renderSystemSettings(data);
+    } catch (err) {
+      setSettingsFeedback(`加载系统占用失败: ${err.message}`, true);
+    }
+  };
+
+  const openSettings = () => {
+    if (!settingsModal) return;
+    settingsModal.hidden = false;
+    setSettingsFeedback("");
+    loadSystemSettings(true);
+  };
+  if (settingsBtn && settingsModal) {
+    settingsBtn.addEventListener("click", openSettings);
+  }
+  const healthStrip = $("server-health-strip");
+  if (healthStrip) {
+    healthStrip.addEventListener("click", openSettings);
+    healthStrip.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openSettings();
+      }
+    });
+  }
+  const sideStorageRow = $("side-storage-row");
+  if (sideStorageRow) {
+    sideStorageRow.addEventListener("click", openSettings);
+  }
+  if (settingsClose) settingsClose.addEventListener("click", closeSettingsModal);
+  if (settingsModal) {
+    settingsModal.addEventListener("click", (e) => {
+      if (e.target === settingsModal) closeSettingsModal();
+    });
+  }
+  if (settingsRefreshBtn) {
+    settingsRefreshBtn.addEventListener("click", () => loadSystemSettings(true));
+  }
+  if (settingsCleanupBtn) {
+    settingsCleanupBtn.addEventListener("click", async () => {
+      settingsCleanupBtn.disabled = true;
+      setSettingsFeedback("正在扫描并清理过期数据...");
+      try {
+        const resp = await fetch("/api/cleanup", { method: "POST" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const res = await resp.json();
+        if (res.system) {
+          renderSystemSettings(res.system);
+          updateSystemStatusWidgets(res.system, cachedLive);
+        }
+        const cl = res.cleanup || {};
+        setSettingsFeedback(
+          cl.removed_files > 0 || cl.removed_dirs > 0
+            ? `清理完成：删除 ${cl.removed_dirs} 个目录、${cl.removed_files} 个文件，释放 ${Number(cl.freed_mb || 0).toFixed(2)} MB（summary.jsonl 完整保留）`
+            : "当前没有过期数据需要清理，空间状态良好。"
+        );
+      } catch (err) {
+        setSettingsFeedback(`清理失败: ${err.message}`, true);
+      } finally {
+        settingsCleanupBtn.disabled = false;
+      }
+    });
+  }
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && modalBackdrop && !modalBackdrop.hidden) {
       closeRoundModal();
+      return;
+    }
+    if (e.key === "Escape" && settingsModal && !settingsModal.hidden) {
+      closeSettingsModal();
       return;
     }
     if (e.key === "Escape" && connGuideModal && !connGuideModal.hidden) {

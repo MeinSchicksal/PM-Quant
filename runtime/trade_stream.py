@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from runtime.retention import is_raw_recording_allowed
+from runtime.ws_feeds import _install_ws_loop_exception_filter, _ws_ping_rtt_loop
 
 WS_URL = "wss://ws-live-data.polymarket.com"
 
@@ -30,10 +32,17 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 class TradeStreamClient:
-    def __init__(self, record_raw: bool = True, proxy: Optional[str] = None, idle_reconnect_s: float = 15.0):
+    def __init__(
+        self,
+        record_raw: bool = True,
+        proxy: Optional[str] = None,
+        idle_reconnect_s: float = 15.0,
+        wake_event: Optional[threading.Event] = None,
+    ):
         self.record_raw = record_raw
         self.proxy = proxy
         self.idle_reconnect_s = max(0.05, float(idle_reconnect_s))
+        self._wake_event = wake_event
         self.running = False
         self.connected = False
         self._thread: Optional[threading.Thread] = None
@@ -50,6 +59,7 @@ class TradeStreamClient:
         self._seen_order: deque = deque(maxlen=5000)
 
         self.last_trade_t = 0.0
+        self.rtt_ms = 0.0
         self.trade_count = 0
         self.reconnect_count = 0
         self.last_error = ""
@@ -106,6 +116,7 @@ class TradeStreamClient:
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        _install_ws_loop_exception_filter(self._loop)
         try:
             self._loop.run_until_complete(self._ws_worker())
         except Exception as e:
@@ -135,39 +146,46 @@ class TradeStreamClient:
                         "subscriptions": [{"topic": "activity", "type": "trades"}]
                     }
                     await ws.send(json.dumps(sub_msg))
+                    ping_task = asyncio.create_task(
+                        _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
+                    )
                     # Application-level idle watchdog: RTDS can keep TCP/ping alive
                     # while silently stopping business trade pushes.
                     last_activity_t = time.monotonic()
 
                     recv_timeout = min(2.0, self.idle_reconnect_s)
-                    while self.running:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                        except asyncio.TimeoutError:
-                            raw = None
-
-                        payload = None
-                        if raw and raw.strip():
+                    try:
+                        while self.running:
                             try:
-                                msg = json.loads(raw)
-                                p = msg.get("payload") if isinstance(msg, dict) else None
-                                if isinstance(p, dict) and p:
-                                    payload = p
-                            except Exception:
-                                payload = None
+                                raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                            except asyncio.TimeoutError:
+                                raw = None
 
-                        if payload is None:
-                            if (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
-                                raise TimeoutError(
-                                    f"TradeStream idle watchdog: no trade payloads for {self.idle_reconnect_s:.1f}s"
-                                )
-                            continue
+                            payload = None
+                            if raw and raw.strip():
+                                try:
+                                    msg = json.loads(raw)
+                                    p = msg.get("payload") if isinstance(msg, dict) else None
+                                    if isinstance(p, dict) and p:
+                                        payload = p
+                                except Exception:
+                                    payload = None
 
-                        last_activity_t = time.monotonic()
-                        self._ingest(payload)
+                            if payload is None:
+                                if (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
+                                    raise TimeoutError(
+                                        f"TradeStream idle watchdog: no trade payloads for {self.idle_reconnect_s:.1f}s"
+                                    )
+                                continue
+
+                            last_activity_t = time.monotonic()
+                            self._ingest(payload)
+                    finally:
+                        ping_task.cancel()
 
             except Exception as exc:
                 self.connected = False
+                self.rtt_ms = 0.0
                 self.reconnect_count += 1
                 self.last_error = str(exc)
                 now_t = time.time()
@@ -228,9 +246,13 @@ class TradeStreamClient:
 
         if self.record_raw:
             self._record_trade_event(trade_record)
+        if self._wake_event is not None:
+            self._wake_event.set()
         return True
 
     def _record_trade_event(self, trade: dict):
+        if not is_raw_recording_allowed():
+            return
         try:
             today = time.strftime("%Y-%m-%d", time.gmtime())
             target_dir = config.MARKET_DIR / "events" / today
