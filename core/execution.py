@@ -61,6 +61,8 @@ def plan_order_actions(
     min_requote_age_s: float = 2.5,
     bid_retreat_ticks: float = 0.029,
     min_order_shares: float = 5.0,
+    p_up: Optional[float] = None,
+    min_hold_maker_edge: Optional[float] = None,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
@@ -94,6 +96,13 @@ def plan_order_actions(
                     o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
                     to_cancel.append(o)
                     continue
+                if o.purpose != "hedge" and p_up is not None and min_hold_maker_edge is not None:
+                    p_side = float(p_up) if o.side == "Up" else (1.0 - float(p_up))
+                    live_edge = p_side - float(o.price)
+                    if live_edge < float(min_hold_maker_edge) - 1e-6:
+                        o.cancel_reason = f"边际衰减撤单(P*={p_side:.2f}, 挂单=${o.price:.2f}, 边际={live_edge:+.3f})"
+                        to_cancel.append(o)
+                        continue
                 tb = book_up if o.side == "Up" else book_down
                 tb_bid = getattr(tb, "best_bid", None) if tb is not None else None
                 if order_age >= 1.0 and tb_bid is not None and (o.price - tb_bid) >= bid_retreat_ticks:

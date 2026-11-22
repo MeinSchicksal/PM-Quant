@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from runtime.alerts import notify as send_alert
 from runtime.market_feed import MarketFeed
 from runtime.retention import cleanup_old_data
 from runtime.runner import PaperRunner
@@ -25,10 +26,11 @@ from runtime.trade_stream import TradeStreamClient
 from runtime.ws_feeds import BinanceSpotWSClient, PolymarketBookWSClient
 
 PID_FILE = config.RUNTIME_DIR / "pipeline.pid"
+LOCK_FILE = config.RUNTIME_DIR / "pipeline.lock"
 
 
 def is_pid_running(pid: int) -> bool:
-    """Check if process with given PID is actively running."""
+    """Check if process with given PID is actively running (guards against Linux PID reuse)."""
     if pid <= 0 or pid == os.getpid():
         return False
     try:
@@ -45,7 +47,22 @@ def is_pid_running(pid: int) -> bool:
             # 259 = STILL_ACTIVE
             return bool(success and exit_code.value == 259)
         else:
-            os.kill(pid, 0)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                # Owned by another user (e.g. root daemon after host reboot): not our pipeline
+                return False
+            # Guard against PID reuse on Linux by checking /proc/<pid>/cmdline when available
+            cmdline_path = Path(f"/proc/{pid}/cmdline")
+            if cmdline_path.exists():
+                try:
+                    raw_cmd = cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+                    if raw_cmd and ("python" not in raw_cmd and "pm-quant" not in raw_cmd and "pipeline" not in raw_cmd and "main.py" not in raw_cmd):
+                        return False
+                except OSError:
+                    pass
             return True
     except Exception:
         return False
@@ -53,6 +70,7 @@ def is_pid_running(pid: int) -> bool:
 
 class PipelineDriver:
     def __init__(self):
+        self._lock_fh = None
         self._check_existing_pipeline()
         self.feed = MarketFeed()
         self.runner = PaperRunner()
@@ -62,16 +80,46 @@ class PipelineDriver:
         self.spot_ws = BinanceSpotWSClient(proxy=ws_proxy, wake_event=self._wake_event)
         self.book_ws = PolymarketBookWSClient(proxy=ws_proxy, wake_event=self._wake_event)
         self.feed.attach_ws_clients(spot_ws=self.spot_ws, book_ws=self.book_ws, trade_ws=self.trade_stream)
-        self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg")
+        # Split slow I/O background jobs (reconcile/disk cleanup) from latency-sensitive
+        # jobs (open-price calibration & next-window prewarm) so slow tasks never starve rollover.
+        self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_slow")
+        self._fast_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_fast")
         self._reconcile_future = None
         self._open_calib_future = None
         self._prewarm_future = None
         self._cleanup_future = None
-        self._last_cleanup_t = 0.0
+        self._clock_future = None
+        self._last_cleanup_mono = 0.0
+        self._last_clock_mono = 0.0
+        self._resources_closed = False
         self.running = True
         self._write_pid()
 
     def _check_existing_pipeline(self):
+        # On POSIX (Linux/macOS), use a kernel-enforced non-blocking flock so OOM/SIGKILL
+        # releases the lock automatically and reboot PID reuse can never wedge startup.
+        if sys.platform != "win32":
+            try:
+                import fcntl
+                LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+                fh = open(LOCK_FILE, "a+", encoding="utf-8")
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    fh.close()
+                    old_pid = "?"
+                    if PID_FILE.exists():
+                        try:
+                            old_pid = PID_FILE.read_text(encoding="utf-8").strip() or "?"
+                        except OSError:
+                            pass
+                    print(f"\n[Pipeline] FATAL: Another pipeline process (PID {old_pid}) holds {LOCK_FILE.name}!")
+                    print("To prevent duplicate orders and ledger corruption, please stop it first.\n")
+                    sys.exit(1)
+                self._lock_fh = fh
+                return
+            except ImportError:
+                pass
         if PID_FILE.exists():
             try:
                 old_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
@@ -91,8 +139,17 @@ class PipelineDriver:
                 PID_FILE.unlink()
             except Exception:
                 pass
+        if getattr(self, "_lock_fh", None) is not None:
+            try:
+                self._lock_fh.close()
+            except Exception:
+                pass
+            self._lock_fh = None
 
     def _shutdown_resources(self):
+        if getattr(self, "_resources_closed", False):
+            return
+        self._resources_closed = True
         for client in (self.trade_stream, self.spot_ws, self.book_ws):
             try:
                 client.stop()
@@ -102,17 +159,19 @@ class PipelineDriver:
             self.feed.close()
         except Exception:
             pass
-        if getattr(self, "_bg_executor", None) is not None:
-            try:
-                self._bg_executor.shutdown(wait=False)
-            except Exception:
-                pass
+        for ex_attr in ("_bg_executor", "_fast_bg_executor"):
+            ex = getattr(self, ex_attr, None)
+            if ex is not None:
+                try:
+                    ex.shutdown(wait=False)
+                except Exception:
+                    pass
 
     def stop(self):
+        """Async-signal-safe stop request: only sets flags and wakes the main loop."""
         self.running = False
         if getattr(self, "_wake_event", None) is not None:
             self._wake_event.set()
-        self._shutdown_resources()
 
     def run(self):
         # Line-buffer stdout so `python main.py start > pipeline.log` tails in
@@ -132,17 +191,21 @@ class PipelineDriver:
         active_tokens = {}
         last_slug = None
         last_start_t = None
+        is_first_window = True
         pending_settlements = []
         if self.runner.summary_file.exists():
             try:
                 now_boot = time.time()
-                tail_lines = self.runner.summary_file.read_text(encoding="utf-8").splitlines()[-12:]
+                tail_lines = self.runner.summary_file.read_text(encoding="utf-8").splitlines()[-100:]
                 for raw_ln in tail_lines:
                     if not raw_ln.strip():
                         continue
-                    rec = json.loads(raw_ln)
+                    try:
+                        rec = json.loads(raw_ln)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
                     if rec.get("winner_source") != "gamma" and rec.get("slug") and rec.get("start"):
-                        if (now_boot - float(rec.get("end", 0.0))) <= 7200.0:
+                        if (now_boot - float(rec.get("end", 0.0))) <= 21600.0:
                             o_px = float(rec.get("open_px", 0.0) or 0.0)
                             c_px = float(rec.get("close_px", 0.0) or 0.0)
                             twap_tpl = (
@@ -161,20 +224,57 @@ class PipelineDriver:
                             })
             except Exception:
                 pass
-        last_reconcile_t = 0.0
-        last_status_log_t = 0.0
+        # Recover & provisionally settle any orphaned window from live.json if restart crossed a 5m boundary
+        boot_slug = self.feed.get_current_slug_info(time.time())["slug"]
+        orphan = self.runner.settle_orphaned_live(boot_slug)
+        if orphan and not any(it.get("slug") == orphan["slug"] for it in pending_settlements):
+            pending_settlements.append({
+                "slug": orphan["slug"],
+                "start_t": orphan["start_t"],
+                "open_px": orphan["open_px"],
+                "close_px": orphan["close_px"],
+                "twap_prices": None,
+                "attempts": 0,
+                "added_at": time.time(),
+            })
+            send_alert(
+                f"orphan_recover_{orphan['slug']}",
+                "跨窗重启自动补结算",
+                f"已从 live.json 补结算孤儿窗口 {orphan['slug']} 并加入官方对账队列。",
+                level="warn",
+                cooldown_s=60.0,
+            )
+
+        last_reconcile_mono = 0.0
+        last_status_log_mono = 0.0
+        last_logged_action_cnt = -1
         is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
         prewarmed_next = {}
+        send_alert("pipeline_boot", "交易管道已启动", f"版本 {config.BATCH_ID} 已上线运行。", level="info", cooldown_s=60.0)
 
-        while self.running:
+        try:
+          while self.running:
             try:
                 loop_start = time.time()
+                loop_mono = time.monotonic()
                 info = self.feed.get_current_slug_info(loop_start)
                 slug = info["slug"]
                 start_t = info["start_t"]
                 end_t = info["end_t"]
                 tau_s = info["tau_s"]
                 close_px = 0.0  # only valid for a round settled in this iteration
+
+                # Monotonic window guard: never roll backward on NTP clock step-back
+                if last_start_t is not None and start_t < last_start_t:
+                    send_alert(
+                        "clock_step_back",
+                        "检测到系统时钟回拨",
+                        f"本地窗口时间从 {int(last_start_t)} 回退至 {int(start_t)}，已拒绝倒退切窗以保护账本。",
+                        level="error",
+                        cooldown_s=300.0,
+                    )
+                    time.sleep(0.5)
+                    continue
 
                 # 0. Non-blocking Background Retention Cleanup (hourly disk hygiene; preserves summary.jsonl)
                 if self._cleanup_future is not None and self._cleanup_future.done():
@@ -187,7 +287,9 @@ class PipelineDriver:
                                 f"({cres['removed_dirs']} dirs, {cres['removed_files']} files; summary.jsonl preserved)"
                             )
                         if cres and cres.get("disk_guard_paused"):
-                            print(f"\n[Pipeline] WARNING: {cres.get('disk_guard_reason')}")
+                            reason_msg = cres.get("disk_guard_reason") or "磁盘空间危急"
+                            print(f"\n[Pipeline] WARNING: {reason_msg}")
+                            send_alert("disk_guard_paused", "磁盘空间危急熔断", reason_msg, level="error", cooldown_s=1800.0)
                     except Exception:
                         pass
                     finally:
@@ -195,10 +297,34 @@ class PipelineDriver:
 
                 cleanup_interval = float(config.PARAMS.get("CLEANUP_INTERVAL_S", 3600.0))
                 if self._cleanup_future is None and cleanup_interval > 0 and (
-                    self._last_cleanup_t <= 0.0 or (loop_start - self._last_cleanup_t) >= cleanup_interval
+                    self._last_cleanup_mono <= 0.0 or (loop_mono - self._last_cleanup_mono) >= cleanup_interval
                 ):
-                    self._last_cleanup_t = loop_start
+                    self._last_cleanup_mono = loop_mono
                     self._cleanup_future = self._bg_executor.submit(cleanup_old_data)
+
+                # 0a. Periodic Exchange Clock Offset Monitor (every 5 minutes)
+                if self._clock_future is not None and self._clock_future.done():
+                    try:
+                        offset_s = self._clock_future.result()
+                        if offset_s is not None and abs(offset_s) > 1.5:
+                            print(f"\n[Pipeline] WARNING: Host clock offset vs Polymarket CLOB is {offset_s:+.2f}s!")
+                            send_alert(
+                                "clock_drift",
+                                "服务器时钟偏差告警",
+                                f"宿主机与 Polymarket CLOB 时钟偏差 {offset_s:+.2f}s（阈值 1.5s），请检查 NTP/chrony。",
+                                level="error",
+                                cooldown_s=900.0,
+                            )
+                    except Exception:
+                        pass
+                    finally:
+                        self._clock_future = None
+
+                if self._clock_future is None and (self._last_clock_mono <= 0.0 or (loop_mono - self._last_clock_mono) >= 300.0):
+                    self._last_clock_mono = loop_mono
+                    self._clock_future = self._fast_bg_executor.submit(
+                        lambda: self.feed.check_clock_offset(self.feed._get_worker_session())
+                    )
 
                 # 0b. Non-blocking Background Reconciler: Confirm official Gamma/UMA settlement & Chainlink TWAP
                 if self._reconcile_future is not None and self._reconcile_future.done():
@@ -206,37 +332,49 @@ class PipelineDriver:
                         rec_results = self._reconcile_future.result()
                         for rec_ev in rec_results:
                             r_slug = rec_ev["slug"]
-                            if rec_ev.get("twap_prices"):
-                                off_open, off_close, off_winner = rec_ev["twap_prices"]
-                                self.runner.reconcile_record(
-                                    r_slug, off_open, off_close, off_winner,
-                                    winner_source="twap"
-                                )
-                                print(f"\n[Pipeline] Official Chainlink TWAP confirmed for {r_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})")
-                            if rec_ev.get("gamma_winner"):
-                                off_open, off_close = rec_ev["gamma_prices"]
-                                self.runner.reconcile_record(
-                                    r_slug, off_open, off_close, rec_ev["gamma_winner"],
-                                    winner_source="gamma"
-                                )
-                                print(f"\n[Pipeline] Official Gamma/UMA truth confirmed for {r_slug}: {rec_ev['gamma_winner']}")
-                    except Exception:
-                        pass
+                            try:
+                                if rec_ev.get("twap_prices"):
+                                    off_open, off_close, off_winner = rec_ev["twap_prices"]
+                                    self.runner.reconcile_record(
+                                        r_slug, off_open, off_close, off_winner,
+                                        winner_source="twap"
+                                    )
+                                    print(f"\n[Pipeline] Official Chainlink TWAP confirmed for {r_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})")
+                                if rec_ev.get("gamma_winner"):
+                                    off_open, off_close = rec_ev["gamma_prices"]
+                                    self.runner.reconcile_record(
+                                        r_slug, off_open, off_close, rec_ev["gamma_winner"],
+                                        winner_source="gamma"
+                                    )
+                                    print(f"\n[Pipeline] Official Gamma/UMA truth confirmed for {r_slug}: {rec_ev['gamma_winner']}")
+                                    for pit in pending_settlements:
+                                        if pit.get("slug") == r_slug:
+                                            pit["done"] = True
+                            except Exception as rec_exc:
+                                print(f"\n[Pipeline] Reconcile write warning for {r_slug}: {rec_exc}")
+                    except Exception as fut_exc:
+                        print(f"\n[Pipeline] Reconcile worker warning: {fut_exc}")
                     finally:
                         self._reconcile_future = None
                         pending_settlements = [it for it in pending_settlements if not it.get("done")]
 
                 pending_settlements = [it for it in pending_settlements if not it.get("done")]
-                if self._reconcile_future is None and (loop_start - last_reconcile_t >= 15.0) and pending_settlements:
-                    last_reconcile_t = loop_start
+                if self._reconcile_future is None and (loop_mono - last_reconcile_mono >= 15.0) and pending_settlements:
+                    last_reconcile_mono = loop_mono
                     snapshot_items = list(pending_settlements)
 
                     def _bg_reconcile(items):
                         out_events = []
                         sess = self.feed._get_worker_session()
+                        now_w = time.time()
                         for item in items:
                             if item.get("done"):
                                 continue
+                            age_s = now_w - float(item.get("added_at", now_w))
+                            # Slow down polling after 30 minutes to avoid hammering Gamma during outages
+                            if age_s > 1800.0 and (now_w - float(item.get("last_poll_t", 0.0))) < 120.0:
+                                continue
+                            item["last_poll_t"] = now_w
                             p_slug = item["slug"]
                             p_start = item["start_t"]
                             item["attempts"] = item.get("attempts", 0) + 1
@@ -269,9 +407,10 @@ class PipelineDriver:
                                     if r2.status_code == 200:
                                         b2 = r2.json()
                                         if b2.get("completed") and b2.get("closePrice") is not None:
-                                            o_px = float(b2.get("openPrice", 0))
-                                            c_px = float(b2.get("closePrice", 0))
-                                            official_poly = (o_px, c_px, "Up" if c_px >= o_px else "Down")
+                                            o_px = float(b2.get("openPrice", 0) or 0)
+                                            c_px = float(b2.get("closePrice", 0) or 0)
+                                            if o_px > 0 and c_px > 0:
+                                                official_poly = (o_px, c_px, "Up" if c_px >= o_px else "Down")
                                 except Exception:
                                     pass
                                 if official_poly:
@@ -283,9 +422,8 @@ class PipelineDriver:
                                 off_close = official_poly[1] if official_poly else item.get("close_px", 0.0)
                                 ev["gamma_winner"] = official["winner"]
                                 ev["gamma_prices"] = (off_open, off_close)
-                                item["done"] = True
-                            elif item["attempts"] >= 120 or (time.time() - item.get("added_at", time.time())) > 1800:
-                                print(f"\n[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts). Dropping.")
+                            elif age_s > 21600.0:
+                                print(f"\n[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts, 6h). Dropping.")
                                 item["done"] = True
 
                             if ev.get("twap_prices") or ev.get("gamma_winner"):
@@ -326,8 +464,8 @@ class PipelineDriver:
                             "attempts": 0,
                             "added_at": loop_start
                         })
-                        if len(pending_settlements) > 20:
-                            pending_settlements = pending_settlements[-20:]
+                        if len(pending_settlements) > 100:
+                            pending_settlements = pending_settlements[-100:]
 
                     self.runner.close_window(close_px, official_winner,
                                             winner_source=winner_source)
@@ -364,7 +502,9 @@ class PipelineDriver:
                         binance_open_px=binance_open,
                         poly_spot=poly_spot_init,
                         poly_open_provisional=not is_official_open,
+                        resume_from_live=is_first_window,
                     )
+                    is_first_window = False
                     # Window rollover HTTP init must not count as a market-feed loop gap
                     self.runner._last_step_time = None
                     self._open_calib_future = None
@@ -378,13 +518,29 @@ class PipelineDriver:
                     self.trade_stream.set_active_targets([slug], token_list)
                     self.book_ws.set_tokens(token_list)
 
-                # 2b. Retry token resolution if initially pending
+                # 2b. Retry token resolution if initially pending (throttled when API schema paused)
+                schema_guard = self.feed.get_api_schema_guard()
+                if schema_guard.get("paused"):
+                    send_alert(
+                        f"api_schema_{schema_guard.get('source', 'unknown')}",
+                        "上游接口变更，策略已安全暂停",
+                        f"原因: {schema_guard.get('reason', 'unknown')}\n已自动撤单并暂停开新仓，每 5 分钟低频复检恢复。",
+                        level="error",
+                        cooldown_s=1800.0,
+                    )
                 if not (active_tokens.get("token_up") and active_tokens.get("token_down")):
-                    active_tokens = self.feed.resolve_tokens(slug)
-                    if active_tokens.get("token_up"):
-                        t_retry = [t for t in (active_tokens.get("token_up"), active_tokens.get("token_down")) if t]
-                        self.trade_stream.set_active_targets([slug], t_retry)
-                        self.book_ws.set_tokens(t_retry)
+                    allow_retry = (
+                        not schema_guard.get("paused")
+                        or (loop_mono - getattr(self, "_last_schema_probe_mono", 0.0)) >= 300.0
+                    )
+                    if allow_retry:
+                        if schema_guard.get("paused"):
+                            self._last_schema_probe_mono = loop_mono
+                        active_tokens = self.feed.resolve_tokens(slug)
+                        if active_tokens.get("token_up"):
+                            t_retry = [t for t in (active_tokens.get("token_up"), active_tokens.get("token_down")) if t]
+                            self.trade_stream.set_active_targets([slug], t_retry)
+                            self.book_ws.set_tokens(t_retry)
 
                 if did_rollover or getattr(self.runner, "_last_step_time", None) is None:
                     loop_start = time.time()
@@ -403,8 +559,8 @@ class PipelineDriver:
                         self._open_calib_future = None
 
                 if getattr(self.runner, "poly_open_is_provisional", False) and self._open_calib_future is None:
-                    if loop_start - getattr(self, "_last_open_check_t", 0.0) >= 3.0:
-                        self._last_open_check_t = loop_start
+                    if loop_mono - getattr(self, "_last_open_check_mono", 0.0) >= 3.0:
+                        self._last_open_check_mono = loop_mono
                         def _bg_calib(target_slug=slug, target_start=start_t):
                             iso_start = datetime.datetime.fromtimestamp(target_start, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                             iso_end = datetime.datetime.fromtimestamp(target_start + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -430,7 +586,7 @@ class PipelineDriver:
                             except Exception:
                                 pass
                             return target_slug, None
-                        self._open_calib_future = self._bg_executor.submit(_bg_calib)
+                        self._open_calib_future = self._fast_bg_executor.submit(_bg_calib)
 
                 # 2d. Non-blocking Cross-round Smooth Overlap: Pre-warm next 5m window at tau <= 30s
                 if self._prewarm_future is not None and self._prewarm_future.done():
@@ -457,7 +613,7 @@ class PipelineDriver:
                     if prewarmed_next.get("slug") != next_slug and self._prewarm_future is None:
                         def _bg_prewarm(ns=next_slug):
                             return ns, self.feed.resolve_tokens(ns)
-                        self._prewarm_future = self._bg_executor.submit(_bg_prewarm)
+                        self._prewarm_future = self._fast_bg_executor.submit(_bg_prewarm)
 
                 # 3. Step Evaluation Tick
                 if active_tokens.get("token_up") and active_tokens.get("token_down"):
@@ -481,7 +637,7 @@ class PipelineDriver:
                         tok = active_tokens.get("token_up" if side_name == "Up" else "token_down")
                         if not tok:
                             return None
-                        ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5)
+                        ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
                         if ws_bk is not None:
                             return ws_bk
                         return self.feed.fetch_order_book(tok, side_name)
@@ -500,12 +656,15 @@ class PipelineDriver:
                     )
                     if self.trade_stream.last_error:
                         net_summary["ws_last_error"] = self.trade_stream.last_error
+                    schema_guard = self.feed.get_api_schema_guard()
                     self.runner.step(
                         loop_start, spot, b_up, b_dn,
                         net_stats=net_summary,
                         trade_prints=trades,
                         poly_spot=poly_spot,
-                        delayed_book_fetcher=_delayed_book
+                        delayed_book_fetcher=_delayed_book,
+                        delayed_prints_fetcher=lambda: self.trade_stream.drain_trades(slug=slug),
+                        api_schema_guard=schema_guard,
                     )
 
                     # Formatted terminal status line (TTY: live overwrite; background/systemd: 60s clean heartbeat)
@@ -526,10 +685,12 @@ class PipelineDriver:
                         f"Act: {act.upper()} {side} {px_str} "
                         f"{'(' + last_dec.get('reason', '')[:25] + ')' if last_dec.get('reason') else ''}"
                     )
+                    cur_action_cnt = len(self.runner.actions)
                     if is_tty:
                         print(f"\r{status_line}", end="", flush=True)
-                    elif (loop_start - last_status_log_t) >= 60.0 or act not in ("wait", "hold"):
-                        last_status_log_t = loop_start
+                    elif (loop_mono - last_status_log_mono) >= 60.0 or cur_action_cnt != last_logged_action_cnt:
+                        last_status_log_mono = loop_mono
+                        last_logged_action_cnt = cur_action_cnt
                         print(status_line, flush=True)
                 else:
                     self._wake_event.clear()
@@ -539,18 +700,21 @@ class PipelineDriver:
                             f"Waiting for Polymarket contract deployment for {slug}...",
                             end="", flush=True
                         )
-                    elif (loop_start - last_status_log_t) >= 60.0:
-                        last_status_log_t = loop_start
+                    elif (loop_mono - last_status_log_mono) >= 60.0:
+                        last_status_log_mono = loop_mono
                         print(f"[{time.strftime('%H:%M:%S')}] Waiting for contract deployment for {slug}...", flush=True)
 
                 # Event-driven cadence: react within ~100ms on WS spot/book/trade push,
-                # while keeping a 0.5s heartbeat ceiling when the market is quiet.
+                # while keeping a 0.5s heartbeat ceiling (or 5s low-power sleep when API schema paused).
+                if self.feed.get_api_schema_guard().get("paused"):
+                    self._wake_event.wait(timeout=5.0)
+                    continue
                 min_interval_s = 0.10
                 max_interval_s = 0.50
-                elapsed = time.time() - loop_start
+                elapsed = time.monotonic() - loop_mono
                 if elapsed < min_interval_s:
                     time.sleep(min_interval_s - elapsed)
-                remaining = max_interval_s - (time.time() - loop_start)
+                remaining = max_interval_s - (time.monotonic() - loop_mono)
                 if remaining > 0 and self.running:
                     self._wake_event.wait(timeout=remaining)
 
@@ -561,15 +725,15 @@ class PipelineDriver:
             except Exception as e:
                 print(f"\n[Pipeline] Tick warning: {e}")
                 time.sleep(1.0)
-
-        self._shutdown_resources()
-        if last_slug:
-            print(
-                f"\n[Pipeline] WARNING: window {last_slug} was still open at shutdown and is "
-                f"NOT in the journal (positions are dropped, not settled)."
-            )
-        self._cleanup_pid()
-        print("[Pipeline] Shutdown complete.")
+        finally:
+            self._shutdown_resources()
+            if last_slug:
+                print(
+                    f"\n[Pipeline] INFO: window {last_slug} was still open at shutdown; "
+                    f"positions are preserved in live.json and will auto-resume or auto-settle on next startup."
+                )
+            self._cleanup_pid()
+            print("[Pipeline] Shutdown complete.")
 
 
 def handle_sig(sig, frame):

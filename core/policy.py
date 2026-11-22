@@ -79,19 +79,39 @@ def _plan_inventory_management(
     params: Dict[str, float],
     entries_count: int = 1,
     quote_attempts: int = 0,
+    circuit_breaker_active: bool = False,
 ) -> Decision:
     """Manage open directional inventory: black-swan lock, optional arb, tail salvage, or v2.6 secondary entry."""
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
     lot_size = float(params.get("LOT_SIZE", 5.0))
     min_order_sh = max(lot_size, float(params.get("MIN_ORDER_SHARES", 5.0)))
+    available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
 
-    if bool(params.get("ENABLE_ARBITRAGE_HEDGE", False)) and held_shares >= min_order_sh - 1e-4:
+    au, ad = held_book.best_ask, opp_book.best_ask
+    bu, bd = held_book.best_bid, opp_book.best_bid
+    opp_book_valid = (
+        opp_book.best_ask is not None
+        and (opp_book.best_bid is None or opp_book.best_bid < opp_book.best_ask)
+    )
+    dual_books_consistent = opp_book_valid
+    if bool(params.get("STRICT_BOOK_CONSISTENCY", True)):
+        if au is not None and ad is not None and bu is not None and bd is not None:
+            dual_books_consistent = (au + ad >= 0.995) and (bu + bd <= 1.005) and (bu < au) and (bd < ad)
+    spot_is_stale = bool(getattr(spot, "is_stale", False))
+
+    if (
+        bool(params.get("ENABLE_ARBITRAGE_HEDGE", False))
+        and held_shares >= min_order_sh - 1e-4
+        and opp_book_valid
+        and not spot_is_stale
+    ):
         max_pair_cost = float(params.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
         hedge_ask = opp_book.best_ask
         if hedge_ask is not None:
             fee = taker_fee_per_share(hedge_ask, fee_rate)
             pair_cost = held_basis + hedge_ask + fee
-            if pair_cost <= max_pair_cost:
+            need_cash = held_shares * (hedge_ask + fee)
+            if pair_cost <= max_pair_cost and available_cap + 1e-9 >= need_cash:
                 return Decision(
                     action="taker_hedge",
                     side=opp_side,
@@ -102,14 +122,20 @@ def _plan_inventory_management(
                 )
 
     # Ultra-deep black-swan lock: protect 94%+ winners (opp_ask <= $0.06 & pair_cost <= $0.85, requires >= 5.0 shares)
-    if bool(params.get("ENABLE_BLACKSWAN_LOCK", False)) and held_shares >= min_order_sh - 1e-4:
+    if (
+        bool(params.get("ENABLE_BLACKSWAN_LOCK", False))
+        and held_shares >= min_order_sh - 1e-4
+        and dual_books_consistent
+        and not spot_is_stale
+    ):
         bs_max_opp = float(params.get("BLACKSWAN_LOCK_MAX_OPP_ASK", 0.06))
         bs_max_pair = float(params.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
         hedge_ask = opp_book.best_ask
         if hedge_ask is not None and hedge_ask <= bs_max_opp + 1e-6:
             fee = taker_fee_per_share(hedge_ask, fee_rate)
             pair_cost = held_basis + hedge_ask + fee
-            if pair_cost <= bs_max_pair + 1e-6:
+            need_cash = held_shares * (hedge_ask + fee)
+            if pair_cost <= bs_max_pair + 1e-6 and available_cap + 1e-9 >= need_cash:
                 return Decision(
                     action="taker_hedge",
                     side=opp_side,
@@ -128,7 +154,13 @@ def _plan_inventory_management(
         and bool(params.get("ALLOW_TAKER_UNWIND", True))
     )
 
-    if salvage_enabled and held_shares >= min_order_sh - 1e-4 and tau_s <= salvage_tau and p_fair_held < salvage_prob:
+    if (
+        salvage_enabled
+        and not spot_is_stale
+        and held_shares >= min_order_sh - 1e-4
+        and tau_s <= salvage_tau
+        and p_fair_held < salvage_prob
+    ):
         salvage_bid = held_book.best_bid
         if salvage_bid is not None and salvage_min_bid <= salvage_bid <= salvage_max_bid:
             fee = taker_fee_per_share(salvage_bid, fee_rate)
@@ -141,6 +173,13 @@ def _plan_inventory_management(
                 utility=round(salvage_bid - fee, 4),
                 reason=f"Defensive Salvage: 尾盘({tau_s:.0f}s) P*={p_fair_held:.2f} 坍塌，市价出清残值 bid={salvage_bid:.2f} (挽回${salvage_cash:.2f})",
             )
+
+    # Under reduce-only circuit breaker, never open secondary risk (pyramid add / reversal flip)
+    if circuit_breaker_active:
+        return _wait(
+            f"Circuit breaker reduce-only: 持有 {held_shares:.0f} 股 {held_side} @ ${held_basis:.2f}，禁止加仓/反手",
+            urgent=True,
+        )
 
     max_shares_cap = lot_size * int(params.get("MAX_LOTS", 1))
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
@@ -311,12 +350,10 @@ def plan_decision(
     d_shares = pos_down.shares
     net_gap = round(u_shares - d_shares, 4)
 
-    # 1. Watchdog: Circuit breaker
+    # 1. Watchdog: Circuit breaker (True reduce-only: permits inventory-reducing
+    #    hedges / tail salvage on open positions, blocks all new entries)
     cb_enabled = bool(params.get("ENABLE_CIRCUIT_BREAKER", True))
     cb_active = cb_enabled and (circuit_breaker_active or bool(params.get("CIRCUIT_BREAKER_ACTIVE", False)))
-    if cb_active:
-        cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
-        return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
 
     # 2. Fair probability evaluation (Asian 60s TWAP Brownian bridge)
     if p_fair is None:
@@ -348,7 +385,12 @@ def plan_decision(
             params=params,
             entries_count=entries_count,
             quote_attempts=quote_attempts,
+            circuit_breaker_active=cb_active,
         )
+
+    if cb_active:
+        cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
+        return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
 
     if u_shares > 1e-4 and d_shares > 1e-4 and abs(net_gap) < 1e-4:
         return _wait(
@@ -479,7 +521,9 @@ def plan_decision(
         )
 
     if wall_blocked_msg:
-        return _wait(wall_blocked_msg, urgent=False)
+        # Urgent cancel so any already-resting passive bid directly in front of
+        # a newly formed massive ask wall is pulled immediately instead of taking toxic flow.
+        return _wait(wall_blocked_msg, urgent=True)
 
     return _wait(
         f"v2.8: 盘口无足够净边际 (P*(Up)={p_up:.2f}, Up={bu}/{au}, Dn={bd}/{ad})",

@@ -6,11 +6,14 @@ or transiently disconnected.
 """
 import asyncio
 import json
+import math
+import random
 import threading
 import time
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from core.types import OrderBook
+from runtime.alerts import notify as send_alert
 
 BINANCE_WS_URLS = (
     "wss://data-stream.binance.vision/ws/btcusdt@bookTicker",
@@ -21,9 +24,22 @@ POLY_CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
     try:
-        return float(val) if val is not None else default
+        if val is None:
+            return default
+        out = float(val)
+        return out if math.isfinite(out) else default
     except (TypeError, ValueError):
         return default
+
+
+def _ws_reconnect_backoff(attempt: int, err_text: str = "", base_s: float = 1.5, cap_s: float = 30.0) -> float:
+    """Compute exponential backoff with jitter; slow down aggressively on 403/429/451."""
+    low = str(err_text or "").lower()
+    is_blocked = any(tok in low for tok in ("403", "429", "451", "forbidden", "too many requests", "geo"))
+    eff_base = max(base_s, 12.0) if is_blocked else base_s
+    eff_cap = max(cap_s, 60.0) if is_blocked else cap_s
+    exp = min(eff_cap, eff_base * (2 ** min(max(0, int(attempt) - 1), 5)))
+    return round(exp * random.uniform(0.85, 1.15), 2)
 
 
 def _install_ws_loop_exception_filter(loop: asyncio.AbstractEventLoop):
@@ -69,11 +85,14 @@ class BinanceSpotWSClient:
         self.connected = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_task: Optional[asyncio.Task] = None
+        self._reconnect_flag: bool = False
         self._lock = threading.Lock()
 
         self._price: float = 0.0
         self._last_wake_px: float = 0.0
         self._updated_t: float = 0.0
+        self._last_pong_t: float = 0.0
         self._source: str = "binance_ws"
         self.rtt_ms: float = 0.0
         self.msg_count: int = 0
@@ -87,16 +106,24 @@ class BinanceSpotWSClient:
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="BinanceSpotWS")
         self._thread.start()
 
+    def force_reconnect(self):
+        """Request an immediate clean reconnect (e.g. after proxy route failover)."""
+        self._reconnect_flag = True
+
     def stop(self):
         self.running = False
         self.connected = False
-        if self._loop and self._loop.is_running():
+        loop = self._loop
+        if loop and loop.is_running():
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                def _cancel_worker():
+                    if self._worker_task is not None and not self._worker_task.done():
+                        self._worker_task.cancel()
+                loop.call_soon_threadsafe(_cancel_worker)
             except Exception:
                 pass
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=2.5)
 
     def apply_message(self, payload: Dict[str, Any], now: Optional[float] = None) -> bool:
         """Parse one Binance bookTicker / trade JSON object and update latest mid."""
@@ -139,19 +166,34 @@ class BinanceSpotWSClient:
         asyncio.set_event_loop(self._loop)
         _install_ws_loop_exception_filter(self._loop)
         try:
-            self._loop.run_until_complete(self._ws_worker())
+            self._worker_task = self._loop.create_task(self._ws_worker())
+            self._loop.run_until_complete(self._worker_task)
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
         finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            self._worker_task = None
             self._loop.close()
 
     async def _ws_worker(self):
         import websockets
 
         url_idx = 0
+        consec_fails = 0
         recv_timeout = min(2.0, self.idle_reconnect_s)
         while self.running:
             url = BINANCE_WS_URLS[url_idx % len(BINANCE_WS_URLS)]
+            self._reconnect_flag = False
+            connected_at = 0.0
             try:
                 connect_kwargs: Dict[str, Any] = {
                     "ping_interval": 15,
@@ -162,12 +204,18 @@ class BinanceSpotWSClient:
                     connect_kwargs["proxy"] = self.proxy
                 async with websockets.connect(url, **connect_kwargs) as ws:
                     self.connected = True
+                    connected_at = time.monotonic()
+                    def _on_rtt(ms: float):
+                        self.rtt_ms = ms
+                        with self._lock:
+                            self._last_pong_t = time.time()
+
                     ping_task = asyncio.create_task(
-                        _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
+                        _ws_ping_rtt_loop(ws, _on_rtt, interval_s=5.0)
                     )
                     last_activity_t = time.monotonic()
                     try:
-                        while self.running:
+                        while self.running and not self._reconnect_flag:
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
                             except asyncio.TimeoutError:
@@ -182,20 +230,38 @@ class BinanceSpotWSClient:
 
                             if accepted:
                                 last_activity_t = time.monotonic()
+                                if consec_fails > 0 and (last_activity_t - connected_at) >= 30.0:
+                                    consec_fails = 0
                             elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
                                 raise TimeoutError(
                                     f"BinanceSpotWS idle watchdog: no tickers for {self.idle_reconnect_s:.1f}s"
                                 )
                     finally:
                         ping_task.cancel()
+                        await asyncio.gather(ping_task, return_exceptions=True)
+                if self._reconnect_flag:
+                    self.connected = False
+                    consec_fails = 0
+                    continue
+            except asyncio.CancelledError:
+                self.connected = False
+                break
             except Exception as exc:
                 self.connected = False
                 self.rtt_ms = 0.0
                 self.reconnect_count += 1
+                consec_fails += 1
                 self.last_error = str(exc)
                 url_idx += 1
+                if consec_fails in (5, 15) or any(c in self.last_error for c in ("403", "451", "429")):
+                    send_alert(
+                        "binance_spot_ws_err",
+                        "Binance Spot WS 异常断连",
+                        f"连续失败 {consec_fails} 次，错误: {self.last_error[:180]}",
+                        level="warn",
+                    )
                 if self.running:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(_ws_reconnect_backoff(consec_fails, self.last_error, base_s=1.5, cap_s=30.0))
 
 
 class PolymarketBookWSClient:
@@ -214,6 +280,7 @@ class PolymarketBookWSClient:
         self.connected = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_task: Optional[asyncio.Task] = None
         self._lock = threading.Lock()
 
         self._active_tokens: Tuple[str, ...] = ()
@@ -221,10 +288,29 @@ class PolymarketBookWSClient:
         # asset_id -> {"bids": {px: sz}, "asks": {px: sz}, "last_trade": float|None, "t": float, "ready": bool}
         self._books: Dict[str, Dict[str, Any]] = {}
         self._last_ws_msg_t: float = 0.0
+        self._last_pong_t: float = 0.0
         self.rtt_ms: float = 0.0
         self.msg_count: int = 0
         self.reconnect_count: int = 0
         self.last_error: str = ""
+
+    def _invalidate_all_books(self):
+        """Mark every cached L2 book not-ready and clear liveness timestamps on disconnect/reconnect.
+
+        Prevents stale pre-disconnect orderbooks from being resurrected as 'fresh' by a
+        brand-new connection's first ping/pong before fresh 'book' snapshots arrive.
+        """
+        with self._lock:
+            for st in self._books.values():
+                st["ready"] = False
+            self._last_pong_t = 0.0
+            self._last_ws_msg_t = 0.0
+
+    def force_reconnect(self):
+        """Force immediate resubscribe/reconnect (e.g. after proxy failover)."""
+        with self._lock:
+            self._token_gen += 1
+        self._invalidate_all_books()
 
     def set_tokens(self, token_ids: Sequence[str]):
         """Update subscribed CLOB asset IDs; triggers immediate resubscription."""
@@ -250,13 +336,17 @@ class PolymarketBookWSClient:
     def stop(self):
         self.running = False
         self.connected = False
-        if self._loop and self._loop.is_running():
+        loop = self._loop
+        if loop and loop.is_running():
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                def _cancel_worker():
+                    if self._worker_task is not None and not self._worker_task.done():
+                        self._worker_task.cancel()
+                loop.call_soon_threadsafe(_cancel_worker)
             except Exception:
                 pass
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=2.5)
 
     def apply_message(self, data: Any, now: Optional[float] = None) -> bool:
         """Apply a Polymarket CLOB WS book snapshot, price_change, or last_trade_price message."""
@@ -373,13 +463,21 @@ class PolymarketBookWSClient:
                         return True
         return False
 
-    def get_order_book(self, token_id: str, max_age_s: float = 3.0, now: Optional[float] = None) -> Optional[OrderBook]:
+    def get_order_book(
+        self,
+        token_id: str,
+        max_age_s: float = 3.0,
+        now: Optional[float] = None,
+        require_recent_msg: bool = False,
+    ) -> Optional[OrderBook]:
         """Build a sorted OrderBook snapshot from WS memory if fresh, else None.
 
         When the WebSocket session is actively connected and receiving stream
-        traffic within `idle_reconnect_s`, an unchanged quiet book is still live:
-        its `received_at` is stamped at `now` while `source_t` preserves the last
-        book-change timestamp.
+        traffic (or RFC 6455 pong keepalives) within `idle_reconnect_s`, an
+        unchanged quiet book is still live: its `received_at` is stamped at
+        `now`. Callers performing delayed IOC verification can pass
+        `require_recent_msg=True` to require a recent book message within
+        `max_age_s` or else fall back to HTTP REST.
         """
         t = time.time() if now is None else float(now)
         with self._lock:
@@ -388,8 +486,16 @@ class PolymarketBookWSClient:
                 return None
             src_t = float(st.get("t", 0.0))
             if self.connected:
-                # Live WS stream: validate connection-level freshness against idle watchdog
-                stream_age = t - float(self._last_ws_msg_t or src_t)
+                if require_recent_msg:
+                    msg_age = t - float(self._last_ws_msg_t or src_t)
+                    if msg_age > max_age_s:
+                        return None
+                # Guard against silent single-token freeze even if global pong is alive
+                if src_t > 0.0 and (t - src_t) > max(60.0, self.idle_reconnect_s * 3.0):
+                    return None
+                # Live WS stream: validate connection-level liveness (msg or pong) against idle watchdog
+                last_alive = max(float(self._last_ws_msg_t or 0.0), float(self._last_pong_t or 0.0), src_t)
+                stream_age = t - last_alive
                 if stream_age > max(max_age_s, self.idle_reconnect_s):
                     return None
                 eff_t = t
@@ -419,15 +525,28 @@ class PolymarketBookWSClient:
         asyncio.set_event_loop(self._loop)
         _install_ws_loop_exception_filter(self._loop)
         try:
-            self._loop.run_until_complete(self._ws_worker())
+            self._worker_task = self._loop.create_task(self._ws_worker())
+            self._loop.run_until_complete(self._worker_task)
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
         finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            self._worker_task = None
             self._loop.close()
 
     async def _ws_worker(self):
         import websockets
 
+        consec_fails = 0
         recv_timeout = min(1.0, self.idle_reconnect_s)
         while self.running:
             with self._lock:
@@ -435,9 +554,14 @@ class PolymarketBookWSClient:
                 gen = self._token_gen
             if not tokens:
                 self.connected = False
+                self._invalidate_all_books()
                 await asyncio.sleep(0.25)
                 continue
 
+            # Invalidate any stale cached L2 snapshots BEFORE connecting so a new
+            # session's first pong cannot resurrect pre-disconnect books.
+            self._invalidate_all_books()
+            connected_at = 0.0
             try:
                 connect_kwargs: Dict[str, Any] = {
                     "ping_interval": 15,
@@ -448,9 +572,15 @@ class PolymarketBookWSClient:
                     connect_kwargs["proxy"] = self.proxy
                 async with websockets.connect(POLY_CLOB_WS_URL, **connect_kwargs) as ws:
                     self.connected = True
+                    connected_at = time.monotonic()
                     await ws.send(json.dumps({"assets_ids": list(tokens), "type": "market"}))
+                    def _on_rtt(ms: float):
+                        self.rtt_ms = ms
+                        with self._lock:
+                            self._last_pong_t = time.time()
+
                     ping_task = asyncio.create_task(
-                        _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
+                        _ws_ping_rtt_loop(ws, _on_rtt, interval_s=5.0)
                     )
                     last_activity_t = time.monotonic()
                     try:
@@ -460,6 +590,7 @@ class PolymarketBookWSClient:
                             if cur_gen != gen:
                                 # Token set changed (or crossed-book self-heal triggered) -> reconnect cleanly
                                 self.connected = False
+                                consec_fails = 0
                                 break
 
                             try:
@@ -476,16 +607,32 @@ class PolymarketBookWSClient:
 
                             if accepted:
                                 last_activity_t = time.monotonic()
+                                if consec_fails > 0 and (last_activity_t - connected_at) >= 30.0:
+                                    consec_fails = 0
                             elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
                                 raise TimeoutError(
                                     f"PolyBookWS idle watchdog: no book updates for {self.idle_reconnect_s:.1f}s"
                                 )
                     finally:
                         ping_task.cancel()
+                        await asyncio.gather(ping_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                self.connected = False
+                self._invalidate_all_books()
+                break
             except Exception as exc:
                 self.connected = False
+                self._invalidate_all_books()
                 self.rtt_ms = 0.0
                 self.reconnect_count += 1
+                consec_fails += 1
                 self.last_error = str(exc)
+                if consec_fails in (5, 15) or any(c in self.last_error for c in ("403", "429")):
+                    send_alert(
+                        "poly_book_ws_err",
+                        "Polymarket Book WS 异常断连",
+                        f"连续失败 {consec_fails} 次，错误: {self.last_error[:180]}",
+                        level="warn",
+                    )
                 if self.running:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(_ws_reconnect_backoff(consec_fails, self.last_error, base_s=1.5, cap_s=30.0))

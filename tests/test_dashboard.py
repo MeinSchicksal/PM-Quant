@@ -349,6 +349,51 @@ class TestInvestorDashboard(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_non_loopback_bind_requires_password_and_history_gzip_cache(self):
+        import os
+        import gzip
+        import json
+        import threading
+        import urllib.request
+        from unittest.mock import patch
+        from web.server import _HardenedHTTPServer, QuantHandler, _validate_bind_security
+
+        with patch.dict(os.environ, {"PM_WEB_PASS": ""}):
+            # Loopback without password is allowed
+            _validate_bind_security("127.0.0.1")
+            _validate_bind_security("localhost")
+            # Public 0.0.0.0 without password must raise
+            with self.assertRaises(RuntimeError):
+                _validate_bind_security("0.0.0.0")
+        with patch.dict(os.environ, {"PM_WEB_PASS": "strongpass"}):
+            _validate_bind_security("0.0.0.0")
+
+        httpd = _HardenedHTTPServer(("127.0.0.1", 0), QuantHandler)
+        port = httpd.server_address[1]
+        th = threading.Thread(target=httpd.serve_forever, daemon=True)
+        th.start()
+        try:
+            with patch.dict(os.environ, {"PM_WEB_PASS": ""}):
+                # Plain request (no Accept-Encoding: gzip) receives plain JSON
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/history", timeout=3) as resp:
+                    self.assertIsNone(resp.headers.get("Content-Encoding"))
+                    plain_data = json.loads(resp.read().decode("utf-8"))
+                # Request with Accept-Encoding: gzip receives valid JSON (gzip if >1KB)
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/history",
+                    headers={"Accept-Encoding": "gzip"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp2:
+                    raw2 = resp2.read()
+                    if resp2.headers.get("Content-Encoding") == "gzip":
+                        raw2 = gzip.decompress(raw2)
+                    gz_data = json.loads(raw2.decode("utf-8"))
+                self.assertEqual(plain_data["total_rounds"], gz_data["total_rounds"])
+                self.assertEqual(plain_data["total_pnl"], gz_data["total_pnl"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

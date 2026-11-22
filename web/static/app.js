@@ -4,6 +4,20 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Bounded fetch helper: prevents mobile 4G/Wi-Fi handoff half-open sockets from wedging _fetchInFlight
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+  if (typeof AbortController === "undefined") {
+    return fetch(url, options);
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Prevent unnecessary DOM rebuilds on 500ms polling so :hover states and scroll positions never flicker
 const _lastHtmlCache = new WeakMap();
 function setHtmlIfChanged(el, html) {
@@ -799,15 +813,19 @@ function updateOverview(live, hist) {
     $("kpi-avg-split").textContent = `均盈 +$${avgWin.toFixed(2)} · 均亏 -$${avgLoss.toFixed(2)}`;
   }
 
-  // Compute hedge lock rate & total fills across settled records
+  // Compute hedge lock rate & total fills across ALL settled records (prefer server full-history totals)
   const rawRecords = Array.isArray(hist.records) ? hist.records : [];
   const normRecords = rawRecords.map(normalizeRecord).filter(Boolean);
-  let pairedCount = 0;
-  let totalFills = 0;
-  normRecords.forEach((r) => {
-    totalFills += r.fills_count;
-    if (r.up_shares > 0 && r.down_shares > 0) pairedCount += 1;
-  });
+  let pairedCount = Number.isFinite(Number(hist.paired_rounds)) ? Number(hist.paired_rounds) : 0;
+  let totalFills = Number.isFinite(Number(hist.total_fills)) ? Number(hist.total_fills) : 0;
+  if (!Number.isFinite(Number(hist.paired_rounds)) || !Number.isFinite(Number(hist.total_fills))) {
+    pairedCount = 0;
+    totalFills = 0;
+    normRecords.forEach((r) => {
+      totalFills += r.fills_count;
+      if (r.up_shares > 0 && r.down_shares > 0) pairedCount += 1;
+    });
+  }
   const hedgeRate = tradedRounds > 0 ? (pairedCount / tradedRounds) * 100 : 0;
   if ($("kpi-hedge-rate")) $("kpi-hedge-rate").textContent = `${hedgeRate.toFixed(1)}%`;
   if ($("kpi-total-fills")) {
@@ -1329,12 +1347,15 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
 // ============================================================================
 // VIEW 3: FULL HISTORY LEDGER & FILTERING
 // ============================================================================
+let _historyRenderCap = 200;
+
 function renderHistoryTable(hist) {
   const tbody = $("history-tbody");
   const countEl = $("history-count");
   if (!tbody) return;
 
   const rawRecords = Array.isArray(hist?.records) ? hist.records : [];
+  const totalServerRounds = Number(hist?.records_total || hist?.total_rounds || rawRecords.length);
   const allRecords = rawRecords.map(normalizeRecord).filter(Boolean);
   const filtered = allRecords.filter((r) => {
     if (historyFilterMode === "traded") return r.traded;
@@ -1343,18 +1364,53 @@ function renderHistoryTable(hist) {
     return true;
   });
 
+  const visible = filtered.slice(0, _historyRenderCap);
   if (countEl) {
+    const capNote = totalServerRounds > allRecords.length ? `（已载入近 ${allRecords.length} 场）` : "";
     const statHtml = historyFilterMode === "all"
-      ? `共 <strong>${allRecords.length}</strong> 场`
-      : `已筛选 <strong>${filtered.length}</strong> / ${allRecords.length} 场`;
+      ? `共 <strong>${totalServerRounds}</strong> 场${capNote}`
+      : `已筛选 <strong>${filtered.length}</strong> / ${allRecords.length} 场${capNote}`;
     setHtmlIfChanged(countEl, statHtml);
   }
 
-  if (filtered.length === 0) {
+  if (visible.length === 0) {
     setHtmlIfChanged(tbody, `<tr><td colspan="10" class="action-empty">当前筛选条件下暂无场次记录</td></tr>`);
     return;
   }
-  setHtmlIfChanged(tbody, filtered.map((r) => buildRoundTableRow(r, true)).join(""));
+  let rowsHtml = visible.map((r) => buildRoundTableRow(r, true)).join("");
+  if (filtered.length > visible.length) {
+    rowsHtml += `<tr><td colspan="10" class="action-empty"><button type="button" class="filter-btn" id="history-load-more-btn">显示更多（剩余 ${filtered.length - visible.length} 场）</button></td></tr>`;
+  } else if (hist?.records_truncated && totalServerRounds > allRecords.length) {
+    rowsHtml += `<tr><td colspan="10" class="action-empty"><button type="button" class="filter-btn" id="history-fetch-older-btn">从服务端加载更早记录（已载入 ${allRecords.length} / ${totalServerRounds} 场）</button></td></tr>`;
+  }
+  if (setHtmlIfChanged(tbody, rowsHtml)) {
+    const moreBtn = $("history-load-more-btn");
+    if (moreBtn) {
+      moreBtn.addEventListener("click", () => {
+        _historyRenderCap += 200;
+        renderHistoryTable(cachedHistory || hist);
+      });
+    }
+    const olderBtn = $("history-fetch-older-btn");
+    if (olderBtn) {
+      olderBtn.addEventListener("click", async () => {
+        olderBtn.disabled = true;
+        olderBtn.textContent = "正在加载更早场次...";
+        const nextLim = Math.min(5000, Math.max(allRecords.length + 500, 1000));
+        try {
+          const r = await fetchWithTimeout(`/api/history?limit=${nextLim}`, { cache: "no-store" }, 10000);
+          if (r.ok) {
+            cachedHistory = await r.json();
+            _historyRenderCap = nextLim;
+            renderHistoryTable(cachedHistory);
+          }
+        } catch (_) {
+          olderBtn.disabled = false;
+          olderBtn.textContent = "加载失败，点击重试";
+        }
+      });
+    }
+  }
 }
 
 // ============================================================================
@@ -2474,7 +2530,7 @@ async function openRoundModal(slug) {
   body.innerHTML = `<div class="action-empty">正在加载 ${escapeHtml(slug)} 的 5 分钟秒级复盘数据...</div>`;
 
   try {
-    const res = await fetch(`/api/window?slug=${encodeURIComponent(slug)}`, { cache: "no-store" });
+    const res = await fetchWithTimeout(`/api/window?slug=${encodeURIComponent(slug)}`, { cache: "no-store" }, 8000);
     if (!res.ok) {
       if (res.status === 404 && rec) {
         const pnlCls = rec.pnl > 1e-6 ? "up" : rec.pnl < -1e-6 ? "down" : "";
@@ -3715,12 +3771,12 @@ function updateSystemStatusWidgets(sys, live) {
 
 async function fetchSystemStatus(force = false) {
   const nowMs = Date.now();
-  if (!force && cachedSystemStatus && nowMs - lastSystemFetchMs < 10000) {
+  if (!force && cachedSystemStatus && nowMs - lastSystemFetchMs < 15000) {
     updateSystemStatusWidgets(cachedSystemStatus, cachedLive);
     return;
   }
   try {
-    const res = await fetch(`/api/system${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+    const res = await fetchWithTimeout(`/api/system${force ? "?refresh=1" : ""}`, { cache: "no-store" }, 6000);
     if (!res.ok) return;
     const sys = await res.json();
     lastSystemFetchMs = nowMs;
@@ -3731,7 +3787,18 @@ async function fetchSystemStatus(force = false) {
 // ============================================================================
 // DATA POLLING & EVENT BINDINGS
 // ============================================================================
+let _fetchInFlight = false;
+let _lastHistoryFetchMs = 0;
+let _lastHistorySlug = null;
+let _lastHistoryFillsCount = -1;
+let _pollTimerId = null;
+
 async function fetchAll(isManual = false) {
+  if (!isManual && _fetchInFlight) {
+    return;
+  }
+  _fetchInFlight = true;
+
   const connPill = $("conn-pill");
   const connText = $("conn-text");
   const refreshBtn = $("refresh-btn");
@@ -3741,20 +3808,40 @@ async function fetchAll(isManual = false) {
   }
 
   try {
-    const [liveRes, histRes] = await Promise.all([
-      fetch("/api/live", { cache: "no-store" }),
-      fetch("/api/history", { cache: "no-store" }),
-    ]);
-
-    if (!liveRes.ok || !histRes.ok) {
-      throw new Error(`HTTP ${liveRes.status}/${histRes.status}`);
+    const liveRes = await fetchWithTimeout("/api/live", { cache: "no-store" }, 6000);
+    if (!liveRes.ok) {
+      throw new Error(`HTTP live=${liveRes.status}`);
     }
-
-    const [live, hist] = await Promise.all([liveRes.json(), histRes.json()]);
+    const live = await liveRes.json();
     cachedLive = live;
-    cachedHistory = hist;
     if (live && live.server_time) {
       syncServerClockOffset(live.server_time);
+    }
+
+    const nowMs = Date.now();
+    const curSlug = (live && live.slug) || null;
+    const curFills = Number((live && live.fills_count) || 0);
+    const histIntervalMs = document.hidden ? 60000 : 30000;
+    const needHistory =
+      isManual ||
+      !cachedHistory ||
+      nowMs - _lastHistoryFetchMs >= histIntervalMs ||
+      curSlug !== _lastHistorySlug ||
+      curFills !== _lastHistoryFillsCount;
+
+    let hist = cachedHistory;
+    let histUpdated = false;
+    if (needHistory) {
+      const histRes = await fetchWithTimeout("/api/history?limit=300", { cache: "no-store" }, 8000);
+      if (!histRes.ok) {
+        throw new Error(`HTTP history=${histRes.status}`);
+      }
+      hist = await histRes.json();
+      cachedHistory = hist;
+      _lastHistoryFetchMs = nowMs;
+      _lastHistorySlug = curSlug;
+      _lastHistoryFillsCount = curFills;
+      histUpdated = true;
     }
 
     if (connPill) connPill.className = "status-pill status-ready";
@@ -3770,7 +3857,9 @@ async function fetchAll(isManual = false) {
     updateOverview(live, hist);
     updateMarket(live);
     updateSmoothCountdowns();
-    renderHistoryTable(hist);
+    if (histUpdated && hist) {
+      renderHistoryTable(hist);
+    }
     fetchSystemStatus(isManual);
 
     if (isManual) {
@@ -3783,10 +3872,23 @@ async function fetchAll(isManual = false) {
       showToast("数据同步失败，请检查本地服务状态", "down");
     }
   } finally {
+    _fetchInFlight = false;
     if (isManual && refreshBtn) {
       setTimeout(() => refreshBtn.classList.remove("spinning"), 420);
     }
   }
+}
+
+function scheduleNextPoll() {
+  if (_pollTimerId !== null) {
+    clearTimeout(_pollTimerId);
+    _pollTimerId = null;
+  }
+  const delayMs = document.hidden ? 5000 : 1000;
+  _pollTimerId = setTimeout(async () => {
+    await fetchAll(false);
+    scheduleNextPoll();
+  }, delayMs);
 }
 
 function initInteractions() {
@@ -4011,7 +4113,7 @@ function initInteractions() {
 
   const loadSystemSettings = async (forceRefresh = false) => {
     try {
-      const resp = await fetch(`/api/system${forceRefresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+      const resp = await fetchWithTimeout(`/api/system${forceRefresh ? "?refresh=1" : ""}`, { cache: "no-store" }, 8000);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       renderSystemSettings(data);
@@ -4057,7 +4159,7 @@ function initInteractions() {
       settingsCleanupBtn.disabled = true;
       setSettingsFeedback("正在扫描并清理过期数据...");
       try {
-        const resp = await fetch("/api/cleanup", { method: "POST" });
+        const resp = await fetchWithTimeout("/api/cleanup", { method: "POST" }, 15000);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const res = await resp.json();
         if (res.system) {
@@ -4120,6 +4222,13 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(updateWallClock, 1000);
   setInterval(updateSmoothCountdowns, 250);
 
-  fetchAll(false);
-  setInterval(() => fetchAll(false), 500);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      fetchAll(false).finally(() => scheduleNextPoll());
+    } else {
+      scheduleNextPoll();
+    }
+  });
+
+  fetchAll(false).finally(() => scheduleNextPoll());
 });

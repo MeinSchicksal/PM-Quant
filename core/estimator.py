@@ -145,7 +145,11 @@ def calculate_dynamic_realized_vol(
         vol_bps: Realized volatility in basis points per 5-minute window (300s).
                  Clamped to [2.0 bps, 80.0 bps].
     """
-    valid = [(t, px) for t, px in spot_history if px > 0]
+    valid = [
+        (float(t), float(px))
+        for t, px in spot_history
+        if px is not None and t is not None and math.isfinite(float(t)) and math.isfinite(float(px)) and float(px) > 0
+    ]
     if len(valid) < 5:
         return baseline_vol_bps
         
@@ -153,6 +157,17 @@ def calculate_dynamic_realized_vol(
     t_start = valid[0][0]
     if (t_end - t_start) < 5.0:
         return baseline_vol_bps
+
+    # Downsample sub-second high-frequency ticks (e.g. 10Hz bookTicker) to >= 0.9s
+    # steps so bid-ask bounce in tiny dt does not inflate r^2 / dt realized variance.
+    sampled = [valid[0]]
+    for pt in valid[1:-1]:
+        if (pt[0] - sampled[-1][0]) >= 0.9:
+            sampled.append(pt)
+    if valid[-1][0] > sampled[-1][0]:
+        sampled.append(valid[-1])
+    if len(sampled) >= 5:
+        valid = sampled
 
     # Exponential decay constant: lambda_decay = ln(2) / half_life
     decay = math.log(2.0) / max(1.0, half_life_s)

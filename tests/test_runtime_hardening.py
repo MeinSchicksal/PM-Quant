@@ -10,6 +10,7 @@ Covers four defects that silently inflated or corrupted the paper journal:
 4. A dead Polymarket TWAP poller kept feeding a stale price into p_fair.
 """
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -758,6 +759,141 @@ class TestV26PolicyUpgrades(unittest.TestCase):
             self.assertEqual(ws_t.proxy, "http://127.0.0.1:7897")
         finally:
             feed.close()
+
+
+class TestProductionHardeningV28(unittest.TestCase):
+    def test_corrupted_summary_tail_does_not_wipe_history(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pm_corrupt_"))
+        try:
+            summary = tmp / "summary.jsonl"
+            valid_row = {
+                "slug": "btc-updown-5m-1800000000", "start": 1800000000.0, "end": 1800000300.0,
+                "winner": "Up", "winner_source": "gamma", "pos_up": 5.0, "pos_down": 0.0,
+                "total_cost": 2.5, "proceeds": 5.0, "net_pnl": 2.5, "fills_count": 1, "traded": True,
+            }
+            summary.write_text(json.dumps(valid_row) + "\n{\"slug\": \"truncated_half_line", encoding="utf-8")
+            runner = PaperRunner(ledger_dir=tmp)
+            self.assertAlmostEqual(runner.total_pnl, 2.5, places=4)
+            self.assertIn("btc-updown-5m-1800000000", runner._settled_slugs)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_resume_from_live_restores_same_slug_only(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pm_resume_"))
+        try:
+            slug = "btc-updown-5m-1800000600"
+            live_payload = {
+                "slug": slug,
+                "pos_up": {"shares": 5.0, "cash": 2.65, "avg_px": 0.53},
+                "pos_down": {"shares": 0.0, "cash": 0.0, "avg_px": 0.0},
+                "insurance_paid": 0.0,
+                "regime": "normal_oscillation",
+                "actions": [
+                    {"t": 1800000680.0, "action": "fill", "side": "Up", "price": 0.53, "size": 5.0, "kind": "maker", "purpose": "entry", "order_id": 7}
+                ],
+                "price_history": [{"t": 1800000600.0, "price": 65000.0}, {"t": 1800000680.0, "price": 65020.0}],
+                "decision_timeline": [{"t": 1800000680.0, "action": "quote"}],
+            }
+            (tmp / "live.json").write_text(json.dumps(live_payload), encoding="utf-8")
+
+            # Default resume_from_live=False keeps clean flat state
+            r_clean = PaperRunner(ledger_dir=tmp)
+            r_clean.start_window(slug, 1800000600.0, 1800000900.0, 65000.0)
+            self.assertEqual(r_clean.pos_up.shares, 0.0)
+            self.assertEqual(r_clean.entries_count, 0)
+
+            # Explicit resume_from_live=True restores matching slug state
+            r_resumed = PaperRunner(ledger_dir=tmp)
+            r_resumed.start_window(slug, 1800000600.0, 1800000900.0, 65000.0, resume_from_live=True)
+            self.assertAlmostEqual(r_resumed.pos_up.shares, 5.0, places=4)
+            self.assertAlmostEqual(r_resumed.pos_up.cash, 2.65, places=4)
+            self.assertEqual(r_resumed.entries_count, 1)
+            self.assertEqual(len(r_resumed.fills), 1)
+            self.assertGreaterEqual(r_resumed._next_order_id, 7)
+
+            # Different slug does not restore stale live.json
+            r_other = PaperRunner(ledger_dir=tmp)
+            r_other.start_window("btc-updown-5m-1800000900", 1800000900.0, 1800001200.0, 65000.0, resume_from_live=True)
+            self.assertEqual(r_other.pos_up.shares, 0.0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_twap_realized_60s_is_time_weighted_under_variable_cadence(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pm_twap_"))
+        try:
+            t0 = 1800000000.0
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0, binance_open_px=65000.0, poly_open_provisional=False)
+            runner._basis_ema = 0.0
+            runner._basis_updated_t = t0 + 270.0
+            # Quiet 20s at 2Hz (40 samples) around 65000, then volatile 2s at 10Hz (20 samples) around 65100.
+            # True time-weighted average over [240, 262] is close to ~65009, while naive arithmetic average is ~65033.
+            buf = []
+            for i in range(41):
+                buf.append((t0 + 240.0 + i * 0.5, 65000.0))
+            for i in range(1, 21):
+                buf.append((t0 + 260.0 + i * 0.1, 65100.0))
+            runner._spot_buf = buf
+            spot = SpotState(timestamp=t0 + 262.0, price=65100.0, open_price=65000.0, realized_vol_bps=14.0)
+            b_up = _book(0.55, 50.0, 0.56, 50.0)
+            b_dn = _book(0.44, 50.0, 0.45, 50.0)
+            runner.step(t0 + 262.0, spot, b_up, b_dn, poly_spot=65010.0, replay_mode=True)
+            self.assertIsNotNone(spot.twap_realized_60s)
+            self.assertLess(spot.twap_realized_60s, 65015.0)
+            self.assertGreater(spot.twap_realized_60s, 65004.0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_delayed_taker_cancels_when_pending_cancel_fills_in_transit(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pm_race_"))
+        try:
+            t0 = 1800000000.0
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0, binance_open_px=65000.0)
+            b_up = _book(0.54, 50.0, 0.56, 50.0)
+            b_dn = _book(0.44, 50.0, 0.46, 50.0)
+            spot = SpotState(timestamp=t0 + 120.0, price=65030.0, open_price=65000.0, realized_vol_bps=14.0)
+
+            # Step 1: place resting Maker bid (5 shares @ 0.55)
+            quote_dec = Decision(action="quote", side="Up", price=0.55, size=5.0, reason="maker quote")
+            with patch("runtime.runner.plan_decision", return_value=quote_dec):
+                runner.step(t0 + 120.0, spot, b_up, b_dn, replay_mode=True)
+            self.assertEqual(len(runner.working_orders), 1)
+
+            # Step 2: 1s later, strategy flips to taker_buy (5 shares @ 0.56), cancelling the Maker bid
+            # with 300ms wire cancel latency. During the 300ms transit, a trade print hits the Maker bid.
+            take_dec = Decision(action="taker_buy", side="Up", price=0.56, size=5.0, reason="flip to taker")
+            in_transit_prints = [{"outcome": "Up", "price": 0.55, "size": 10.0, "received_at": t0 + 121.10}]
+            with patch("runtime.runner.plan_decision", return_value=take_dec):
+                runner.step(
+                    t0 + 121.0, spot, b_up, b_dn,
+                    replay_mode=True,
+                    delayed_book_fetcher=lambda _side: b_up,
+                    delayed_prints_fetcher=lambda: in_transit_prints,
+                )
+            # Only the 5-share Maker fill should occur; duplicate 5-share Taker chase must be blocked.
+            self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
+            self.assertTrue(any(a.get("action") == "taker_reject" and "取消重复Taker追单" in (a.get("reason") or "") for a in runner.actions))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_ws_book_require_recent_msg_and_pong_liveness(self):
+        from runtime.ws_feeds import PolymarketBookWSClient
+
+        ws = PolymarketBookWSClient(idle_reconnect_s=20.0)
+        tok = "tok-up-live"
+        ws.apply_message([{
+            "event_type": "book",
+            "asset_id": tok,
+            "bids": [{"price": "0.49", "size": "50"}],
+            "asks": [{"price": "0.51", "size": "50"}],
+        }], now=1000.0)
+        ws.connected = True
+        ws._last_pong_t = 1004.5
+        # Quiet connected book stays live for regular 10Hz ticks thanks to pong keepalive
+        self.assertIsNotNone(ws.get_order_book(tok, max_age_s=3.0, now=1005.0, require_recent_msg=False))
+        # Delayed Taker verification requires recent book msg within 1.5s -> returns None to trigger REST check
+        self.assertIsNone(ws.get_order_book(tok, max_age_s=1.5, now=1005.0, require_recent_msg=True))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,36 @@
+[Unit]
+Description=PM-Quant Automated Paper Trading & Dashboard Service (All-in-One)
+After=network-online.target time-sync.target
+Wants=network-online.target
+# Rate-limit settings MUST live in [Unit] on systemd v230+ (ignored in [Service])
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/pm-quant
+Environment="PYTHONUNBUFFERED=1"
+Environment="PM_WEB_HOST=127.0.0.1"
+Environment="PM_TZ_OFFSET_HOURS=8"
+EnvironmentFile=-/etc/pm-quant.env
+ExecStart=/opt/pm-quant/.venv/bin/python main.py start 8900 --no-browser
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+# Safe cgroup v2 caps for 1G~2G RAM cloud instances (prevents swap thrashing / SSH lockup)
+MemoryHigh=450M
+MemoryMax=650M
+MemorySwapMax=256M
+NoNewPrivileges=true
+LimitNOFILE=8192
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pm-quant
+
+[Install]
+WantedBy=multi-user.target

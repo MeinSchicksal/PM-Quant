@@ -1,0 +1,35 @@
+[Unit]
+Description=PM-Quant Investor Web Dashboard (Isolated Process)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/pm-quant
+Environment="PYTHONUNBUFFERED=1"
+Environment="PM_WEB_HOST=127.0.0.1"
+Environment="PM_TZ_OFFSET_HOURS=8"
+EnvironmentFile=-/etc/pm-quant.env
+ExecStart=/opt/pm-quant/.venv/bin/python main.py web 8900 --no-browser
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+# Web OOM or restart can never kill or stall the trading engine
+MemoryHigh=192M
+MemoryMax=288M
+MemorySwapMax=128M
+NoNewPrivileges=true
+LimitNOFILE=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pm-quant-web
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+# PM-Quant HTTPS Reverse Proxy Example (Caddy v2)
+# 1. Replace `quant.example.com` with your domain pointing to the VPS public IP.
+# 2. Keep PM-Quant bound to 127.0.0.1:8900 (do NOT open port 8900 in firewall/SG).
+# 3. Set PM_WEB_USER and a strong PM_WEB_PASS in /etc/pm-quant.env.
+
+{
+    servers {
+        timeouts {
+            read_header 5s
+            read_body 10s
+            write 15s
+            idle 60s
+        }
+        max_header_size 16KB
+    }
+}
+
+quant.example.com {
+    encode zstd gzip
+    request_body {
+        max_size 64KB
+    }
+    reverse_proxy 127.0.0.1:8900 {
+        header_up X-Real-IP {remote_host}
+        transport http {
+            dial_timeout 3s
+            read_timeout 15s
+            write_timeout 15s
+        }
+    }
+    log {
+        output file /var/log/caddy/pm-quant.log {
+            roll_size 10MB
+            roll_keep 5
+            roll_keep_for 168h
+        }
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+    }
+}

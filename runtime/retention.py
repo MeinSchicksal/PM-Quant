@@ -16,6 +16,7 @@ CRITICAL INVARIANT:
 - Today's UTC date folder under `data/1_market/` is NEVER deleted.
 """
 import datetime
+import json
 import re
 import shutil
 import threading
@@ -31,6 +32,8 @@ _SLUG_EPOCH_RE = re.compile(r"(\d{9,11})\.json\.gz$")
 _PRUNABLE_MARKET_CATS = ("events", "oracle", "books", "spot")
 
 _GUARD_LOCK = threading.Lock()
+_CLEANUP_EXEC_LOCK = threading.Lock()
+_DISK_GUARD_FILE = config.RUNTIME_DIR / "disk_guard.json"
 _DISK_GUARD_STATE: Dict[str, Any] = {
     "paused": False,
     "reason": "",
@@ -38,6 +41,35 @@ _DISK_GUARD_STATE: Dict[str, Any] = {
     "pressure_triggered": False,
     "last_cleanup": None,
 }
+
+
+def _persist_disk_guard_state(state: Dict[str, Any]):
+    """Best-effort atomic persist so separate engine/web processes share disk guard status."""
+    try:
+        _DISK_GUARD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISK_GUARD_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_DISK_GUARD_FILE)
+    except OSError:
+        pass
+
+
+def _sync_disk_guard_from_disk():
+    """Refresh in-memory guard snapshot if another process wrote a newer timestamp."""
+    if not _DISK_GUARD_FILE.exists():
+        return
+    try:
+        raw = json.loads(_DISK_GUARD_FILE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return
+        file_ts = float(raw.get("checked_at") or 0.0)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+    with _GUARD_LOCK:
+        if file_ts > float(_DISK_GUARD_STATE.get("checked_at") or 0.0):
+            for k in ("paused", "reason", "checked_at", "pressure_triggered", "last_cleanup"):
+                if k in raw:
+                    _DISK_GUARD_STATE[k] = raw[k]
 
 
 def is_raw_recording_allowed() -> bool:
@@ -48,7 +80,14 @@ def is_raw_recording_allowed() -> bool:
         return not bool(_DISK_GUARD_STATE.get("paused", False))
 
 
+def is_replay_archive_allowed() -> bool:
+    """Return False only when disk is critically full so summary.jsonl always survives."""
+    with _GUARD_LOCK:
+        return not bool(_DISK_GUARD_STATE.get("paused", False))
+
+
 def get_disk_guard_state() -> Dict[str, Any]:
+    _sync_disk_guard_from_disk()
     with _GUARD_LOCK:
         return dict(_DISK_GUARD_STATE)
 
@@ -184,6 +223,41 @@ def cleanup_old_data(
 
     Never touches `summary.jsonl`, `live.json`, `.gitkeep`, or today's active UTC folder.
     """
+    with _CLEANUP_EXEC_LOCK:
+        return _cleanup_old_data_locked(
+            market_dir=market_dir,
+            ledgers_dir=ledgers_dir,
+            logs_dir=logs_dir,
+            market_days=market_days,
+            replay_days=replay_days,
+            log_days=log_days,
+            now=now,
+            dry_run=dry_run,
+            disk_usage_fn=disk_usage_fn,
+            max_data_mb=max_data_mb,
+            min_free_gb=min_free_gb,
+            disk_hard_pct=disk_hard_pct,
+            disk_soft_pct=disk_soft_pct,
+            update_guard_state=update_guard_state,
+        )
+
+
+def _cleanup_old_data_locked(
+    market_dir: Optional[Path] = None,
+    ledgers_dir: Optional[Path] = None,
+    logs_dir: Optional[Path] = None,
+    market_days: Optional[int] = None,
+    replay_days: Optional[int] = None,
+    log_days: Optional[int] = None,
+    now: Optional[float] = None,
+    dry_run: bool = False,
+    disk_usage_fn: Optional[Callable] = None,
+    max_data_mb: Optional[float] = None,
+    min_free_gb: Optional[float] = None,
+    disk_hard_pct: Optional[float] = None,
+    disk_soft_pct: Optional[float] = None,
+    update_guard_state: bool = True,
+) -> Dict[str, Any]:
     now_ts = time.time() if now is None else float(now)
     m_dir = Path(market_dir) if market_dir is not None else config.MARKET_DIR
     l_dir = Path(ledgers_dir) if ledgers_dir is not None else config.LEDGERS_DIR
@@ -285,6 +359,50 @@ def cleanup_old_data(
                     errors.append(f"{log_file}: {exc}")
                     continue
             deleted_paths.add(log_file)
+            removed_files += 1
+            freed_bytes += st.st_size
+
+    # 1d. Prune expired generated reports (> 14d) and stale orphan *.tmp files (> 10m old)
+    r_dir = config.REPORTS_DIR if market_dir is None else (m_dir.parent / "3_reports")
+    report_cutoff_ts = now_ts - 14.0 * 86400.0
+    if r_dir.exists():
+        for rf in r_dir.iterdir():
+            if not rf.is_file() or rf.name == ".gitkeep":
+                continue
+            try:
+                st = rf.stat()
+            except OSError:
+                continue
+            if st.st_mtime >= report_cutoff_ts:
+                continue
+            if not dry_run:
+                try:
+                    rf.unlink()
+                except OSError as exc:
+                    errors.append(f"{rf}: {exc}")
+                    continue
+            deleted_paths.add(rf)
+            removed_files += 1
+            freed_bytes += st.st_size
+
+    tmp_cutoff_ts = now_ts - 600.0
+    if l_dir.exists():
+        for tmp_f in l_dir.rglob("*.tmp"):
+            if tmp_f in deleted_paths or not tmp_f.is_file():
+                continue
+            try:
+                st = tmp_f.stat()
+            except OSError:
+                continue
+            if st.st_mtime >= tmp_cutoff_ts:
+                continue
+            if not dry_run:
+                try:
+                    tmp_f.unlink()
+                except OSError as exc:
+                    errors.append(f"{tmp_f}: {exc}")
+                    continue
+            deleted_paths.add(tmp_f)
             removed_files += 1
             freed_bytes += st.st_size
 
@@ -417,14 +535,36 @@ def cleanup_old_data(
                 cur_data_mb = max(0.0, cur_data_mb - sz / (1024.0 * 1024.0))
                 disk_m = _read_disk_metrics(anchor, freed_bytes=freed_bytes if (dry_run or disk_usage_fn) else 0, disk_usage_fn=disk_usage_fn)
 
-    # ── Stage 3: Critical Disk-Full Circuit-Breaker ──────────────────────────
-    should_pause = (disk_m["disk_used_pct"] >= crit_pct) or (disk_m["disk_free_gb"] < crit_free_gb)
+    # ── Stage 3: Critical Disk-Full & Same-Day Runaway Circuit-Breaker ───────
+    today_market_bytes = 0
+    if m_dir.exists():
+        today_str = today_utc.isoformat()
+        for cat in _PRUNABLE_MARKET_CATS:
+            td = m_dir / cat / today_str
+            if td.is_dir():
+                sz, _ = _dir_stats(td)
+                today_market_bytes += sz
+    today_market_mb = today_market_bytes / (1024.0 * 1024.0)
+    max_today_mb = float(config.PARAMS.get("MAX_TODAY_MARKET_MB", 1536.0))
+    today_runaway = max_today_mb > 0 and today_market_mb >= max_today_mb
+
+    should_pause = (
+        (disk_m["disk_used_pct"] >= crit_pct)
+        or (disk_m["disk_free_gb"] < crit_free_gb)
+        or today_runaway
+    )
     pause_reason = ""
     if should_pause:
-        pause_reason = (
-            f"磁盘空间危急 (已用 {disk_m['disk_used_pct']:.1f}% / 剩余 {disk_m['disk_free_gb']:.2f} GB)，"
-            f"已自动暂停原始行情录制以保护账本"
-        )
+        if today_runaway and not ((disk_m["disk_used_pct"] >= crit_pct) or (disk_m["disk_free_gb"] < crit_free_gb)):
+            pause_reason = (
+                f"当日原始行情体积异常膨胀 ({today_market_mb:.0f} MB >= {max_today_mb:.0f} MB)，"
+                f"已自动暂停今日原始行情录制以保护磁盘"
+            )
+        else:
+            pause_reason = (
+                f"磁盘空间危急 (已用 {disk_m['disk_used_pct']:.1f}% / 剩余 {disk_m['disk_free_gb']:.2f} GB)，"
+                f"已自动暂停原始行情与回放归档以保护账本"
+            )
 
     result = {
         "removed_dirs": removed_dirs,
@@ -460,4 +600,7 @@ def cleanup_old_data(
                 "removed_dirs": result["removed_dirs"],
                 "pressure_triggered": pressure_triggered,
             }
+            snapshot = dict(_DISK_GUARD_STATE)
+        if market_dir is None:
+            _persist_disk_guard_state(snapshot)
     return result

@@ -109,6 +109,7 @@ def cmd_start(port: int = 8900, open_browser: bool = True):
 def cmd_stop():
     """Stop all running PM-Quant background processes and release port 8900."""
     import os
+    import time
     import signal
     import subprocess
     from runtime.pipeline import is_pid_running, PID_FILE
@@ -123,8 +124,18 @@ def cmd_stop():
                     os.system(f"taskkill /F /PID {pid} >nul 2>&1")
                 else:
                     os.kill(pid, signal.SIGTERM)
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline and is_pid_running(pid):
+                        time.sleep(0.1)
+                    if is_pid_running(pid):
+                        print(f"[!] PID {pid} 未在 5s 内退出，发送 SIGKILL 强制结束...")
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
                 stopped_count += 1
-            PID_FILE.unlink(missing_ok=True)
+            if not is_pid_running(pid):
+                PID_FILE.unlink(missing_ok=True)
         except Exception as e:
             print(f"[!] 清理 PID 文件失败: {e}")
 
@@ -139,6 +150,24 @@ def cmd_stop():
                     print(f"[*] 正在关闭占用 8900 端口的看板进程 (PID: {port_pid})...")
                     os.system(f"taskkill /F /PID {port_pid} >nul 2>&1")
                     stopped_count += 1
+        except Exception:
+            pass
+    else:
+        try:
+            import re
+            out = subprocess.check_output(["ss", "-tlnp"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+            for line in out.splitlines():
+                if ":8900 " not in line and ":8900\t" not in line:
+                    continue
+                for m in re.finditer(r"pid=(\d+)", line):
+                    port_pid = int(m.group(1))
+                    if port_pid != os.getpid() and is_pid_running(port_pid):
+                        print(f"[*] 正在关闭占用 8900 端口的 PM-Quant 看板进程 (PID: {port_pid})...")
+                        try:
+                            os.kill(port_pid, signal.SIGTERM)
+                            stopped_count += 1
+                        except OSError:
+                            pass
         except Exception:
             pass
 

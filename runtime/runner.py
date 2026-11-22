@@ -3,10 +3,13 @@
 Orchestrates the decision cycle, records atomic live state,
 and appends single-line summary events to summary.jsonl.
 """
+import os
 import sys
 import json
+import math
 import time
 import gzip
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -20,21 +23,78 @@ from core.policy import plan_decision, determine_objective_side
 from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
+from runtime.retention import is_replay_archive_allowed
 from sim.matcher import QueueMatcher, make_complementary
 
 
 class PaperRunner:
+    @staticmethod
+    def _fsync_dir(dir_path: Path):
+        """Best-effort directory fsync on POSIX so atomic rename metadata survives power loss."""
+        if sys.platform == "win32":
+            return
+        try:
+            dfd = os.open(str(dir_path), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+
     @staticmethod
     def _atomic_replace(tmp_path: Path, target_path: Path, retries: int = 5):
         """Atomically replace target_path with short backoff retries for Windows concurrent read locks."""
         for attempt in range(max(1, int(retries))):
             try:
                 tmp_path.replace(target_path)
+                PaperRunner._fsync_dir(target_path.parent)
                 return
             except (PermissionError, OSError):
                 if attempt + 1 >= retries:
                     raise
                 time.sleep(0.01 * (attempt + 1))
+
+    @staticmethod
+    def _atomic_write_text(target_path: Path, content: str, tmp_suffix: str = ".tmp"):
+        """Write text to temp file, flush + fsync, then atomically replace target_path."""
+        tmp = target_path.with_suffix(tmp_suffix)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            PaperRunner._atomic_replace(tmp, target_path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _atomic_write_gzip_json(target_path: Path, payload: dict):
+        """Write gzipped JSON with explicit file fsync before atomic replace."""
+        tmp_gz = target_path.with_suffix(".gz.tmp")
+        try:
+            with open(tmp_gz, "wb") as raw_f:
+                with gzip.GzipFile(fileobj=raw_f, mode="wb") as gz_f:
+                    gz_f.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                raw_f.flush()
+                try:
+                    os.fsync(raw_f.fileno())
+                except OSError:
+                    pass
+            PaperRunner._atomic_replace(tmp_gz, target_path)
+        except Exception:
+            try:
+                tmp_gz.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _extract_book_prob(book: Optional[OrderBook]) -> Optional[float]:
@@ -77,6 +137,9 @@ class PaperRunner:
         self.insurance_paid = 0.0
         self.total_pnl = 0.0
         self._settled_slugs = set()
+        # Keep only the recent ~48h (600 windows) in memory for O(1) CircuitBreaker rebuilds
+        # so 1-year ledgers (105k+ rows) never blow RAM or stall the main loop.
+        self._recent_records = deque(maxlen=600)
         self._initial_capital = float(config.PARAMS.get("INITIAL_CAPITAL_USD", 100.0))
         # Monotonic order ids. The old `int(now*1000) % 1000000` wrapped every
         # ~16.7 minutes and could reuse a stale queue_ahead entry.
@@ -101,33 +164,70 @@ class PaperRunner:
         self._load_ledger_history()
 
     def _load_ledger_history(self):
-        """Restore circuit breaker metrics, consecutive trends, and total cumulative PnL from summary.jsonl."""
+        """Stream summary.jsonl with O(1) memory to restore PnL, settled slugs, and recent CircuitBreaker state."""
         self._settled_slugs = set()
+        self._recent_records = deque(maxlen=600)
+        self.total_pnl = 0.0
         self.consecutive_up = 0
         self.consecutive_down = 0
         if not self.summary_file.exists():
             return
-        records = []
+        bad_lines = 0
         try:
-            for line in self.summary_file.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    records.append(json.loads(line))
-            self._settled_slugs = {r.get("slug") for r in records if r.get("slug")}
-            self.circuit_breaker.load_from_summary(records)
-            self.total_pnl = sum(float(r.get("net_pnl", 0.0)) for r in records if r.get("traded"))
-            for r in records:
-                w = r.get("winner")
-                if w == "Up":
-                    self.consecutive_up += 1
-                    self.consecutive_down = 0
-                elif w == "Down":
-                    self.consecutive_down += 1
-                    self.consecutive_up = 0
-        except Exception:
-            pass
+            with open(self.summary_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        bad_lines += 1
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    slug = rec.get("slug")
+                    if slug:
+                        self._settled_slugs.add(slug)
+                    if rec.get("traded"):
+                        self.total_pnl += float(rec.get("net_pnl", 0.0))
+                    w = rec.get("winner")
+                    if w == "Up":
+                        self.consecutive_up += 1
+                        self.consecutive_down = 0
+                    elif w == "Down":
+                        self.consecutive_down += 1
+                        self.consecutive_up = 0
+                    self._recent_records.append(rec)
+        except OSError as exc:
+            print(f"[Runner] Failed to read summary.jsonl: {exc}")
+            return
+        if bad_lines > 0:
+            print(f"[Runner] WARNING: Skipped {bad_lines} corrupted line(s) in {self.summary_file}")
+
+        self.circuit_breaker.load_from_summary(list(self._recent_records))
+
+    def _rebuild_recent_circuit_breaker(self):
+        """Rebuild CircuitBreaker & trend counters from bounded in-memory recent records in <1ms."""
+        self.circuit_breaker = CircuitBreaker(
+            max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
+            loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
+            cooling_rounds=int(config.PARAMS.get("COOLING_ROUNDS", 3)),
+            enabled=bool(config.PARAMS.get("ENABLE_CIRCUIT_BREAKER", True))
+        )
+        self.circuit_breaker.load_from_summary(list(self._recent_records))
+        self.consecutive_up = 0
+        self.consecutive_down = 0
+        for r in self._recent_records:
+            w = r.get("winner")
+            if w == "Up":
+                self.consecutive_up += 1
+                self.consecutive_down = 0
+            elif w == "Down":
+                self.consecutive_down += 1
+                self.consecutive_up = 0
 
     def _rebuild_accounting(self):
-        """Rebuild total PnL and circuit-breaker state from the summary journal."""
+        """Full fallback rebuild from summary.jsonl (used only if reconciling an ancient non-recent slug)."""
         self.total_pnl = 0.0
         self.circuit_breaker = CircuitBreaker(
             max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
@@ -137,8 +237,18 @@ class PaperRunner:
         )
         self._load_ledger_history()
 
-    def start_window(self, slug: str, start_t: float, end_t: float, open_px: float, binance_open_px: float = None, poly_spot: float = None, poly_open_provisional: Optional[bool] = None):
-        """Initialize fresh 5-minute session."""
+    def start_window(
+        self,
+        slug: str,
+        start_t: float,
+        end_t: float,
+        open_px: float,
+        binance_open_px: float = None,
+        poly_spot: float = None,
+        poly_open_provisional: Optional[bool] = None,
+        resume_from_live: bool = False,
+    ):
+        """Initialize fresh 5-minute session, optionally resuming mid-window state from live.json."""
         self.current_slug = slug
         self.window_start = start_t
         self.window_end = end_t
@@ -198,6 +308,167 @@ class PaperRunner:
         self.first_60s_high = self.last_poly_spot
         self.first_60s_low = self.last_poly_spot
         self.first_60s_range = 0.0
+        if resume_from_live:
+            self._try_resume_from_live(slug)
+
+    def _try_resume_from_live(self, slug: str) -> bool:
+        """Restore same-window inventory and fill actions after an unexpected restart."""
+        if not slug or not self.live_file.exists():
+            return False
+        try:
+            raw = json.loads(self.live_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(raw, dict) or raw.get("slug") != slug:
+            return False
+
+        pos_up_raw = raw.get("pos_up") or {}
+        pos_dn_raw = raw.get("pos_down") or {}
+        try:
+            up_sh = max(0.0, float(pos_up_raw.get("shares", 0.0) or 0.0))
+            up_cash = max(0.0, float(pos_up_raw.get("cash", 0.0) or 0.0))
+            dn_sh = max(0.0, float(pos_dn_raw.get("shares", 0.0) or 0.0))
+            dn_cash = max(0.0, float(pos_dn_raw.get("cash", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return False
+
+        self.pos_up = Position(up_sh, up_cash)
+        self.pos_down = Position(dn_sh, dn_cash)
+        try:
+            self.insurance_paid = max(0.0, float(raw.get("insurance_paid", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            self.insurance_paid = 0.0
+
+        restored_actions = raw.get("actions")
+        if isinstance(restored_actions, list):
+            self.actions = [a for a in restored_actions if isinstance(a, dict)]
+            self.fills = [dict(a) for a in self.actions if a.get("action") == "fill"]
+            entry_fills = [f for f in self.fills if f.get("purpose") == "entry"]
+            seen_oids = set()
+            entry_cnt = 0
+            for f in entry_fills:
+                oid = f.get("order_id")
+                if oid is not None:
+                    if oid in seen_oids:
+                        continue
+                    seen_oids.add(oid)
+                    self.entry_order_ids.add(oid)
+                entry_cnt += 1
+            self.entries_count = entry_cnt
+            if entry_fills:
+                try:
+                    self.last_entry_fill_t = float(entry_fills[-1].get("t"))
+                except (TypeError, ValueError):
+                    pass
+                if raw.get("regime"):
+                    self.entry_regime = str(raw.get("regime"))
+            # Advance monotonic order_id past any previously recorded action order_id
+            max_oid = self._next_order_id
+            for a in self.actions:
+                try:
+                    if a.get("order_id") is not None:
+                        max_oid = max(max_oid, int(a["order_id"]))
+                except (TypeError, ValueError):
+                    pass
+            self._next_order_id = max_oid
+
+        restored_hist = raw.get("price_history")
+        if isinstance(restored_hist, list) and len(restored_hist) > len(self.price_history):
+            self.price_history = [pt for pt in restored_hist if isinstance(pt, dict)][-720:]
+            # Backfill _spot_buf from recent price_history so 60s TWAP / basis stays warm after restart
+            now_ref = float(raw.get("now") or time.time())
+            buf = []
+            for pt in self.price_history:
+                try:
+                    pt_t = float(pt.get("t", 0.0) or 0.0)
+                    pt_px = float(pt.get("price", 0.0) or 0.0)
+                    if math.isfinite(pt_t) and math.isfinite(pt_px) and pt_px > 0 and (now_ref - pt_t) <= 65.0:
+                        buf.append((pt_t, pt_px))
+                except (TypeError, ValueError):
+                    continue
+            if buf:
+                self._spot_buf = buf
+
+        try:
+            saved_basis = raw.get("basis_ema")
+            if saved_basis is not None and math.isfinite(float(saved_basis)):
+                self._basis_ema = float(saved_basis)
+                self._basis_updated_t = float(raw.get("now") or time.time())
+                self._basis_sample_count = max(self._basis_sample_count, 10)
+        except (TypeError, ValueError):
+            pass
+
+        restored_tl = raw.get("decision_timeline")
+        if isinstance(restored_tl, list):
+            self.decision_timeline = [it for it in restored_tl if isinstance(it, dict)][-50:]
+
+        if up_sh > 0 or dn_sh > 0 or self.fills:
+            print(
+                f"[Runner] Resumed active window {slug} from live.json "
+                f"(UP={up_sh:.1f}, DN={dn_sh:.1f}, fills={len(self.fills)})"
+            )
+        return True
+
+    def settle_orphaned_live(self, current_slug: str) -> Optional[dict]:
+        """Settle an unclosed prior window from live.json if restart crossed a 5m boundary.
+
+        Prevents losing real paper positions/PnL when an OOM/crash/reboot spans a
+        window boundary. Returns metadata so PipelineDriver can enqueue Gamma/TWAP
+        official reconciliation for the recovered window.
+        """
+        if not self.live_file.exists():
+            return None
+        try:
+            raw = json.loads(self.live_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        prev_slug = str(raw.get("slug") or "")
+        if not prev_slug or prev_slug == current_slug or prev_slug in self._settled_slugs:
+            return None
+
+        pos_up_raw = raw.get("pos_up") or {}
+        pos_dn_raw = raw.get("pos_down") or {}
+        try:
+            up_sh = max(0.0, float(pos_up_raw.get("shares", 0.0) or 0.0))
+            up_cash = max(0.0, float(pos_up_raw.get("cash", 0.0) or 0.0))
+            dn_sh = max(0.0, float(pos_dn_raw.get("shares", 0.0) or 0.0))
+            dn_cash = max(0.0, float(pos_dn_raw.get("cash", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return None
+
+        actions = [a for a in (raw.get("actions") or []) if isinstance(a, dict)]
+        fills = [dict(a) for a in actions if a.get("action") == "fill"]
+        if up_sh <= 1e-6 and dn_sh <= 1e-6 and not fills:
+            return None
+
+        prev_start = float(raw.get("start") or 0.0)
+        prev_end = float(raw.get("end") or (prev_start + 300.0 if prev_start > 0 else 0.0))
+        prev_open = float(raw.get("open_px") or raw.get("binance_open_px") or 0.0)
+        prev_close = float(raw.get("poly_spot") or raw.get("spot") or prev_open or 0.0)
+        if prev_start <= 0 and prev_slug.rsplit("-", 1)[-1].isdigit():
+            prev_start = float(prev_slug.rsplit("-", 1)[-1])
+            prev_end = prev_start + 300.0
+
+        self.start_window(
+            prev_slug, prev_start, prev_end, prev_open,
+            binance_open_px=float(raw.get("binance_open_px") or prev_open or 0.0),
+            poly_spot=prev_close,
+            poly_open_provisional=False,
+            resume_from_live=True,
+        )
+        self.close_window(close_px=prev_close, official_winner=None, winner_source="spot_fallback")
+        print(
+            f"[Runner] Recovered & provisionally settled orphaned window {prev_slug} "
+            f"(UP={up_sh:.1f}, DN={dn_sh:.1f}); queued for official reconciliation."
+        )
+        return {
+            "slug": prev_slug,
+            "start_t": prev_start,
+            "open_px": prev_open,
+            "close_px": prev_close,
+        }
 
     def update_open_price(self, poly_open: float):
         """Update provisional open price once Polymarket official TWAP finishes computing."""
@@ -205,12 +476,16 @@ class PaperRunner:
             return
         self.open_price = poly_open
         self.poly_open_is_provisional = False
-        # Cancel resting working orders placed under provisional strike to prevent execution on stale baseline
+        # Cancel resting working orders placed under provisional strike, keeping realistic cancel transit
         if self.working_orders:
+            now_t = time.time()
+            cancel_lat = float(config.PARAMS.get("CANCEL_LATENCY_S", config.PARAMS.get("LATENCY_S", 0.30)))
             for o in self.working_orders:
-                o.cancel_at = time.time()
+                o.cancel_at = now_t
+                o.cancel_effective_at = now_t + cancel_lat
+                if o.remaining > 1e-6 and cancel_lat > 0:
+                    self.pending_cancels.append(o)
             self.working_orders = []
-        self.pending_cancels = []
         if self.price_history:
             # Keep the two opening anchors distinct but consistent on the first
             # point: `price` is the Binance kline open, `poly_price` the official
@@ -247,6 +522,8 @@ class PaperRunner:
             "spot_price": getattr(self, "last_spot_price", None),
             "tau_s": round(max(0.0, getattr(self, "window_end", 0.0) - now), 1)
         }
+        if order_id is not None:
+            fill["order_id"] = order_id
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
 
@@ -270,7 +547,9 @@ class PaperRunner:
         trade_prints: list = None,
         poly_spot: float = None,
         replay_mode: bool = False,
-        delayed_book_fetcher=None
+        delayed_book_fetcher=None,
+        delayed_prints_fetcher=None,
+        api_schema_guard: dict = None,
     ):
         """Execute one evaluation tick: probability, regime, risk gates, matching.
 
@@ -306,22 +585,34 @@ class PaperRunner:
             and len(self._spot_buf) >= 5
             and (self._basis_ema is None or (now - self._basis_updated_t) >= 0.45)
         ):
-            bin_60s = [px for ts, px in self._spot_buf if now - ts <= 60.0]
-            if bin_60s:
-                inst_basis = (sum(bin_60s) / len(bin_60s)) - float(poly_spot)
-                if self._basis_ema is None:
-                    self._basis_ema = inst_basis
+            bin_60s_pts = [(ts, px) for ts, px in self._spot_buf if now - ts <= 60.0]
+            if bin_60s_pts:
+                if len(bin_60s_pts) >= 2:
+                    w_sum = 0.0
+                    dt_sum = 0.0
+                    for i in range(1, len(bin_60s_pts)):
+                        dt = bin_60s_pts[i][0] - bin_60s_pts[i - 1][0]
+                        if dt > 0.0:
+                            w_sum += 0.5 * (bin_60s_pts[i - 1][1] + bin_60s_pts[i][1]) * dt
+                            dt_sum += dt
+                    bin_60s_avg = (w_sum / dt_sum) if dt_sum > 1e-6 else (sum(p for _, p in bin_60s_pts) / len(bin_60s_pts))
                 else:
-                    # Huber-clip single-sample basis jump once warmed up + slow low-pass EMA
-                    # so 60s V-shaped pullbacks do not jerk the exchange basis estimate.
-                    sample = inst_basis
-                    if self._basis_sample_count >= 10:
-                        delta = max(-35.0, min(35.0, inst_basis - self._basis_ema))
-                        sample = self._basis_ema + delta
-                    alpha = 0.03 if self._basis_sample_count >= 10 else 0.15
-                    self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
-                self._basis_updated_t = now
-                self._basis_sample_count += 1
+                    bin_60s_avg = bin_60s_pts[0][1]
+                inst_basis = bin_60s_avg - float(poly_spot)
+                if math.isfinite(inst_basis):
+                    if self._basis_ema is None:
+                        self._basis_ema = inst_basis
+                    else:
+                        # Huber-clip single-sample basis jump once warmed up + slow low-pass EMA
+                        # so 60s V-shaped pullbacks do not jerk the exchange basis estimate.
+                        sample = inst_basis
+                        if self._basis_sample_count >= 10:
+                            delta = max(-35.0, min(35.0, inst_basis - self._basis_ema))
+                            sample = self._basis_ema + delta
+                        alpha = 0.03 if self._basis_sample_count >= 10 else 0.15
+                        self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
+                    self._basis_updated_t = now
+                    self._basis_sample_count += 1
 
         basis_max_age = float(config.PARAMS.get("BASIS_MAX_AGE_S", 120.0))
         basis_ready = (
@@ -339,9 +630,28 @@ class PaperRunner:
             spot.open_price = open_px
             if tau <= 60.0 and self._spot_buf:
                 win_start_60 = self.window_end - 60.0
-                realized_vals = [px - self._basis_ema for ts, px in self._spot_buf if ts >= win_start_60]
-                if realized_vals:
-                    spot.twap_realized_60s = sum(realized_vals) / len(realized_vals)
+                elapsed_60 = max(0.0, 60.0 - max(0.0, tau))
+                realized_pts = [(ts, px - self._basis_ema) for ts, px in self._spot_buf if ts >= win_start_60]
+                if len(realized_pts) >= 2:
+                    # Time-weighted trapezoidal average eliminates 10Hz/2Hz variable-cadence sampling bias
+                    weighted_sum = 0.0
+                    total_dt = 0.0
+                    for i in range(1, len(realized_pts)):
+                        t_prev, v_prev = realized_pts[i - 1]
+                        t_curr, v_curr = realized_pts[i]
+                        dt = t_curr - t_prev
+                        if dt > 0.0:
+                            weighted_sum += 0.5 * (v_prev + v_curr) * dt
+                            total_dt += dt
+                    # Guard against post-outage illusion: do not extrapolate a short 5s
+                    # sample across a 40s already-elapsed TWAP window.
+                    coverage_ok = (elapsed_60 < 10.0) or (total_dt >= 0.45 * elapsed_60)
+                    if coverage_ok and total_dt > 1e-6:
+                        spot.twap_realized_60s = weighted_sum / total_dt
+                    elif coverage_ok:
+                        spot.twap_realized_60s = sum(v for _, v in realized_pts) / len(realized_pts)
+                elif realized_pts and elapsed_60 < 10.0:
+                    spot.twap_realized_60s = realized_pts[0][1]
         else:
             spot.basis_ema = None
             spot.open_price = self.binance_open_price
@@ -420,6 +730,8 @@ class PaperRunner:
 
         if net_stats:
             self.net_stats = net_stats
+        self._api_schema_guard = dict(api_schema_guard) if isinstance(api_schema_guard, dict) else {"paused": False, "source": "", "reason": ""}
+        api_paused = bool(self._api_schema_guard.get("paused", False))
 
         # 1. Dead-Man Switch: protect against stale inputs and against a stalled
         # event loop. The old check only measured the interval between step()
@@ -463,12 +775,18 @@ class PaperRunner:
         if trade_prints and active_for_prints:
             for tp in trade_prints:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
-                tp_t = float(tp.get("received_at") or tp.get("timestamp") or now)
+                tp_dir = str(tp.get("side") or "")
+                exch_t = float(tp.get("timestamp") or 0.0)
+                recv_t = float(tp.get("received_at") or 0.0)
+                if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
+                    tp_t = exch_t
+                else:
+                    tp_t = recv_t or exch_t or now
                 for o in active_for_prints:
                     if tp_side and o.side != tp_side:
                         continue
                     fill_sz = self.matcher.on_trade_print(
-                        o, float(tp["price"]), float(tp["size"]), tp_t
+                        o, float(tp["price"]), float(tp["size"]), tp_t, trade_side=tp_dir
                     )
                     if fill_sz > 0 or o.remaining < o.size - 1e-9:
                         print_touched_ids.add(o.id)
@@ -505,11 +823,14 @@ class PaperRunner:
                     pre_remaining.append(o)
             self.working_orders = pre_remaining
 
-        if is_deadman_active and self.working_orders:
+        if (is_deadman_active or api_paused) and self.working_orders:
             for o in self.working_orders:
                 o.cancel_at = now
                 o.cancel_effective_at = now + cancel_lat
-                o.cancel_reason = f"行情延迟保护撤单 ({deadman_reason})"
+                if api_paused:
+                    o.cancel_reason = f"上游接口变更安全暂停撤单 ({self._api_schema_guard.get('reason', 'schema_drift')})"
+                else:
+                    o.cancel_reason = f"行情延迟保护撤单 ({deadman_reason})"
                 if o.remaining > 1e-6 and cancel_lat > 0:
                     self.pending_cancels.append(o)
                 self.actions.append({
@@ -559,9 +880,11 @@ class PaperRunner:
 
         cb_active, cb_reason = self.circuit_breaker.is_active(now)
         # No artificial $10 floor: once the bankroll is exhausted the policy
-        # must see the real (possibly negative) balance and stop opening.
-        available_cap = self._initial_capital + self.total_pnl
+        # must see the real (possibly negative) free balance after subtracting
+        # capital already committed in this window.
+        total_equity_cap = self._initial_capital + self.total_pnl
         committed_cost = self.pos_up.cash + self.pos_down.cash
+        available_cap = total_equity_cap - committed_cost
         last_entry_t = getattr(self, "last_entry_fill_t", None)
         secs_since_entry = max(0.0, now - float(last_entry_t)) if last_entry_t is not None else 9999.0
         eval_params = dict(
@@ -579,7 +902,13 @@ class PaperRunner:
             CONSECUTIVE_DOWN_ROUNDS=getattr(self, "consecutive_down", 0)
         )
 
-        if is_deadman_active:
+        if api_paused:
+            decision = Decision(
+                action="wait",
+                reason=f"API schema guard active: {self._api_schema_guard.get('reason', 'upstream API changed')}",
+                urgent_cancel=True,
+            )
+        elif is_deadman_active:
             decision = Decision(action="wait", reason=f"Dead-man switch active: {deadman_reason}")
         else:
             decision = plan_decision(
@@ -638,6 +967,8 @@ class PaperRunner:
             min_requote_age_s=float(config.PARAMS.get("MIN_REQUOTE_AGE_S", 2.5)),
             bid_retreat_ticks=float(config.PARAMS.get("MAX_BID_RETREAT_CANCEL", 0.029)),
             min_order_shares=min_order_sh,
+            p_up=p_fair,
+            min_hold_maker_edge=float(config.PARAMS.get("MIN_HOLD_MAKER_EDGE", 0.015)),
         )
         for o in to_cancel:
             o.cancel_at = now
@@ -665,10 +996,71 @@ class PaperRunner:
             elif (bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
                     and delayed_book_fetcher is not None
                     and action.price is not None):
+                wire_lat = float(config.PARAMS.get("LATENCY_S", 0.30))
                 if not replay_mode:
-                    time.sleep(float(config.PARAMS.get("LATENCY_S", 0.30)))
+                    time.sleep(wire_lat)
                 post_book = delayed_book_fetcher(action.side)
-                if post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
+
+                # Settle any in-flight pending_cancels that got hit during the 300ms transit
+                # window BEFORE executing a same-side taker_buy (prevents double-fill race).
+                # In offline replay without a delayed print stream, preserve pending_cancels
+                # so the next replay tick at t + dt still matches them at their true timestamp.
+                if self.pending_cancels and (not replay_mode or delayed_prints_fetcher is not None):
+                    pre_side_shares = self.pos_up.shares if action.side == "Up" else self.pos_down.shares
+                    delayed_now = now + wire_lat
+                    delayed_touched = set()
+                    if delayed_prints_fetcher is not None:
+                        for tp in (delayed_prints_fetcher() or []):
+                            tp_side = tp.get("outcome")
+                            tp_dir = str(tp.get("side") or "")
+                            exch_t = float(tp.get("timestamp") or 0.0)
+                            recv_t = float(tp.get("received_at") or 0.0)
+                            if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
+                                tp_t = exch_t
+                            else:
+                                tp_t = recv_t or exch_t or delayed_now
+                            for o in list(self.pending_cancels):
+                                if tp_side and o.side != tp_side:
+                                    continue
+                                fill_sz = self.matcher.on_trade_print(
+                                    o, float(tp["price"]), float(tp["size"]), tp_t, trade_side=tp_dir
+                                )
+                                if fill_sz > 0 or o.remaining < o.size - 1e-9:
+                                    delayed_touched.add(o.id)
+                                if fill_sz > 0:
+                                    self._apply_maker_fill(tp_t, o, fill_sz)
+                    still_pending_after = []
+                    for o in self.pending_cancels:
+                        if o.remaining <= 1e-6:
+                            continue
+                        cancel_eff = float(getattr(o, "cancel_effective_at", 0.0) or 0.0)
+                        # Check crossed book during the in-flight cancel window [placed_cancel, cancel_eff].
+                        # When wire_lat == cancel_lat == 0.30s, delayed_now == cancel_eff, so we evaluate
+                        # just inside the cancel boundary (cancel_eff - 1e-3) rather than making this dead code.
+                        if o.side == action.side and post_book is not None and o.id not in delayed_touched:
+                            if delayed_now <= cancel_eff + 1e-9:
+                                eval_t = min(delayed_now, cancel_eff - 1e-3)
+                                fill_sz = self.matcher.match_order(o, post_book, eval_t)
+                                if fill_sz > 0:
+                                    self._apply_maker_fill(delayed_now, o, fill_sz)
+                        if o.remaining > 1e-6 and delayed_now < cancel_eff - 1e-9:
+                            still_pending_after.append(o)
+                    self.pending_cancels = still_pending_after
+
+                    if action.action == "taker_buy":
+                        post_side_shares = self.pos_up.shares if action.side == "Up" else self.pos_down.shares
+                        already_filled = max(0.0, post_side_shares - pre_side_shares)
+                        if already_filled > 1e-6:
+                            want = max(0.0, want - already_filled)
+                            if want < min_order_sh - 1e-4:
+                                filled, vwap = 0.0, 0.0
+                                reject_reason = (
+                                    f"撤单在途300ms内原挂单已成交({already_filled:.1f}股)，取消重复Taker追单"
+                                )
+
+                if reject_reason is not None:
+                    filled, vwap = 0.0, 0.0
+                elif post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
                     filled, vwap = 0.0, 0.0
                     reject_reason = "延迟后重拉盘口为空，IOC 放弃成交"
                 else:
@@ -691,11 +1083,15 @@ class PaperRunner:
                               else self.pos_down.avg_price)
                 est_fee = taker_fee_per_share(vwap, config.PARAMS["TAKER_FEE_RATE"])
                 est_pair = held_basis + vwap + est_fee
-                max_pair_cap = (
-                    float(config.PARAMS.get("TRAILING_HEDGE_MAX_PAIR_COST", 0.97))
-                    if "Trailing Pair Lock" in (action.reason or "")
-                    else 1.00
-                )
+                act_reason = action.reason or ""
+                if "黑天鹅锁利" in act_reason:
+                    max_pair_cap = float(config.PARAMS.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
+                elif "Deep Arbitrage lock" in act_reason:
+                    max_pair_cap = float(config.PARAMS.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
+                elif "Trailing Pair Lock" in act_reason:
+                    max_pair_cap = float(config.PARAMS.get("TRAILING_HEDGE_MAX_PAIR_COST", 0.97))
+                else:
+                    max_pair_cap = 1.00
                 if est_pair > max_pair_cap + 1e-6:
                     reject_reason = (
                         f"VWAP 滑点使配对成本 {est_pair:.4f} > ${max_pair_cap:.2f} "
@@ -891,27 +1287,48 @@ class PaperRunner:
             "batch_id": config.BATCH_ID
         }
         
-        # 1. Fast append to summary.jsonl
+        # 1. Fast append to summary.jsonl with trailing-newline guard + flush + fsync durability
+        need_leading_nl = False
+        if self.summary_file.exists():
+            try:
+                if self.summary_file.stat().st_size > 0:
+                    with open(self.summary_file, "rb") as rf:
+                        rf.seek(-1, os.SEEK_END)
+                        need_leading_nl = rf.read(1) != b"\n"
+            except OSError:
+                pass
         with open(self.summary_file, "a", encoding="utf-8") as f:
+            if need_leading_nl:
+                f.write("\n")
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        self._fsync_dir(self.summary_file.parent)
         self._settled_slugs.add(self.current_slug)
+        self._recent_records.append(dict(record))
             
         # Update circuit breaker metrics & total cumulative PnL
         self.circuit_breaker.record_round_result(net_pnl, is_traded, self.window_end)
         if is_traded:
             self.total_pnl += net_pnl
 
-        # 2. Archive compressed detailed window log
-        detail = dict(
-            record,
-            fills=self.fills,
-            actions=self.actions,
-            decisions=self.decisions,
-            price_history=self.price_history
-        )
-        out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
-        with gzip.open(out_gz, "wt", encoding="utf-8") as gz:
-            json.dump(detail, gz, ensure_ascii=False)
+        # 2. Archive compressed detailed window log atomically (skip under critical disk-full guard)
+        if is_replay_archive_allowed():
+            detail = dict(
+                record,
+                fills=self.fills,
+                actions=self.actions,
+                decisions=self.decisions,
+                price_history=self.price_history
+            )
+            out_gz = self.windows_dir / f"{self.current_slug}.json.gz"
+            try:
+                self._atomic_write_gzip_json(out_gz, detail)
+            except OSError as exc:
+                print(f"[Runner] WARNING: Failed to archive window gz {self.current_slug}: {exc}")
 
         # Clear working orders
         self.working_orders = []
@@ -931,56 +1348,173 @@ class PaperRunner:
             return round(abs(close_px - bin_open), 2)
         return round(abs(close_px - self.open_price), 2)
 
+    def _apply_reconcile_to_row(
+        self, r: dict, open_px: float, close_px: float, winner: str, winner_source: str
+    ) -> tuple:
+        """Apply official prices/winner onto one summary row dict.
+
+        Returns (updated_row, old_traded_pnl, new_traded_pnl, resolved_winner, resolved_source).
+        """
+        old_traded_pnl = float(r.get("net_pnl", 0.0)) if r.get("traded") else 0.0
+        resolved_winner = winner
+        resolved_source = winner_source
+        if r.get("winner_source") == "gamma" and winner_source != "gamma":
+            resolved_winner = r.get("winner", winner)
+            resolved_source = "gamma"
+        else:
+            r["winner_source"] = winner_source
+        r["open_px"] = round(open_px, 2)
+        r["close_px"] = round(close_px, 2)
+        r["winner"] = resolved_winner
+        pos_up = float(r.get("pos_up", 0.0))
+        pos_down = float(r.get("pos_down", 0.0))
+        total_cost = float(r.get("total_cost", 0.0))
+        proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
+        new_pnl = round(proceeds - total_cost, 4)
+        r["proceeds"] = round(proceeds, 4)
+        r["net_pnl"] = new_pnl
+        r["result"] = "win" if new_pnl > 1e-4 else ("loss" if new_pnl < -1e-4 else "flat")
+        new_traded_pnl = new_pnl if r.get("traded") else 0.0
+        return r, old_traded_pnl, new_traded_pnl, resolved_winner, resolved_source
+
     def reconcile_record(self, slug: str, open_px: float, close_px: float,
                          winner: str, winner_source: str = "twap"):
-        """Update prices in summary.jsonl and the window archive.
+        """Update prices in summary.jsonl and the window archive with O(1) RAM & fast tail patching.
 
-        winner_source="gamma" is authoritative. A later TWAP-derived reconcile
-        may refresh open/close prices, but must never overwrite a winner that
-        was already confirmed by UMA/Gamma resolution.
+        99.9% of reconciles touch one of the last few lines of summary.jsonl.
+        Instead of json.loads/json.dumps on 100k+ lines (7s / 160MB RAM at 1 year),
+        we scan the last 64KB tail first, copy the untouched prefix in 1MB binary
+        chunks, and fall back to byte-level streaming if reconciling an older slug.
         """
         if not self.summary_file.exists():
             return
-        lines = self.summary_file.read_text(encoding="utf-8").splitlines()
-        updated = []
+
+        target_bytes = json.dumps(slug, ensure_ascii=False).encode("utf-8")
         resolved_winner = winner
         resolved_source = winner_source
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-                if r.get("slug") == slug:
-                    if r.get("winner_source") == "gamma" and winner_source != "gamma":
-                        resolved_winner = r.get("winner", winner)
-                        resolved_source = "gamma"
-                    else:
-                        r["winner_source"] = winner_source
-                    r["open_px"] = round(open_px, 2)
-                    r["close_px"] = round(close_px, 2)
-                    r["winner"] = resolved_winner
-                    pos_up = float(r.get("pos_up", 0.0))
-                    pos_down = float(r.get("pos_down", 0.0))
-                    total_cost = float(r.get("total_cost", 0.0))
-                    proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
-                    new_pnl = round(proceeds - total_cost, 4)
-                    r["proceeds"] = round(proceeds, 4)
-                    r["net_pnl"] = new_pnl
-                    r["result"] = "win" if new_pnl > 1e-4 else ("loss" if new_pnl < -1e-4 else "flat")
-                    if winner_source == "twap" and slug == getattr(self, "_last_settled_slug", None) and open_px > 0 and close_px > 0:
-                        self.last_round_abs_move = round(abs(close_px - open_px), 2)
-                updated.append(json.dumps(r, ensure_ascii=False))
-            except Exception:
-                updated.append(line)
+        pnl_delta = 0.0
+        matched_row = None
         tmp = self.summary_file.with_suffix(".jsonl.tmp")
-        tmp.write_text("\n".join(updated) + "\n", encoding="utf-8")
-        self._atomic_replace(tmp, self.summary_file)
-        # Summary is the single accounting source of truth: rebuild the running
-        # total and circuit-breaker state from the rewritten file instead of
-        # applying a fragile in-memory delta.
-        self._rebuild_accounting()
 
-        # Also reconcile compressed detailed window archive
+        def _rewrite_tail_bytes(raw_chunk: bytes) -> bytearray:
+            nonlocal resolved_winner, resolved_source, pnl_delta, matched_row
+            out_buf = bytearray()
+            for raw_ln in raw_chunk.splitlines():
+                if not raw_ln.strip():
+                    continue
+                if target_bytes in raw_ln:
+                    try:
+                        r = json.loads(raw_ln.decode("utf-8"))
+                    except Exception:
+                        print(f"[Runner] WARNING: Dropping corrupted line during reconcile of {self.summary_file}")
+                        continue
+                    if isinstance(r, dict) and r.get("slug") == slug:
+                        r, old_p, new_p, rw, rs = self._apply_reconcile_to_row(
+                            r, open_px, close_px, winner, winner_source
+                        )
+                        resolved_winner = rw
+                        resolved_source = rs
+                        pnl_delta += (new_p - old_p)
+                        matched_row = dict(r)
+                        if winner_source == "twap" and slug == getattr(self, "_last_settled_slug", None) and open_px > 0 and close_px > 0:
+                            self.last_round_abs_move = round(abs(close_px - open_px), 2)
+                        out_buf.extend((json.dumps(r, ensure_ascii=False) + "\n").encode("utf-8"))
+                        continue
+                    out_buf.extend(raw_ln + b"\n")
+                    continue
+                # Fast structural sanity check on tail lines only (clean corrupted tail rows)
+                stripped = raw_ln.strip()
+                if not (stripped.startswith(b"{") and stripped.endswith(b"}")):
+                    print(f"[Runner] WARNING: Dropping corrupted line during reconcile of {self.summary_file}")
+                    continue
+                out_buf.extend(raw_ln + b"\n")
+            return out_buf
+
+        try:
+            file_size = self.summary_file.stat().st_size
+            tail_window = 65536
+            tail_start = max(0, file_size - tail_window)
+            with open(self.summary_file, "rb") as fin:
+                if tail_start > 0:
+                    fin.seek(tail_start)
+                    fin.readline()  # align to next full line boundary
+                    tail_start = fin.tell()
+                tail_bytes = fin.read()
+
+            if target_bytes in tail_bytes:
+                # Fast path: copy untouched binary prefix in 1MB chunks + write patched tail
+                new_tail = _rewrite_tail_bytes(tail_bytes)
+                with open(self.summary_file, "rb") as fin, open(tmp, "wb") as fout:
+                    rem = tail_start
+                    while rem > 0:
+                        chunk = fin.read(min(1048576, rem))
+                        if not chunk:
+                            break
+                        fout.write(chunk)
+                        rem -= len(chunk)
+                    fout.write(new_tail)
+                    fout.flush()
+                    try:
+                        os.fsync(fout.fileno())
+                    except OSError:
+                        pass
+            else:
+                # Fallback path for ancient slugs: single-pass byte-streaming (O(1) RAM)
+                with open(self.summary_file, "rb") as fin, open(tmp, "wb") as fout:
+                    for raw_ln in fin:
+                        stripped = raw_ln.strip()
+                        if not stripped:
+                            continue
+                        if target_bytes in raw_ln:
+                            try:
+                                r = json.loads(raw_ln.decode("utf-8"))
+                            except Exception:
+                                print(f"[Runner] WARNING: Dropping corrupted line during reconcile of {self.summary_file}")
+                                continue
+                            if isinstance(r, dict) and r.get("slug") == slug:
+                                r, old_p, new_p, rw, rs = self._apply_reconcile_to_row(
+                                    r, open_px, close_px, winner, winner_source
+                                )
+                                resolved_winner = rw
+                                resolved_source = rs
+                                pnl_delta += (new_p - old_p)
+                                matched_row = dict(r)
+                                fout.write((json.dumps(r, ensure_ascii=False) + "\n").encode("utf-8"))
+                                continue
+                            fout.write(stripped + b"\n")
+                            continue
+                        if not (stripped.startswith(b"{") and stripped.endswith(b"}")):
+                            print(f"[Runner] WARNING: Dropping corrupted line during reconcile of {self.summary_file}")
+                            continue
+                        fout.write(stripped + b"\n")
+                    fout.flush()
+                    try:
+                        os.fsync(fout.fileno())
+                    except OSError:
+                        pass
+            self._atomic_replace(tmp, self.summary_file)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+        # Incremental accounting update: O(1) PnL update + bounded recent CircuitBreaker rebuild
+        if matched_row is not None:
+            self.total_pnl += pnl_delta
+            updated_recent = False
+            for idx in range(len(self._recent_records) - 1, -1, -1):
+                if self._recent_records[idx].get("slug") == slug:
+                    self._recent_records[idx] = matched_row
+                    updated_recent = True
+                    break
+            if updated_recent:
+                self._rebuild_recent_circuit_breaker()
+            else:
+                self._rebuild_accounting()
+
+        # Also reconcile compressed detailed window archive atomically
         gz_path = self.windows_dir / f"{slug}.json.gz"
         if gz_path.exists():
             try:
@@ -1003,8 +1537,7 @@ class PaperRunner:
                 detail["proceeds"] = round(proceeds, 4)
                 detail["net_pnl"] = round(proceeds - total_cost, 4)
                 detail["result"] = "win" if detail["net_pnl"] > 1e-4 else ("loss" if detail["net_pnl"] < -1e-4 else "flat")
-                with gzip.open(gz_path, "wt", encoding="utf-8") as handle:
-                    json.dump(detail, handle, ensure_ascii=False)
+                self._atomic_write_gzip_json(gz_path, detail)
             except Exception as e:
                 print(f"[Runner] Failed to reconcile window gz {slug}: {e}")
 
@@ -1081,9 +1614,12 @@ class PaperRunner:
             "actions": self.actions,
             "insurance_paid": round(self.insurance_paid, 4),
             "network": getattr(self, "net_stats", {}),
+            "api_schema_guard": getattr(self, "_api_schema_guard", {"paused": False, "source": "", "reason": ""}),
             "last_decision": self.decisions[-1] if self.decisions else None,
             "decision_timeline": getattr(self, "decision_timeline", [])[-30:]
         }
-        tmp = self.live_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        self._atomic_replace(tmp, self.live_file)
+        self._atomic_write_text(
+            self.live_file,
+            json.dumps(state, indent=2, ensure_ascii=False),
+            tmp_suffix=".tmp",
+        )

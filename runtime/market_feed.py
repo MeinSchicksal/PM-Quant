@@ -8,6 +8,7 @@ Handles:
 """
 import os
 import sys
+import math
 import time
 import json
 import datetime
@@ -37,17 +38,34 @@ class MarketFeed:
         self.session.mount("http://", adapter)
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
 
-        # Configure proxy fallback
-        self.proxy = proxy if proxy is not None else os.environ.get("PM_PROXY", "http://127.0.0.1:7897")
+        # Configure proxy fallback (default to local Clash port on Windows only; direct on Linux/macOS)
+        default_proxy = "http://127.0.0.1:7897" if sys.platform == "win32" else ""
+        self.proxy = proxy if proxy is not None else os.environ.get("PM_PROXY", default_proxy)
         self._proxy_gen = 0
         self._consecutive_spot_fails = 0
+        self._consecutive_poly_fails = 0
         self._last_reprobe_t = 0.0
         self._reprobe_lock = threading.Lock()
+        self.clock_offset_s = 0.0
+        self._last_clock_check_t = 0.0
+        self._worker_sessions = []
+        self._worker_sess_lock = threading.Lock()
+        self._poly_sess_lock = threading.Lock()
+        self._schema_lock = threading.Lock()
+        self._schema_counts = {}
+        self._schema_guard = {
+            "paused": False,
+            "source": "",
+            "reason": "",
+            "detected_at": 0.0,
+        }
         self._test_connectivity()
 
         self.slug_cache = {}
         # 30-minute rolling spot buffer (~18000 ticks at up to 10 Hz event-driven cadence)
         self.spot_history = deque(maxlen=18000)
+        self._last_vol_calc_t = 0.0
+        self._cached_vol_bps = float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0))
         self._last_spot_rec_t = 0.0
         self._last_spot_rec_px = 0.0
         self._last_binance_px = 0.0
@@ -60,11 +78,15 @@ class MarketFeed:
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_feed")
         self.last_open_is_official = False
 
-        # Polymarket official real-time Chainlink price cache & poller state
+        # Polymarket official real-time Chainlink price cache & single persistent poller thread
         self._last_poly_btc = None
         self._last_poly_btc_t = 0.0
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
+        self._poly_poller_stop = threading.Event()
+        self._poly_poller_wake = threading.Event()
+        self._poly_poller_thread = None
+        self._poly_poll_req_t = 0.0
         self._poly_session = None
         self._spot_ws = None
         self._book_ws = None
@@ -127,8 +149,80 @@ class MarketFeed:
             "avg_latency_ms": avg_lat,
             "downstream_kbps": self.net_stats.get("downstream_kbps", 0.0),
             "total_mb": round(self.net_stats.get("total_bytes", 0) / (1024 * 1024), 2),
-            "msg_rate": self.net_stats.get("msg_rate", 0.0)
+            "msg_rate": self.net_stats.get("msg_rate", 0.0),
+            "clock_offset_s": round(float(getattr(self, "clock_offset_s", 0.0) or 0.0), 3),
         }
+
+    def record_api_schema_ok(self, source: str):
+        """Reset schema drift counter for `source`; auto-resume if this source caused pause."""
+        lock = getattr(self, "_schema_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._schema_counts[source] = 0
+            if self._schema_guard.get("paused") and self._schema_guard.get("source") == source:
+                self._schema_guard = {"paused": False, "source": "", "reason": "", "detected_at": 0.0}
+                print(f"\n[MarketFeed] API schema recovered for {source}; resuming trading.")
+
+    def record_api_schema_error(self, source: str, detail: str, threshold: int = 3):
+        """Track consecutive upstream protocol/schema anomalies and trip safe pause on persistent drift."""
+        lock = getattr(self, "_schema_lock", None)
+        if lock is None:
+            return
+        with lock:
+            cnt = int(self._schema_counts.get(source, 0)) + 1
+            self._schema_counts[source] = cnt
+            if cnt >= max(1, int(threshold)):
+                was_paused = bool(self._schema_guard.get("paused"))
+                self._schema_guard = {
+                    "paused": True,
+                    "source": source,
+                    "reason": f"{source} 接口格式异常/已变更 ({detail})",
+                    "detected_at": round(time.time(), 1),
+                }
+                if not was_paused:
+                    print(f"\n[MarketFeed] CRITICAL: {self._schema_guard['reason']} -> pausing trading safely!")
+
+    def get_api_schema_guard(self) -> dict:
+        lock = getattr(self, "_schema_lock", None)
+        if lock is None:
+            return {"paused": False, "source": "", "reason": "", "detected_at": 0.0}
+        with lock:
+            return dict(self._schema_guard)
+
+    @staticmethod
+    def _is_valid_btc_price(px: float, prev_px: float = 0.0) -> bool:
+        if not math.isfinite(px) or px < 1000.0 or px > 10_000_000.0:
+            return False
+        if prev_px > 0.0 and abs(px - prev_px) / prev_px > 0.20:
+            return False
+        return True
+
+    def _update_clock_from_clob_resp(self, resp, t_local_mid: float):
+        try:
+            raw = resp.text.strip().strip('"')
+            srv_t = float(raw)
+            if srv_t > 1e12:
+                srv_t /= 1000.0
+            if math.isfinite(srv_t) and 1_600_000_000.0 < srv_t < 4_000_000_000.0:
+                self.clock_offset_s = round(t_local_mid - srv_t, 3)
+                self._last_clock_check_t = time.monotonic()
+        except Exception:
+            pass
+
+    def check_clock_offset(self, sess: requests.Session = None) -> Optional[float]:
+        """Measure host clock offset against Polymarket CLOB server time (local - server)."""
+        http = sess or self.session
+        try:
+            t0 = time.time()
+            resp = http.get("https://clob.polymarket.com/time", timeout=(1.5, 2.0))
+            t1 = time.time()
+            if resp.status_code == 200:
+                self._update_clock_from_clob_resp(resp, 0.5 * (t0 + t1))
+                return self.clock_offset_s
+        except Exception:
+            pass
+        return None
 
     def _test_connectivity(self):
         """Verify whether direct connection or proxy works best for both spot & CLOB."""
@@ -137,8 +231,11 @@ class MarketFeed:
         # Prefer direct connection if both endpoints succeed without proxy (lowest latency)
         try:
             r1 = self.session.get(spot_test, proxies={}, timeout=2.5)
+            t0 = time.time()
             r2 = self.session.get(clob_test, proxies={}, timeout=2.5)
+            t1 = time.time()
             if r1.status_code == 200 and r2.status_code == 200:
+                self._update_clock_from_clob_resp(r2, 0.5 * (t0 + t1))
                 self.session.proxies = {}
                 return
         except Exception:
@@ -147,8 +244,11 @@ class MarketFeed:
             try:
                 px_cfg = {"http": self.proxy, "https": self.proxy}
                 r1 = self.session.get(spot_test, proxies=px_cfg, timeout=3.0)
+                t0 = time.time()
                 r2 = self.session.get(clob_test, proxies=px_cfg, timeout=3.0)
+                t1 = time.time()
                 if r1.status_code == 200 and r2.status_code == 200:
+                    self._update_clock_from_clob_resp(r2, 0.5 * (t0 + t1))
                     self.session.proxies = px_cfg
                     return
             except Exception:
@@ -170,7 +270,12 @@ class MarketFeed:
             new_proxies = dict(self.session.proxies or {})
             if new_proxies != old_proxies:
                 self._proxy_gen = getattr(self, "_proxy_gen", 0) + 1
-                if getattr(self, "_poly_session", None) is not None:
+                ps_lock = getattr(self, "_poly_sess_lock", None)
+                if ps_lock is not None:
+                    with ps_lock:
+                        if getattr(self, "_poly_session", None) is not None:
+                            self._poly_session.proxies = dict(new_proxies)
+                elif getattr(self, "_poly_session", None) is not None:
                     self._poly_session.proxies = dict(new_proxies)
                 ws_proxy = new_proxies.get("https") or new_proxies.get("http")
                 for ws_client in (
@@ -180,6 +285,11 @@ class MarketFeed:
                 ):
                     if ws_client is not None:
                         ws_client.proxy = ws_proxy
+                        if hasattr(ws_client, "force_reconnect"):
+                            try:
+                                ws_client.force_reconnect()
+                            except Exception:
+                                pass
                 route_label = ws_proxy or "direct"
                 print(f"\n[MarketFeed] Connectivity route switched to: {route_label}")
                 return True
@@ -234,37 +344,50 @@ class MarketFeed:
             resp = self.session.get(url, timeout=4.0)
             if resp.status_code == 200:
                 data = resp.json()
-                if data and "markets" in data[0] and data[0]["markets"]:
-                    m = data[0]["markets"][0]
-                    raw_tokens = m.get("clobTokenIds", [])
-                    outcomes = m.get("outcomes", [])
-                    if isinstance(raw_tokens, str):
-                        raw_tokens = json.loads(raw_tokens)
-                    if isinstance(outcomes, str):
-                        outcomes = json.loads(outcomes)
+                if not isinstance(data, list):
+                    self.record_api_schema_error("gamma_tokens", f"expected list, got {type(data).__name__}", threshold=3)
+                    return {}
+                if not data:
+                    # Empty list is normal while a brand-new 5m contract is still deploying
+                    return {}
+                ev0 = data[0]
+                if not isinstance(ev0, dict) or "markets" not in ev0 or not ev0["markets"]:
+                    self.record_api_schema_error("gamma_tokens", "missing 'markets' field in event payload", threshold=3)
+                    return {}
+                m = ev0["markets"][0]
+                raw_tokens = m.get("clobTokenIds", [])
+                outcomes = m.get("outcomes", [])
+                if isinstance(raw_tokens, str):
+                    raw_tokens = json.loads(raw_tokens)
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
 
-                    token_up = None
-                    token_down = None
-                    for outcome, tid in zip(outcomes, raw_tokens):
-                        if outcome.lower() == "up":
-                            token_up = tid
-                        elif outcome.lower() == "down":
-                            token_down = tid
+                token_up = None
+                token_down = None
+                for outcome, tid in zip(outcomes, raw_tokens):
+                    if str(outcome).lower() == "up":
+                        token_up = tid
+                    elif str(outcome).lower() == "down":
+                        token_down = tid
 
-                    if token_up and token_down:
-                        meta = {
-                            "slug": slug,
-                            "condition_id": m.get("conditionId"),
-                            "token_up": token_up,
-                            "token_down": token_down,
-                            "resolved": bool(m.get("closed") or m.get("umaResolutionStatus") == "resolved")
-                        }
-                        self.slug_cache[slug] = meta
-                        if len(self.slug_cache) > 50:
-                            oldest = next(iter(self.slug_cache))
-                            if oldest != slug:
-                                self.slug_cache.pop(oldest, None)
-                        return meta
+                if token_up and token_down:
+                    self.record_api_schema_ok("gamma_tokens")
+                    meta = {
+                        "slug": slug,
+                        "condition_id": m.get("conditionId"),
+                        "token_up": token_up,
+                        "token_down": token_down,
+                        "resolved": bool(m.get("closed") or m.get("umaResolutionStatus") == "resolved")
+                    }
+                    self.slug_cache[slug] = meta
+                    if len(self.slug_cache) > 50:
+                        oldest = next(iter(self.slug_cache))
+                        if oldest != slug:
+                            self.slug_cache.pop(oldest, None)
+                    return meta
+                self.record_api_schema_error("gamma_tokens", "missing Up/Down clobTokenIds", threshold=3)
+            elif resp.status_code in (400, 404, 410, 422):
+                self.record_api_schema_error("gamma_tokens", f"HTTP {resp.status_code}", threshold=3)
         except Exception as e:
             print(f"[MarketFeed] Token resolution warning for {slug}: {e}")
             
@@ -364,13 +487,86 @@ class MarketFeed:
             if resp.status_code == 200:
                 body = resp.json()
                 if body.get("completed") and body.get("closePrice") is not None:
-                    open_px = float(body.get("openPrice", 0))
-                    close_px = float(body.get("closePrice", 0))
-                    winner = "Up" if close_px >= open_px else "Down"
-                    return open_px, close_px, winner
+                    open_px = float(body.get("openPrice", 0) or 0)
+                    close_px = float(body.get("closePrice", 0) or 0)
+                    if math.isfinite(open_px) and math.isfinite(close_px) and open_px > 0 and close_px > 0:
+                        winner = "Up" if close_px >= open_px else "Down"
+                        return open_px, close_px, winner
         except Exception:
             pass
         return None
+
+    def _poly_poller_loop(self):
+        """Single long-lived background poller for Polymarket Chainlink TWAP (zero per-tick thread churn)."""
+        while not self._poly_poller_stop.is_set():
+            triggered = self._poly_poller_wake.wait(timeout=1.0)
+            if self._poly_poller_stop.is_set():
+                break
+            if not triggered:
+                continue
+            self._poly_poller_wake.clear()
+            req_t = float(getattr(self, "_poly_poll_req_t", 0.0) or time.time())
+            try:
+                ps_lock = getattr(self, "_poly_sess_lock", None)
+                if ps_lock is not None:
+                    with ps_lock:
+                        if getattr(self, "_poly_session", None) is None:
+                            sess = requests.Session()
+                            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
+                            sess.mount("https://", adapter)
+                            sess.mount("http://", adapter)
+                            sess.headers.update(self.session.headers)
+                            sess.proxies = dict(self.session.proxies)
+                            self._poly_session = sess
+                        sess = self._poly_session
+                else:
+                    sess = self._poly_session or self.session
+                url = "https://polymarket.com/api/crypto/crypto-price"
+                t0 = time.perf_counter()
+                resp = sess.get(url, params=self._poly_twap_params(req_t, include_end=False), timeout=(1.2, 1.8))
+                cl_lat_ms = (time.perf_counter() - t0) * 1000.0
+                if resp.status_code == 200:
+                    body = resp.json()
+                    if not isinstance(body, dict) or ("openPrice" not in body and "closePrice" not in body):
+                        self.record_api_schema_error("poly_twap", "missing openPrice/closePrice in JSON", threshold=5)
+                        continue
+                    px_raw = body.get("openPrice")
+                    px_f = float(px_raw) if px_raw is not None else 0.0
+                    if self._is_valid_btc_price(px_f):
+                        self.record_api_schema_ok("poly_twap")
+                        self._record_net("chainlink", cl_lat_ms, len(resp.content))
+                        lock = getattr(self, "_poly_lock", None)
+                        if lock:
+                            lock.acquire()
+                        try:
+                            self._last_poly_btc = px_f
+                            self._last_poly_btc_t = time.time()
+                        finally:
+                            if lock:
+                                lock.release()
+                        self.record_raw_event("oracle", {
+                            "t": time.time(), "kind": "poly_twap_live", "price": px_f
+                        })
+                elif resp.status_code in (400, 404, 410, 422):
+                    self.record_api_schema_error("poly_twap", f"HTTP {resp.status_code}", threshold=5)
+            except Exception:
+                pass
+            finally:
+                self._last_poly_poll_t = time.monotonic()
+                self._poly_btc_poller_active = False
+
+    def _ensure_poly_poller(self):
+        th = getattr(self, "_poly_poller_thread", None)
+        if th is not None and th.is_alive():
+            return
+        if not hasattr(self, "_poly_poller_stop"):
+            self._poly_poller_stop = threading.Event()
+        if not hasattr(self, "_poly_poller_wake"):
+            self._poly_poller_wake = threading.Event()
+        self._poly_poller_stop.clear()
+        th = threading.Thread(target=self._poly_poller_loop, daemon=True, name="PolyTwapPoller")
+        self._poly_poller_thread = th
+        th.start()
 
     def get_polymarket_btc_price(self, now: float = None) -> Optional[float]:
         """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously.
@@ -379,49 +575,12 @@ class MarketFeed:
         feeding an old price into basis_ema while Binance keeps moving.
         """
         current_t = now or time.time()
-        if not getattr(self, "_poly_btc_poller_active", False) and (current_t - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
+        mono_now = time.monotonic()
+        if not getattr(self, "_poly_btc_poller_active", False) and (mono_now - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
             self._poly_btc_poller_active = True
-            def _worker():
-                try:
-                    # Reuse a dedicated persistent Session owned exclusively by this single-flight poller
-                    # to avoid repeating TLS handshakes every 0.8s while keeping requests thread-safe.
-                    if getattr(self, "_poly_session", None) is None:
-                        sess = requests.Session()
-                        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
-                        sess.mount("https://", adapter)
-                        sess.mount("http://", adapter)
-                        sess.headers.update(self.session.headers)
-                        sess.proxies = dict(self.session.proxies)
-                        self._poly_session = sess
-                    url = "https://polymarket.com/api/crypto/crypto-price"
-                    t0 = time.perf_counter()
-                    resp = self._poly_session.get(url, params=self._poly_twap_params(current_t, include_end=False), timeout=(1.2, 1.8))
-                    cl_lat_ms = (time.perf_counter() - t0) * 1000.0
-                    if resp.status_code == 200:
-                        body = resp.json()
-                        px = body.get("openPrice")
-                        if px and float(px) > 0:
-                            self._record_net("chainlink", cl_lat_ms, len(resp.content))
-                            lock = getattr(self, "_poly_lock", None)
-                            if lock:
-                                lock.acquire()
-                            try:
-                                self._last_poly_btc = float(px)
-                                self._last_poly_btc_t = time.time()
-                            finally:
-                                if lock:
-                                    lock.release()
-                            self.record_raw_event("oracle", {
-                                "t": time.time(), "kind": "poly_twap_live", "price": float(px)
-                            })
-                except Exception:
-                    pass
-                finally:
-                    self._last_poly_poll_t = time.time()
-                    self._poly_btc_poller_active = False
-
-            t = threading.Thread(target=_worker, daemon=True)
-            t.start()
+            self._poly_poll_req_t = current_t
+            self._ensure_poly_poller()
+            self._poly_poller_wake.set()
 
         lock = getattr(self, "_poly_lock", None)
         if lock:
@@ -452,23 +611,45 @@ class MarketFeed:
             sess.proxies = dict(self.session.proxies)
             self._thread_local.session = sess
             self._thread_local.proxy_gen = cur_gen
+            ws_lock = getattr(self, "_worker_sess_lock", None)
+            if ws_lock is not None:
+                with ws_lock:
+                    self._worker_sessions.append(sess)
         elif getattr(self._thread_local, "proxy_gen", -1) != cur_gen:
             sess.proxies = dict(self.session.proxies)
             self._thread_local.proxy_gen = cur_gen
         return sess
 
     def close(self):
-        """Shut down background executor and persistent poller session cleanly."""
+        """Shut down background executor, poller thread and all persistent HTTP sessions cleanly."""
+        if getattr(self, "_poly_poller_stop", None) is not None:
+            self._poly_poller_stop.set()
+        if getattr(self, "_poly_poller_wake", None) is not None:
+            self._poly_poller_wake.set()
+        th = getattr(self, "_poly_poller_thread", None)
+        if th is not None and th.is_alive():
+            th.join(timeout=1.5)
         if getattr(self, "_executor", None) is not None:
             try:
                 self._executor.shutdown(wait=False)
             except Exception:
                 pass
-        if getattr(self, "_poly_session", None) is not None:
-            try:
-                self._poly_session.close()
-            except Exception:
-                pass
+        for s_attr in ("_poly_session", "session"):
+            s_obj = getattr(self, s_attr, None)
+            if s_obj is not None:
+                try:
+                    s_obj.close()
+                except Exception:
+                    pass
+        ws_lock = getattr(self, "_worker_sess_lock", None)
+        if ws_lock is not None:
+            with ws_lock:
+                for ws_sess in self._worker_sessions:
+                    try:
+                        ws_sess.close()
+                    except Exception:
+                        pass
+                self._worker_sessions.clear()
 
     def _fetch_live_spot_price(self, sess: requests.Session = None) -> Tuple[Optional[float], str, float, int]:
         """Fetch live BTC/USDT spot price with multi-source failover.
@@ -497,7 +678,7 @@ class MarketFeed:
                         rows = data.get("data") or []
                         if rows:
                             px = float(rows[0].get("last", 0.0) or 0.0)
-                    if px and px > 0:
+                    if px and self._is_valid_btc_price(px, prev_px=float(getattr(self, "_last_binance_px", 0.0) or 0.0)):
                         return px, src, lat_ms, byte_count
             except Exception:
                 continue
@@ -555,10 +736,20 @@ class MarketFeed:
         toxic_thresh = float(config.PARAMS.get("TOXICITY_SHOCK_BPS", 3.5))
         is_shock = abs(velocity_3s) >= toxic_thresh
 
-        realized_vol_bps = calculate_dual_horizon_vol(
-            list(self.spot_history),
-            baseline_vol_bps=float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0)),
-        )
+        vol_floor = float(config.PARAMS.get("MIN_MODEL_VOL_BPS", 14.0))
+        if (
+            len(self.spot_history) > 120
+            and getattr(self, "_last_vol_calc_t", 0.0) > 0.0
+            and 0.0 <= (t - self._last_vol_calc_t) < 1.0
+        ):
+            realized_vol_bps = getattr(self, "_cached_vol_bps", vol_floor)
+        else:
+            realized_vol_bps = calculate_dual_horizon_vol(
+                list(self.spot_history),
+                baseline_vol_bps=vol_floor,
+            )
+            self._cached_vol_bps = realized_vol_bps
+            self._last_vol_calc_t = t
         _, _, regime = calculate_adaptive_spread_params(realized_vol_bps)
 
         if not is_stale and current_px > 0:
@@ -619,19 +810,37 @@ class MarketFeed:
                 byte_count = len(resp.content)
                 if resp.status_code == 200:
                     data = resp.json()
+                    if not isinstance(data, dict) or ("bids" not in data or "asks" not in data):
+                        self.record_api_schema_error("clob_book", "missing bids/asks keys in CLOB response", threshold=3)
+                        return None, lat_ms, byte_count, None
                     raw_bids = data.get("bids", [])
                     raw_asks = data.get("asks", [])
+                    if not isinstance(raw_bids, list) or not isinstance(raw_asks, list):
+                        self.record_api_schema_error("clob_book", "bids/asks are not lists", threshold=3)
+                        return None, lat_ms, byte_count, None
                     last_trade_str = data.get("last_trade_price")
                     last_trade_px = float(last_trade_str) if last_trade_str is not None else None
 
                     bids_sorted = sorted(
-                        [(float(b["price"]), float(b["size"])) for b in raw_bids if float(b["size"]) > 0],
+                        [
+                            (float(b["price"]), float(b["size"]))
+                            for b in raw_bids
+                            if math.isfinite(float(b["price"])) and math.isfinite(float(b["size"]))
+                            and 0.0 < float(b["price"]) < 1.0 and float(b["size"]) > 0
+                        ],
                         key=lambda x: x[0], reverse=True,
                     )
                     asks_sorted = sorted(
-                        [(float(a["price"]), float(a["size"])) for a in raw_asks if float(a["size"]) > 0],
+                        [
+                            (float(a["price"]), float(a["size"]))
+                            for a in raw_asks
+                            if math.isfinite(float(a["price"])) and math.isfinite(float(a["size"]))
+                            and 0.0 < float(a["price"]) < 1.0 and float(a["size"]) > 0
+                        ],
                         key=lambda x: x[0],
                     )
+                    self.record_api_schema_ok("clob_book")
+                    self._consecutive_poly_fails = 0
                     now_t = time.time()
                     raw_ev = {
                         "t": round(now_t, 2),
@@ -650,15 +859,41 @@ class MarketFeed:
                         received_at=now_t,
                     )
                     return book, lat_ms, byte_count, raw_ev
-                # Retry once on transient rate-limit or 5xx upstream errors
-                if resp.status_code in (429, 500, 502, 503, 504) and attempt + 1 < max_attempts:
-                    time.sleep(0.05)
+                # Retry once on transient rate-limit or 5xx upstream errors (respect Retry-After on 429)
+                if resp.status_code == 429 and attempt + 1 < max_attempts:
+                    ra = resp.headers.get("Retry-After")
+                    wait_s = 0.5
+                    if ra:
+                        try:
+                            wait_s = min(3.0, max(0.2, float(ra)))
+                        except ValueError:
+                            wait_s = 0.5
+                    time.sleep(wait_s)
                     continue
+                if resp.status_code in (500, 502, 503, 504) and attempt + 1 < max_attempts:
+                    time.sleep(0.15)
+                    continue
+                if resp.status_code in (400, 410, 422):
+                    self.record_api_schema_error("clob_book", f"HTTP {resp.status_code}", threshold=3)
+                self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
+                if self._consecutive_poly_fails >= 4 and (time.time() - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
+                    if getattr(self, "_executor", None) is not None:
+                        try:
+                            self._executor.submit(self.reprobe_connectivity)
+                        except Exception:
+                            pass
                 return None, lat_ms, byte_count, None
             except Exception:
                 if attempt + 1 < max_attempts:
-                    time.sleep(0.05)
+                    time.sleep(0.10)
                     continue
+                self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
+                if self._consecutive_poly_fails >= 4 and (time.time() - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
+                    if getattr(self, "_executor", None) is not None:
+                        try:
+                            self._executor.submit(self.reprobe_connectivity)
+                        except Exception:
+                            pass
                 return None, 0.0, 0, None
         return None, 0.0, 0, None
 
@@ -729,6 +964,10 @@ class MarketFeed:
             if fp == prev_fp and (t - prev_rec_t) < 1.0:
                 return None
             rec_cache[tok] = (fp, t)
+            if len(rec_cache) > 32:
+                oldest_tok = min(rec_cache, key=lambda k: rec_cache[k][1])
+                if oldest_tok != tok:
+                    rec_cache.pop(oldest_tok, None)
             return {
                 "t": round(t, 2),
                 "token_id": tok,

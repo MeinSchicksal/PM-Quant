@@ -109,7 +109,8 @@ class QueueMatcher:
         order: Order,
         trade_price: float,
         trade_size: float,
-        now: float
+        now: float,
+        trade_side: str = "",
     ) -> float:
         """Physical queue deduction driven by a real trade print event.
 
@@ -118,6 +119,9 @@ class QueueMatcher:
             trade_price: Real executed price in the trade print.
             trade_size: Exact executed volume in shares.
             now: Timestamp of the print (not of the polling tick).
+            trade_side: Optional taker direction ('BUY' or 'SELL'). An aggressive
+                BUY print at our exact bid price lifted an ask and does not hit
+                our resting bid queue unless price strictly traded through below us.
 
         Returns:
             Filled shares on this print (0.0 if queue not yet exhausted).
@@ -133,6 +137,11 @@ class QueueMatcher:
 
         # Physical latency constraint: cannot fill before arrival at matching engine
         if order.live_at is None or now < order.live_at:
+            return 0.0
+
+        # Do not credit an aggressive BUY trade at our exact bid price as hitting our resting bid
+        side_up = str(trade_side or "").upper()
+        if side_up == "BUY" and trade_price >= order.price - 1e-4:
             return 0.0
 
         # Maker bid fills when real trades execute at or below our bid price

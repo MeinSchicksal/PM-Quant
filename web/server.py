@@ -4,6 +4,7 @@ Exposes only cash results and human-readable order actions. Market internals,
 model decisions and parameters remain in the local journals, not the web API.
 """
 import os
+import re
 import sys
 import json
 import math
@@ -16,6 +17,7 @@ import datetime
 import platform
 import mimetypes
 import threading
+from collections import OrderedDict, deque
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -37,6 +39,47 @@ STATIC_DIR = config.ROOT / "web" / "static"
 _SERVER_START_T = time.time()
 _STORAGE_CACHE = {"t": 0.0, "data": None}
 _STORAGE_LOCK = threading.Lock()
+_CLEANUP_API_LOCK = threading.Lock()
+_LAST_MANUAL_CLEANUP_MONO = 0.0
+
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WEAK_PASSWORDS = frozenset({
+    "change_me_to_a_strong_password",
+    "changeme",
+    "password",
+    "password123",
+    "123456",
+    "12345678",
+    "123456789",
+    "admin",
+    "admin123",
+    "qwerty",
+    "pm-quant",
+})
+
+
+def _is_safe_segment(val: str) -> bool:
+    """Strictly validate a single path segment (blocks '.', '..', slashes, null bytes)."""
+    if not val or val in (".", ".."):
+        return False
+    if "/" in val or "\\" in val or ".." in val:
+        return False
+    return bool(_SAFE_SEGMENT_RE.match(val))
+
+
+def _resolve_ledger_dir(batch: str):
+    """Resolve batch directory strictly inside config.LEDGERS_DIR, else None."""
+    if not _is_safe_segment(batch):
+        return None
+    try:
+        base = config.LEDGERS_DIR.resolve()
+        candidate = (base / batch).resolve()
+        candidate.relative_to(base)
+        if candidate == base:
+            return None
+        return candidate
+    except (ValueError, OSError):
+        return None
 
 # Below this many traded windows a regime cell cannot separate a 5-cent edge
 # from noise (per-window sd is roughly 0.25-1.5 USD), so the dashboard marks
@@ -214,11 +257,76 @@ def _public_round(record, detail=None, active=False):
     }
 
 
-_DETAIL_CACHE = {}
+_DETAIL_CACHE = OrderedDict()
+_DETAIL_CACHE_LOCK = threading.Lock()
+_DETAIL_CACHE_MAX_ENTRIES = 24
+
+_HISTORY_CACHE = OrderedDict()
+_HISTORY_CACHE_LOCK = threading.Lock()
+_HISTORY_CACHE_MAX_ENTRIES = 8
+
+_STATIC_CACHE = OrderedDict()
+_STATIC_CACHE_LOCK = threading.Lock()
+_STATIC_CACHE_MAX_ENTRIES = 16
+
+
+def _lookup_summary_record(summary_file: Path, slug: str):
+    """Find one slug in summary.jsonl with O(1) RAM: checks last 128KB tail first, then streams."""
+    if not slug or not summary_file.exists():
+        return None
+    target_bytes = json.dumps(slug, ensure_ascii=False).encode("utf-8")
+    try:
+        file_size = summary_file.stat().st_size
+        tail_start = max(0, file_size - 131072)
+        with open(summary_file, "rb") as f:
+            if tail_start > 0:
+                f.seek(tail_start)
+                f.readline()
+            tail_lines = f.read().splitlines()
+        for raw_ln in reversed(tail_lines):
+            if target_bytes in raw_ln:
+                try:
+                    rec = json.loads(raw_ln.decode("utf-8"))
+                    if isinstance(rec, dict) and rec.get("slug") == slug:
+                        return rec
+                except (ValueError, json.JSONDecodeError):
+                    continue
+        if tail_start == 0:
+            return None
+        # Fallback: stream prefix without loading the whole 1-year file into RAM
+        with open(summary_file, "rb") as f:
+            while f.tell() < tail_start:
+                raw_ln = f.readline()
+                if not raw_ln:
+                    break
+                if target_bytes in raw_ln:
+                    try:
+                        rec = json.loads(raw_ln.decode("utf-8"))
+                        if isinstance(rec, dict) and rec.get("slug") == slug:
+                            return rec
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+    except OSError:
+        return None
+    return None
+
+
+def _downsample_curve(points: list, max_points: int = 600) -> list:
+    """Preserve endpoints while uniformly downsampling large equity curves for mobile speed."""
+    n = len(points)
+    if n <= max_points or max_points < 2:
+        return points
+    step = (n - 1) / float(max_points - 1)
+    idxs = sorted({min(n - 1, int(round(i * step))) for i in range(max_points)})
+    if idxs[0] != 0:
+        idxs.insert(0, 0)
+    if idxs[-1] != n - 1:
+        idxs.append(n - 1)
+    return [points[i] for i in idxs]
 
 
 def _read_detail(ledger_dir, slug):
-    if not slug or Path(slug).name != slug:
+    if not _is_safe_segment(slug):
         return {}
     path = ledger_dir / "windows" / f"{slug}.json.gz"
     if not path.exists():
@@ -228,18 +336,21 @@ def _read_detail(ledger_dir, slug):
     except OSError:
         return {}
     key = (str(path), stat.st_mtime_ns, stat.st_size)
-    cached = _DETAIL_CACHE.get(key)
-    if cached is not None:
-        return cached
+    with _DETAIL_CACHE_LOCK:
+        cached = _DETAIL_CACHE.get(key)
+        if cached is not None:
+            _DETAIL_CACHE.move_to_end(key)
+            return cached
     try:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             detail = json.load(handle)
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
-    # Bound the cache: one entry per window archive revision.
-    if len(_DETAIL_CACHE) > 256:
-        _DETAIL_CACHE.clear()
-    _DETAIL_CACHE[key] = detail
+    with _DETAIL_CACHE_LOCK:
+        _DETAIL_CACHE[key] = detail
+        _DETAIL_CACHE.move_to_end(key)
+        while len(_DETAIL_CACHE) > _DETAIL_CACHE_MAX_ENTRIES:
+            _DETAIL_CACHE.popitem(last=False)
     return detail
 
 
@@ -263,10 +374,10 @@ def _read_live():
 
 def _get_cached_storage(max_age_s: float = 30.0, force: bool = False) -> dict:
     now = time.time()
-    if not force:
-        with _STORAGE_LOCK:
-            if _STORAGE_CACHE["data"] is not None and (now - _STORAGE_CACHE["t"]) < max_age_s:
-                return dict(_STORAGE_CACHE["data"])
+    min_refresh_s = 10.0 if force else max_age_s
+    with _STORAGE_LOCK:
+        if _STORAGE_CACHE["data"] is not None and (now - _STORAGE_CACHE["t"]) < min_refresh_s:
+            return dict(_STORAGE_CACHE["data"])
     data = get_storage_breakdown()
     with _STORAGE_LOCK:
         _STORAGE_CACHE["t"] = now
@@ -469,6 +580,69 @@ def _compute_daily_summary(traded_records: list, max_days: int = 14) -> tuple:
     return today_key, today_bucket, daily_summary
 
 
+class _AuthRateLimiter:
+    """Sliding-window brute-force protection for HTTP Basic Auth."""
+
+    def __init__(self, max_failures: int = 10, window_s: float = 300.0, ban_s: float = 900.0):
+        self.max_failures = max_failures
+        self.window_s = window_s
+        self.ban_s = ban_s
+        self._lock = threading.Lock()
+        self._fails = {}     # ip -> deque[monotonic_ts]
+        self._banned = {}    # ip -> unban_monotonic_ts
+        self._last_log = {}  # ip -> monotonic_ts
+
+    def check_banned(self, ip: str, now: float = None) -> float:
+        """Return remaining ban seconds (>0 if banned), else 0.0."""
+        t = time.monotonic() if now is None else float(now)
+        with self._lock:
+            until = self._banned.get(ip, 0.0)
+            if until > t:
+                return round(until - t, 1)
+            if until > 0.0:
+                self._banned.pop(ip, None)
+            return 0.0
+
+    def record_failure(self, ip: str, now: float = None) -> float:
+        """Record one auth failure; returns ban duration (>0) if threshold crossed."""
+        t = time.monotonic() if now is None else float(now)
+        should_log = False
+        ban_left = 0.0
+        with self._lock:
+            q = self._fails.setdefault(ip, deque())
+            cutoff = t - self.window_s
+            while q and q[0] < cutoff:
+                q.popleft()
+            q.append(t)
+            if len(q) >= self.max_failures:
+                self._banned[ip] = t + self.ban_s
+                q.clear()
+                ban_left = self.ban_s
+                should_log = True
+            elif (t - self._last_log.get(ip, 0.0)) >= 10.0:
+                self._last_log[ip] = t
+                should_log = True
+            # Cap map size against spoofed-source floods
+            if len(self._fails) > 2048:
+                self._fails.pop(next(iter(self._fails)), None)
+            if len(self._banned) > 2048:
+                self._banned.pop(next(iter(self._banned)), None)
+        if should_log:
+            if ban_left > 0:
+                print(f"[WebAuth] BANNED {ip} for {int(ban_left)}s after {self.max_failures} failed login attempts.")
+            else:
+                print(f"[WebAuth] Failed Basic Auth attempt from {ip}.")
+        return ban_left
+
+    def record_success(self, ip: str):
+        with self._lock:
+            self._fails.pop(ip, None)
+            self._banned.pop(ip, None)
+
+
+_AUTH_LIMITER = _AuthRateLimiter()
+
+
 def _check_basic_auth(auth_header: str) -> bool:
     """Validate optional HTTP Basic Auth when PM_WEB_PASS is configured."""
     expected_pass = os.environ.get("PM_WEB_PASS", "")
@@ -486,8 +660,41 @@ def _check_basic_auth(auth_header: str) -> bool:
 
 
 class _HardenedHTTPServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer with scanner-disconnect noise suppression."""
+    """ThreadingHTTPServer with bounded concurrency and scanner-disconnect noise suppression."""
     request_queue_size = 32
+    daemon_threads = True
+    max_concurrent_requests = 16
+
+    def __init__(self, *args, **kwargs):
+        self._req_sem = threading.BoundedSemaphore(self.max_concurrent_requests)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._req_sem.acquire(blocking=False):
+            try:
+                # Never let a zero-window scanner block the main accept() loop on sendall()
+                request.settimeout(0.5)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: text/plain; charset=utf-8\r\n"
+                    b"Content-Length: 11\r\n"
+                    b"Connection: close\r\n\r\nServer busy"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._req_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._req_sem.release()
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
@@ -503,9 +710,50 @@ class QuantHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _client_ip(self) -> str:
+        peer_ip = (self.client_address[0] if self.client_address else "") or "unknown"
+        # Trust forwarding headers ONLY when connection originates from local reverse proxy (Caddy/Nginx)
+        if peer_ip in ("127.0.0.1", "::1"):
+            real_ip = (self.headers.get("X-Real-IP") or "").strip()
+            if real_ip:
+                return real_ip
+            xff = (self.headers.get("X-Forwarded-For") or "").strip()
+            if xff:
+                return xff.split(",")[0].strip() or peer_ip
+        return peer_ip
+
     def _require_auth(self) -> bool:
-        if _check_basic_auth(self.headers.get("Authorization", "")):
+        expected_pass = os.environ.get("PM_WEB_PASS", "")
+        if not expected_pass:
             return True
+        ip = self._client_ip()
+        ban_left = _AUTH_LIMITER.check_banned(ip)
+        if ban_left > 0:
+            body = b"Too Many Requests"
+            self.send_response(429)
+            self.send_header("Retry-After", str(max(1, int(math.ceil(ban_left)))))
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        auth_hdr = self.headers.get("Authorization", "")
+        if _check_basic_auth(auth_hdr):
+            _AUTH_LIMITER.record_success(ip)
+            return True
+        # Only count requests that actually attempted credentials against brute-force ban;
+        # initial browser challenges (no Authorization header) must not lock out legitimate users.
+        if auth_hdr.strip():
+            ban_now = _AUTH_LIMITER.record_failure(ip)
+            if ban_now > 0:
+                body = b"Too Many Requests"
+                self.send_response(429)
+                self.send_header("Retry-After", str(max(1, int(math.ceil(ban_now)))))
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return False
         body = b"Unauthorized"
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="PM-Quant"')
@@ -515,21 +763,54 @@ class QuantHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         return False
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    def _send_json_bytes(self, body: bytes, status: int = 200, gz_body: bytes = None):
+        accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+        use_gzip = "gzip" in accept_enc and len(body) > 1024
+        payload = (gz_body if gz_body is not None else gzip.compress(body, compresslevel=5)) if use_gzip else body
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Vary", "Accept-Encoding")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(payload)
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self._send_json_bytes(body, status=status)
+
+    def _check_same_origin(self) -> bool:
+        """Basic CSRF check for mutating POST endpoints when browser sends Origin header."""
+        origin = (self.headers.get("Origin") or "").strip()
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not origin or not host:
+            return True
+        try:
+            o_host = (urlparse(origin).netloc or "").lower()
+            return o_host == host
+        except Exception:
+            return False
 
     def do_POST(self):
+        global _LAST_MANUAL_CLEANUP_MONO
         if not self._require_auth():
+            return
+        if not self._check_same_origin():
+            self.send_json({"error": "Cross-origin POST rejected"}, status=403)
             return
         parsed = urlparse(self.path)
         if parsed.path == "/api/cleanup":
+            now_m = time.monotonic()
+            with _CLEANUP_API_LOCK:
+                if _LAST_MANUAL_CLEANUP_MONO > 0.0 and (now_m - _LAST_MANUAL_CLEANUP_MONO) < 30.0:
+                    self.send_json(
+                        {"error": "Cleanup cooldown active, retry in 30s", "system": _get_system_status()},
+                        status=429,
+                    )
+                    return
+                _LAST_MANUAL_CLEANUP_MONO = now_m
             res = cleanup_old_data()
             sys_state = _get_system_status(force_storage=True)
             self.send_json({"cleanup": res, "system": sys_state})
@@ -537,13 +818,42 @@ class QuantHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Not found"}, status=404)
 
     def do_GET(self):
-        if not self._require_auth():
-            return
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # Unauthenticated minimal liveness probe for external monitors (UptimeRobot / Healthchecks).
+        # Exposes NO PnL, positions, or internals; returns 503 if heartbeat stale > 60s or API schema paused.
+        if path == "/healthz":
+            live_data = _read_live()
+            hb_age = None
+            if live_data and live_data.get("now"):
+                hb_age = round(max(0.0, time.time() - _num(live_data.get("now"))), 1)
+            api_guard = (live_data.get("api_schema_guard") or {}) if isinstance(live_data, dict) else {}
+            api_paused = bool(api_guard.get("paused", False))
+            healthy = (hb_age is not None and hb_age <= 60.0 and not api_paused)
+            status_str = "paused_api_changed" if api_paused else ("ok" if healthy else "offline")
+            payload = {
+                "status": status_str,
+                "heartbeat_age_s": hb_age,
+            }
+            if api_paused:
+                payload["api_source"] = str(api_guard.get("source") or "")
+            self.send_json(payload, status=200 if healthy else 503)
+            return
+
+        if not self._require_auth():
+            return
+
         if path == "/api/health":
-            self.send_json({"status": "ok", "batch_id": config.BATCH_ID, "time": time.time()})
+            live_data = _read_live()
+            hb_age = round(max(0.0, time.time() - _num(live_data.get("now"))), 1) if (live_data and live_data.get("now")) else None
+            self.send_json({
+                "status": "ok",
+                "service_status": "online" if (hb_age is not None and hb_age <= 15.0) else ("lagging" if (hb_age is not None and hb_age <= 60.0) else "offline"),
+                "heartbeat_age_s": hb_age,
+                "batch_id": config.BATCH_ID,
+                "time": time.time(),
+            })
         elif path == "/api/system":
             qs = parse_qs(parsed.query)
             force = qs.get("refresh", ["0"])[0] in ("1", "true", "yes")
@@ -562,10 +872,10 @@ class QuantHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             slug = qs.get("slug", [""])[0]
             target_batch = qs.get("batch", [config.BATCH_ID])[0]
-            if not slug or Path(slug).name != slug or Path(target_batch).name != target_batch:
+            ledger_dir = _resolve_ledger_dir(target_batch)
+            if not _is_safe_segment(slug) or ledger_dir is None:
                 self.send_json({"error": "Invalid slug or batch"}, status=400)
                 return
-            ledger_dir = config.LEDGERS_DIR / target_batch
             detail = _read_detail(ledger_dir, slug)
             if not detail:
                 active = _read_live()
@@ -576,21 +886,13 @@ class QuantHandler(BaseHTTPRequestHandler):
                     return
             else:
                 detail = dict(detail)
-            # Authoritative overlay from summary.jsonl guarantees 100% data consistency
+            # Authoritative tail-first O(1)-RAM overlay from summary.jsonl guarantees 100% consistency
             summary_file = ledger_dir / "summary.jsonl"
-            if summary_file.exists():
-                try:
-                    for line in summary_file.read_text(encoding="utf-8").splitlines():
-                        if not line.strip():
-                            continue
-                        rec = json.loads(line)
-                        if rec.get("slug") == slug:
-                            for key in ("open_px", "close_px", "winner", "proceeds", "net_pnl", "result", "traded"):
-                                if rec.get(key) is not None:
-                                    detail[key] = rec[key]
-                            break
-                except Exception:
-                    pass
+            rec = _lookup_summary_record(summary_file, slug)
+            if rec:
+                for key in ("open_px", "close_px", "winner", "proceeds", "net_pnl", "result", "traded"):
+                    if rec.get(key) is not None:
+                        detail[key] = rec[key]
 
             # Enrich actions with decisions reasons and micro-prices
             raw_actions = detail.get("actions") or []
@@ -618,117 +920,170 @@ class QuantHandler(BaseHTTPRequestHandler):
         elif path == "/api/history":
             qs = parse_qs(parsed.query)
             target_batch = qs.get("batch", [config.BATCH_ID])[0]
-            if Path(target_batch).name != target_batch:
+            ledger_dir = _resolve_ledger_dir(target_batch)
+            if ledger_dir is None:
                 self.send_json({"error": "Invalid batch"}, status=400)
                 return
-            ledger_dir = config.LEDGERS_DIR / target_batch
+            include_details = qs.get("include_details", ["0"])[0] in ("1", "true", "yes")
+            raw_limit = qs.get("limit", ["300"])[0].strip().lower()
+            if raw_limit in ("0", "all"):
+                record_limit = 5000
+            else:
+                try:
+                    record_limit = max(20, min(5000, int(raw_limit)))
+                except ValueError:
+                    record_limit = 300
             summary_file = ledger_dir / "summary.jsonl"
-            records = []
+            try:
+                st = summary_file.stat()
+                sum_sig = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                sum_sig = (0, 0)
+
+            active = _read_live() if target_batch == config.BATCH_ID else None
+            active_cost = 0.0
+            active_sig = None
+            if active:
+                pos_up = active.get("pos_up") or {}
+                pos_dn = active.get("pos_down") or {}
+                active_cost = round(_num(pos_up.get("cash")) + _num(pos_dn.get("cash")), 4)
+                active_sig = (
+                    active.get("slug"),
+                    active.get("open_px"),
+                    round(_num(pos_up.get("shares")), 4),
+                    round(_num(pos_dn.get("shares")), 4),
+                    active_cost,
+                    int(active.get("fills_count") or 0),
+                    len(active.get("actions") or []),
+                )
+            available_batches = tuple(sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")]))
+            today_cal = datetime.datetime.now(_display_tz()).strftime("%Y-%m-%d")
+            hist_cache_key = (target_batch, include_details, record_limit, sum_sig, active_sig, available_batches, today_cal)
+            if not include_details:
+                with _HISTORY_CACHE_LOCK:
+                    cached_pair = _HISTORY_CACHE.get(hist_cache_key)
+                    if cached_pair is not None:
+                        _HISTORY_CACHE.move_to_end(hist_cache_key)
+                        self._send_json_bytes(cached_pair[0], gz_body=cached_pair[1])
+                        return
+
+            # Single-pass streaming aggregation (constant O(limit) memory even on 1-year 105k+ row ledgers)
+            latest_cap = 20 if include_details else 50
+            keep_recent = max(record_limit, latest_cap)
+            recent_buf = deque(maxlen=keep_recent)
+            total_rounds = 0
+            total_pnl = 0.0
+            total_won = 0.0
+            total_lost = 0.0
+            turnover = 0.0
+            wins = 0
+            losses = 0
+            paired_rounds = 0
+            total_fills = 0
+            count = 0
+            running_pnl = 0.0
+            equity_curve_raw = []
+            regime_stats = {}
+            occurrence = {}
+            tz = _display_tz()
+            today_key = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+            daily_map = {}
+
             if summary_file.exists():
                 try:
-                    for line in summary_file.read_text(encoding="utf-8").splitlines():
-                        if not line.strip():
-                            continue
-                        try:
-                            records.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            continue
+                    with open(summary_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if not line.strip():
+                                continue
+                            try:
+                                w = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            if not isinstance(w, dict):
+                                continue
+                            # Unit-test journals must never be presented as investor returns.
+                            if str(w.get("slug", "")).startswith("test_"):
+                                continue
+
+                            total_rounds += 1
+                            recent_buf.append(w)
+                            fills_c = int(_num(w.get("fills_count")))
+                            total_fills += fills_c
+                            pnl = _num(w.get("net_pnl"))
+                            is_traded = bool(w.get("traded") or fills_c > 0 or abs(pnl) > 1e-9)
+
+                            raw_reg = w.get("regime") or "unlabeled"
+                            occurrence[raw_reg] = occurrence.get(raw_reg, 0) + 1
+
+                            if is_traded:
+                                count += 1
+                                total_pnl += pnl
+                                running_pnl += pnl
+                                turnover += _num(w.get("total_cost"))
+                                if pnl > 1e-9:
+                                    total_won += pnl
+                                    wins += 1
+                                elif pnl < -1e-9:
+                                    total_lost += abs(pnl)
+                                    losses += 1
+                                if _num(w.get("pos_up")) > 1e-6 and _num(w.get("pos_down")) > 1e-6:
+                                    paired_rounds += 1
+
+                                equity_curve_raw.append((w.get("slug"), round(running_pnl, 4), _num(w.get("start"))))
+                                if len(equity_curve_raw) > 2400:
+                                    equity_curve_raw = _downsample_curve(equity_curve_raw, max_points=1200)
+
+                                ts = _num(w.get("end", w.get("start")))
+                                day_k = datetime.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d") if ts > 0 else today_key
+                                b_day = daily_map.setdefault(day_k, {"date": day_k, "pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
+                                b_day["pnl"] = round(b_day["pnl"] + pnl, 4)
+                                b_day["traded"] += 1
+                                if pnl > 1e-9:
+                                    b_day["wins"] += 1
+                                elif pnl < -1e-9:
+                                    b_day["losses"] += 1
+
+                                # Welford online mean/variance for O(1) memory regime attribution
+                                reg = raw_reg if w.get("regime_source") == "entry_time" else "legacy"
+                                bucket = regime_stats.setdefault(reg, {
+                                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
+                                    "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
+                                })
+                                bucket["traded"] += 1
+                                bucket["net_pnl"] = round(bucket["net_pnl"] + pnl, 4)
+                                if pnl > 1e-9:
+                                    bucket["wins"] += 1
+                                elif pnl < -1e-9:
+                                    bucket["losses"] += 1
+                                else:
+                                    bucket["flats"] += 1
+                                n_cur = bucket["_n"] + 1
+                                delta = pnl - bucket["_mean"]
+                                new_mean = bucket["_mean"] + delta / n_cur
+                                bucket["_n"] = n_cur
+                                bucket["_mean"] = new_mean
+                                bucket["_m2"] += delta * (pnl - new_mean)
                 except OSError:
                     pass
 
-            # Unit-test journals must never be presented as investor returns.
-            records = [w for w in records if not str(w.get("slug", "")).startswith("test_")]
-            traded = [w for w in records if w.get("traded") or _num(w.get("fills_count")) > 0 or abs(_num(w.get("net_pnl"))) > 1e-9]
-            total_pnl = sum(_num(w.get("net_pnl")) for w in traded)
-            total_won = sum(_num(w.get("net_pnl")) for w in traded if _num(w.get("net_pnl")) > 1e-9)
-            total_lost = sum(abs(_num(w.get("net_pnl"))) for w in traded if _num(w.get("net_pnl")) < -1e-9)
-            turnover = sum(_num(w.get("total_cost")) for w in traded)
-            wins = sum(1 for w in traded if _num(w.get("net_pnl")) > 1e-9)
-            losses = sum(1 for w in traded if _num(w.get("net_pnl")) < -1e-9)
-            count = len(traded)
             flats = count - wins - losses
 
-            # Calculate cumulative equity curve
-            equity_curve = []
-            running_pnl = 0.0
-            for w in traded:
-                running_pnl += _num(w.get("net_pnl"))
-                equity_curve.append({
-                    "slug": w.get("slug"),
-                    "pnl": round(running_pnl, 4),
-                    "start": _num(w.get("start"))
-                })
-
-            # Aggregate Regime Performance Attribution.
-            #
-            # Only traded windows carry PnL evidence, and only labels recorded at
-            # entry time are meaningful. Rows written before the entry-time label
-            # existed have no regime at all; they are reported as "unlabeled"
-            # instead of being folded into normal_oscillation (the old fallback
-            # silently invented a regime for most of the history).
-            regime_stats = {}
-            # Occurrence counts use whatever label the round carries (entry-time
-            # or the dwell fallback) so the matrix still shows how often a
-            # regime was live. PnL evidence is only taken from entry-time labels:
-            # a dwell label says nothing about the conditions that opened the
-            # position, and legacy rows have no usable label at all.
-            occurrence = {}
-            for w in records:
-                occurrence[w.get("regime") or "unlabeled"] = occurrence.get(w.get("regime") or "unlabeled", 0) + 1
-
-                reg = w.get("regime") or "unlabeled"
-                if w.get("regime_source") != "entry_time":
-                    # Traded rounds from the pre-provenance era cannot be
-                    # attributed to any regime; keep them visible in one
-                    # explicit bucket instead of dropping them from the table.
-                    traded_legacy = (
-                        bool(w.get("traded"))
-                        or _num(w.get("fills_count")) > 0
-                        or abs(_num(w.get("net_pnl"))) > 1e-9
-                    )
-                    if not traded_legacy:
-                        continue
-                    reg = "legacy"
-                bucket = regime_stats.setdefault(reg, {
-                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
-                    "net_pnl": 0.0, "_pnls": [],
-                })
-                traded_row = (
-                    bool(w.get("traded"))
-                    or _num(w.get("fills_count")) > 0
-                    or abs(_num(w.get("net_pnl"))) > 1e-9
-                )
-                if not traded_row:
-                    continue
-                pnl = _num(w.get("net_pnl"))
-                bucket["traded"] += 1
-                bucket["net_pnl"] = round(bucket["net_pnl"] + pnl, 4)
-                bucket["_pnls"].append(pnl)
-                if pnl > 1e-9:
-                    bucket["wins"] += 1
-                elif pnl < -1e-9:
-                    bucket["losses"] += 1
-                else:
-                    bucket["flats"] += 1
-
-            for reg, rounds in occurrence.items():
+            for reg, r_cnt in occurrence.items():
                 regime_stats.setdefault(reg, {
                     "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
-                    "net_pnl": 0.0, "_pnls": [],
-                })["rounds"] = rounds
+                    "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
+                })["rounds"] = r_cnt
 
-            # Every legacy row is traded by construction, so its round count is
-            # its sample size (the occurrence map has no "legacy" key).
             if "legacy" in regime_stats:
                 regime_stats["legacy"]["rounds"] = regime_stats["legacy"]["traded"]
 
             for bucket in regime_stats.values():
-                pnls = bucket.pop("_pnls", [])
-                n = len(pnls)
+                n = bucket.pop("_n", 0)
+                mean = bucket.pop("_mean", 0.0)
+                m2 = bucket.pop("_m2", 0.0)
                 if n:
-                    mean = sum(pnls) / n
-                    var = sum((x - mean) ** 2 for x in pnls) / (n - 1) if n > 1 else 0.0
-                    sd = math.sqrt(var)
+                    var = (m2 / (n - 1)) if n > 1 else 0.0
+                    sd = math.sqrt(max(0.0, var))
                     se = sd / math.sqrt(n) if n else 0.0
                     bucket["mean"] = round(mean, 4)
                     bucket["sd"] = round(sd, 4)
@@ -741,17 +1096,17 @@ class QuantHandler(BaseHTTPRequestHandler):
                     bucket["t_stat"] = 0.0
                 bucket["sample_ok"] = n >= ATTRIBUTION_MIN_SAMPLES
 
-            latest = list(reversed(records))[:50]
-            include_details = qs.get("include_details", ["0"])[0] in ("1", "true", "yes")
+            rev_recent = list(reversed(recent_buf))
+            latest = rev_recent[:latest_cap]
             rounds = [
                 _public_round(w, _read_detail(ledger_dir, w.get("slug", "")) if include_details else {})
                 for w in latest
             ]
-            active = _read_live() if target_batch == config.BATCH_ID else None
             if active and not any(r.get("slug") == active.get("slug") for r in rounds):
                 rounds.insert(0, _public_round(active, active, active=True))
 
-            today_key, today_bucket, daily_summary = _compute_daily_summary(traded)
+            daily_summary = [daily_map[k] for k in sorted(daily_map.keys(), reverse=True)[:14]]
+            today_bucket = daily_map.get(today_key, {"pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
 
             decisive = wins + losses
             win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
@@ -761,18 +1116,15 @@ class QuantHandler(BaseHTTPRequestHandler):
             roi_pct = round((total_pnl / INITIAL_CAPITAL) * 100.0, 2)
             turnover_roi_pct = round((total_pnl / turnover) * 100.0, 2) if turnover > 1e-4 else 0.0
 
-            active_cost = 0.0
-            if active:
-                pos_up = active.get("pos_up") or {}
-                pos_dn = active.get("pos_down") or {}
-                active_cost = round(_num(pos_up.get("cash")) + _num(pos_dn.get("cash")), 4)
-
             free_capital = round(max(0.0, available_capital - active_cost), 4)
+            page_records = rev_recent[:record_limit]
+            curve_pts = _downsample_curve(equity_curve_raw, max_points=600)
+            curve_compact = [{"slug": s, "pnl": p, "start": st_t} for s, p, st_t in curve_pts]
 
-            self.send_json({
+            payload_obj = {
                 "batch_id": target_batch,
                 "current_batch": config.BATCH_ID,
-                "available_batches": sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")]),
+                "available_batches": list(available_batches),
                 "initial_capital": INITIAL_CAPITAL,
                 "available_capital": available_capital,
                 "active_cost": active_cost,
@@ -798,12 +1150,25 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "losses": losses,
                 "flats": flats,
                 "traded_rounds": count,
-                "total_rounds": len(records),
-                "equity_curve": equity_curve,
-                "records": list(reversed(records)),
+                "paired_rounds": paired_rounds,
+                "total_fills": total_fills,
+                "total_rounds": total_rounds,
+                "records_total": total_rounds,
+                "records_truncated": total_rounds > len(page_records),
+                "equity_curve": curve_compact,
+                "records": page_records,
                 "rounds": rounds,
                 "regime_stats": regime_stats,
-            })
+            }
+            raw_bytes = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+            gz_bytes = gzip.compress(raw_bytes, compresslevel=5) if len(raw_bytes) > 1024 else None
+            if not include_details:
+                with _HISTORY_CACHE_LOCK:
+                    _HISTORY_CACHE[hist_cache_key] = (raw_bytes, gz_bytes)
+                    _HISTORY_CACHE.move_to_end(hist_cache_key)
+                    while len(_HISTORY_CACHE) > _HISTORY_CACHE_MAX_ENTRIES:
+                        _HISTORY_CACHE.popitem(last=False)
+            self._send_json_bytes(raw_bytes, gz_body=gz_bytes)
         else:
             rel_path = path.lstrip("/")
             if rel_path.startswith("static/"):
@@ -826,15 +1191,51 @@ class QuantHandler(BaseHTTPRequestHandler):
                 return
 
             if file_path.exists() and file_path.is_file():
+                try:
+                    st = file_path.stat()
+                except OSError:
+                    self.send_error(404)
+                    return
+                etag = f'W/"{st.st_mtime_ns:x}-{st.st_size:x}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
                 mime, _ = mimetypes.guess_type(str(file_path))
                 mime = mime or "application/octet-stream"
-                body = file_path.read_bytes()
+                cache_key = (str(file_path), st.st_mtime_ns, st.st_size)
+                with _STATIC_CACHE_LOCK:
+                    cached_st = _STATIC_CACHE.get(cache_key)
+                    if cached_st is not None:
+                        _STATIC_CACHE.move_to_end(cache_key)
+                if cached_st is None:
+                    raw_body = file_path.read_bytes()
+                    is_compressible = len(raw_body) > 1024 and (
+                        "text" in mime or "javascript" in mime or "json" in mime or "svg" in mime or "css" in mime
+                    )
+                    gz_body = gzip.compress(raw_body, compresslevel=5) if is_compressible else None
+                    cached_st = (raw_body, gz_body)
+                    with _STATIC_CACHE_LOCK:
+                        _STATIC_CACHE[cache_key] = cached_st
+                        _STATIC_CACHE.move_to_end(cache_key)
+                        while len(_STATIC_CACHE) > _STATIC_CACHE_MAX_ENTRIES:
+                            _STATIC_CACHE.popitem(last=False)
+                raw_body, gz_body = cached_st
+                accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+                use_gzip = gz_body is not None and "gzip" in accept_enc
+                payload = gz_body if use_gzip else raw_body
                 self.send_response(200)
                 self.send_header("Content-Type", f"{mime}; charset=utf-8" if "text" in mime or "javascript" in mime else mime)
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("ETag", etag)
                 self.send_header("Cache-Control", "no-cache")
+                self.send_header("Vary", "Accept-Encoding")
+                if use_gzip:
+                    self.send_header("Content-Encoding", "gzip")
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(payload)
             else:
                 self.send_error(404)
 
@@ -845,9 +1246,26 @@ def _resolve_bind_host(host=None) -> str:
     return os.environ.get("PM_WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
 
 
+def _validate_bind_security(bind_host: str):
+    """Refuse to expose the dashboard on a non-loopback interface without a strong PM_WEB_PASS."""
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        pwd = os.environ.get("PM_WEB_PASS", "").strip()
+        if not pwd:
+            raise RuntimeError(
+                f"Refusing to bind non-loopback host '{bind_host}' without PM_WEB_PASS configured. "
+                f"Set PM_WEB_PASS (or keep PM_WEB_HOST=127.0.0.1 behind a HTTPS reverse proxy)."
+            )
+        if len(pwd) < 8 or pwd.lower() in _WEAK_PASSWORDS:
+            raise RuntimeError(
+                f"Refusing to bind non-loopback host '{bind_host}' with a weak/placeholder PM_WEB_PASS. "
+                f"Use a strong password (>= 8 chars, not a default placeholder)."
+            )
+
+
 def start_server_in_background(port=8900, host=None):
     """Start investor dashboard HTTP server in a daemon background thread."""
     bind_host = _resolve_bind_host(host)
+    _validate_bind_security(bind_host)
     server_address = (bind_host, port)
     try:
         httpd = _HardenedHTTPServer(server_address, QuantHandler)
@@ -863,6 +1281,7 @@ def run(port=8900, host=None):
     # Defaults to loopback-only (127.0.0.1). Set PM_WEB_HOST=0.0.0.0 and PM_WEB_PASS=...
     # on a remote server to enable password-protected mobile/remote access.
     bind_host = _resolve_bind_host(host)
+    _validate_bind_security(bind_host)
     server_address = (bind_host, port)
     httpd = _HardenedHTTPServer(server_address, QuantHandler)
     disp_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
