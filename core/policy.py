@@ -320,7 +320,8 @@ def _plan_inventory_management(
                             )
 
     should_pull = (
-        (held_shares >= max_shares_cap - 1e-4)
+        (held_shares >= lot_size - 1e-4)
+        or (held_shares >= max_shares_cap - 1e-4)
         or (entries_count >= max_entries and held_shares >= min_order_sh - 1e-4)
         or is_toxic_or_stale
     )

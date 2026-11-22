@@ -12,6 +12,7 @@ Group=ubuntu
 WorkingDirectory=/opt/pm-quant
 Environment="PYTHONUNBUFFERED=1"
 Environment="PM_WEB_HOST=127.0.0.1"
+Environment="PM_REQUIRE_AUTH=1"
 Environment="PM_TZ_OFFSET_HOURS=8"
 EnvironmentFile=-/etc/pm-quant.env
 ExecStart=/opt/pm-quant/.venv/bin/python main.py web 8900 --no-browser

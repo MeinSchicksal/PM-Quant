@@ -34,6 +34,7 @@ _PRUNABLE_MARKET_CATS = ("events", "oracle", "books", "spot")
 _GUARD_LOCK = threading.Lock()
 _CLEANUP_EXEC_LOCK = threading.Lock()
 _DISK_GUARD_FILE = config.RUNTIME_DIR / "disk_guard.json"
+_LAST_GUARD_SYNC_MONO = 0.0
 _DISK_GUARD_STATE: Dict[str, Any] = {
     "paused": False,
     "reason": "",
@@ -72,16 +73,28 @@ def _sync_disk_guard_from_disk():
                     _DISK_GUARD_STATE[k] = raw[k]
 
 
+def _sync_disk_guard_throttled(min_interval_s: float = 5.0):
+    """Throttled cross-process sync so engine picks up Web manual cleanups within seconds."""
+    global _LAST_GUARD_SYNC_MONO
+    now_m = time.monotonic()
+    if (now_m - _LAST_GUARD_SYNC_MONO) < min_interval_s:
+        return
+    _LAST_GUARD_SYNC_MONO = now_m
+    _sync_disk_guard_from_disk()
+
+
 def is_raw_recording_allowed() -> bool:
     """Return False when raw market recording is disabled or paused by critical disk guard."""
     if not bool(config.PARAMS.get("RECORD_RAW_MARKET", True)):
         return False
+    _sync_disk_guard_throttled()
     with _GUARD_LOCK:
         return not bool(_DISK_GUARD_STATE.get("paused", False))
 
 
 def is_replay_archive_allowed() -> bool:
     """Return False only when disk is critically full so summary.jsonl always survives."""
+    _sync_disk_guard_throttled()
     with _GUARD_LOCK:
         return not bool(_DISK_GUARD_STATE.get("paused", False))
 

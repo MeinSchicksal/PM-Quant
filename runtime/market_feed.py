@@ -592,10 +592,13 @@ class MarketFeed:
             if lock:
                 lock.release()
         if px is None:
+            self.last_poly_btc_ts = 0.0
             return None
         max_age = float(config.PARAMS.get("POLY_PRICE_MAX_AGE_S", 10.0))
         if (time.time() - ts) > max_age:
+            self.last_poly_btc_ts = 0.0
             return None
+        self.last_poly_btc_ts = float(ts)
         return px
 
     def _get_worker_session(self) -> requests.Session:
@@ -694,18 +697,21 @@ class MarketFeed:
         byte_count: int,
         binance_open_price: float = None,
         poly_spot: float = None,
+        spot_sample_ts: Optional[float] = None,
     ) -> SpotState:
         is_stale = False
-        spot_ts = t
+        spot_ts = float(spot_sample_ts) if (spot_sample_ts is not None and float(spot_sample_ts) > 0.0) else t
 
         if live_px is not None and live_px > 0:
             current_px = live_px
             self._consecutive_spot_fails = 0
             self._last_binance_px = current_px
-            self._last_binance_t = t
+            self._last_binance_t = spot_ts
             self._last_spot_source = src
             self._record_net("binance", lat_ms, byte_count)
-            self.spot_history.append((t, current_px))
+            # Avoid pushing duplicate identical timestamps when WS price hasn't ticked yet
+            if not self.spot_history or spot_ts > self.spot_history[-1][0] + 1e-6:
+                self.spot_history.append((spot_ts, current_px))
         else:
             is_stale = True
             self._consecutive_spot_fails = getattr(self, "_consecutive_spot_fails", 0) + 1
@@ -932,6 +938,13 @@ class MarketFeed:
         ws_spot = spot_ws.get_latest(max_age_s=2.0, now=t) if spot_ws is not None else None
         ws_up = book_ws.get_order_book(token_up, max_age_s=3.0, now=t) if book_ws is not None else None
         ws_dn = book_ws.get_order_book(token_down, max_age_s=3.0, now=t) if book_ws is not None else None
+        # 当 WS 盘口双边恢复有效推送时，解除此前 HTTP fallback 触发的 clob_book 暂停自锁
+        if (
+            ws_up is not None and ws_dn is not None
+            and (ws_up.best_bid is not None or ws_up.best_ask is not None)
+            and (ws_dn.best_bid is not None or ws_dn.best_ask is not None)
+        ):
+            self.record_api_schema_ok("clob_book")
 
         f_spot = (
             self._executor.submit(lambda: self._fetch_live_spot_price(self._get_worker_session()))
@@ -946,8 +959,10 @@ class MarketFeed:
             if ws_dn is None else None
         )
 
+        spot_sample_ts = None
         if ws_spot is not None:
             live_px, ws_ts, src = ws_spot
+            spot_sample_ts = float(ws_ts)
             spot_lat = float(getattr(spot_ws, "rtt_ms", 0.0) or 0.0)
             spot_bytes = 96
         else:
@@ -992,6 +1007,7 @@ class MarketFeed:
         spot = self._build_spot_state(
             open_price, t, live_px, src, spot_lat, spot_bytes,
             binance_open_price=binance_open_price, poly_spot=poly_spot,
+            spot_sample_ts=spot_sample_ts,
         )
 
         def _finalize_book(book, lat_ms, byte_count, raw_ev, outcome):

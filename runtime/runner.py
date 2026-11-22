@@ -24,7 +24,7 @@ from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from runtime.retention import is_replay_archive_allowed
-from sim.matcher import QueueMatcher, make_complementary
+from sim.matcher import QueueMatcher, is_books_consistent, make_complementary
 
 
 class PaperRunner:
@@ -135,6 +135,9 @@ class PaperRunner:
         self._last_timeline_t = 0.0
         self.actions = []
         self.insurance_paid = 0.0
+        self.realized_unwind_pnl = 0.0
+        self.unwind_cost_basis = 0.0
+        self.unwind_proceeds = 0.0
         self.total_pnl = 0.0
         self._settled_slugs = set()
         # Keep only the recent ~48h (600 windows) in memory for O(1) CircuitBreaker rebuilds
@@ -157,6 +160,8 @@ class PaperRunner:
         self._basis_ema = None
         self._basis_updated_t = 0.0
         self._basis_sample_count = 0
+        self._last_basis_poly_px = None
+        self._last_basis_poly_t = 0.0
         self._last_hist_t = 0.0
         self._last_wait_dec_t = 0.0
         self._last_live_write_t = 0.0
@@ -274,6 +279,9 @@ class PaperRunner:
         self._last_timeline_t = 0.0
         self.actions = []
         self.insurance_paid = 0.0
+        self.realized_unwind_pnl = 0.0
+        self.unwind_cost_basis = 0.0
+        self.unwind_proceeds = 0.0
         self.entries_count = 0
         self.quote_attempts = 0
         self.entry_order_ids = set()
@@ -338,6 +346,19 @@ class PaperRunner:
             self.insurance_paid = max(0.0, float(raw.get("insurance_paid", 0.0) or 0.0))
         except (TypeError, ValueError):
             self.insurance_paid = 0.0
+        try:
+            u_pnl = float(raw.get("realized_unwind_pnl", 0.0) or 0.0)
+            self.realized_unwind_pnl = u_pnl if math.isfinite(u_pnl) else 0.0
+        except (TypeError, ValueError):
+            self.realized_unwind_pnl = 0.0
+        try:
+            u_cost = float(raw.get("unwind_cost_basis", 0.0) or 0.0)
+            u_proc = float(raw.get("unwind_proceeds", 0.0) or 0.0)
+            self.unwind_cost_basis = max(0.0, u_cost) if math.isfinite(u_cost) else 0.0
+            self.unwind_proceeds = max(0.0, u_proc) if math.isfinite(u_proc) else 0.0
+        except (TypeError, ValueError):
+            self.unwind_cost_basis = 0.0
+            self.unwind_proceeds = 0.0
 
         restored_actions = raw.get("actions")
         if isinstance(restored_actions, list):
@@ -537,6 +558,25 @@ class PaperRunner:
             self.pos_down.cash += (fill_sz * order.price)
         self._record_fill(ts, order.side, order.price, fill_sz, "maker", order.purpose, order_id=order.id)
 
+    @staticmethod
+    def _resolve_print_timestamp(tp: dict, fallback_now: float) -> float:
+        """Align trade-print timestamp with local sub-second order timestamps.
+
+        Polymarket RTDS `activity/trades` truncates `timestamp` to whole seconds
+        (0 sub-second precision), whereas `live_at` and `cancel_effective_at`
+        have millisecond resolution. Comparing a floored integer second against
+        a sub-second deadline causes false drops after activation and false
+        zombie fills after cancellation. When `exch_t` is whole-second and
+        `recv_t` is within normal transit bounds, use `recv_t` instead.
+        """
+        exch_t = float(tp.get("timestamp") or 0.0)
+        recv_t = float(tp.get("received_at") or 0.0)
+        if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
+            if recv_t > 0.0 and abs(exch_t - round(exch_t)) < 1e-6:
+                return recv_t
+            return exch_t
+        return recv_t or exch_t or fallback_now
+
     def step(
         self,
         now: float,
@@ -550,6 +590,7 @@ class PaperRunner:
         delayed_book_fetcher=None,
         delayed_prints_fetcher=None,
         api_schema_guard: dict = None,
+        poly_spot_ts: Optional[float] = None,
     ):
         """Execute one evaluation tick: probability, regime, risk gates, matching.
 
@@ -579,10 +620,24 @@ class PaperRunner:
             if self._spot_buf and now - self._spot_buf[0][0] > 65.0:
                 self._spot_buf = [(ts, px) for ts, px in self._spot_buf if now - ts <= 65.0]
 
+        buf_span = (self._spot_buf[-1][0] - self._spot_buf[0][0]) if len(self._spot_buf) >= 2 else 0.0
+        min_basis_span = 5.0 if replay_mode else min(45.0, max(15.0, float(config.PARAMS.get("STRIKE_WAIT_S", 15.0)) * 3.0))
+        if poly_spot_ts is not None and float(poly_spot_ts) > 0.0:
+            poly_changed = float(poly_spot_ts) > float(getattr(self, "_last_basis_poly_t", 0.0)) + 1e-6
+        else:
+            prev_ppx = getattr(self, "_last_basis_poly_px", None)
+            poly_changed = (
+                prev_ppx is None
+                or abs(float(poly_spot or 0.0) - float(prev_ppx)) > 1e-6
+                or (now - self._basis_updated_t) >= 1.5
+            )
+
         if (
             poly_fresh
             and not spot_stale
             and len(self._spot_buf) >= 5
+            and buf_span >= min_basis_span
+            and poly_changed
             and (self._basis_ema is None or (now - self._basis_updated_t) >= 0.45)
         ):
             bin_60s_pts = [(ts, px) for ts, px in self._spot_buf if now - ts <= 60.0]
@@ -613,6 +668,9 @@ class PaperRunner:
                         self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
                     self._basis_updated_t = now
                     self._basis_sample_count += 1
+                    self._last_basis_poly_px = float(poly_spot)
+                    if poly_spot_ts is not None and float(poly_spot_ts) > 0.0:
+                        self._last_basis_poly_t = float(poly_spot_ts)
 
         basis_max_age = float(config.PARAMS.get("BASIS_MAX_AGE_S", 120.0))
         basis_ready = (
@@ -771,17 +829,14 @@ class PaperRunner:
         if not hasattr(self, "pending_cancels"):
             self.pending_cancels = []
         print_touched_ids = set()
+        pending_cancel_filled_sides = set()
+        pending_cancel_ids = {o.id for o in self.pending_cancels}
         active_for_prints = list(self.working_orders) + list(self.pending_cancels)
         if trade_prints and active_for_prints:
             for tp in trade_prints:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
                 tp_dir = str(tp.get("side") or "")
-                exch_t = float(tp.get("timestamp") or 0.0)
-                recv_t = float(tp.get("received_at") or 0.0)
-                if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
-                    tp_t = exch_t
-                else:
-                    tp_t = recv_t or exch_t or now
+                tp_t = self._resolve_print_timestamp(tp, now)
                 for o in active_for_prints:
                     if tp_side and o.side != tp_side:
                         continue
@@ -792,6 +847,8 @@ class PaperRunner:
                         print_touched_ids.add(o.id)
                     if fill_sz > 0:
                         self._apply_maker_fill(tp_t, o, fill_sz)
+                        if o.id in pending_cancel_ids:
+                            pending_cancel_filled_sides.add(o.side)
             self.working_orders = [o for o in self.working_orders if o.remaining > 1e-6]
 
         # 0b. Crossed-book matching for already-resting orders BEFORE evaluating new decisions,
@@ -804,18 +861,50 @@ class PaperRunner:
                     continue
                 if o.id not in print_touched_ids:
                     target_book = book_up if o.side == "Up" else book_down
+                    if not o.activated and now >= float(o.live_at or 0.0) - 1e-9:
+                        if not self.matcher.activate_order(o, target_book, now, post_only=True):
+                            continue
                     fill_sz = self.matcher.match_order(o, target_book, now)
                     if fill_sz > 0:
                         self._apply_maker_fill(now, o, fill_sz)
+                        pending_cancel_filled_sides.add(o.side)
                 if o.remaining > 1e-6:
                     still_pending.append(o)
             self.pending_cancels = still_pending
+
+        # If an in-flight cancel (e.g. from a requote) filled before cancellation took effect,
+        # immediately pull any replacement working order on that side so we never double-fill.
+        if pending_cancel_filled_sides and self.working_orders:
+            kept_working = []
+            for o in self.working_orders:
+                if o.side in pending_cancel_filled_sides and o.purpose == "entry":
+                    o.cancel_at = now
+                    o.cancel_effective_at = now if not o.activated else (now + cancel_lat)
+                    o.cancel_reason = "原挂单在途撤单前已成交，自动撤销替代挂单防超仓"
+                    if o.activated and o.remaining > 1e-6 and cancel_lat > 0:
+                        self.pending_cancels.append(o)
+                    self.actions.append({
+                        "t": round(now, 2), "action": "cancel", "side": o.side,
+                        "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                        "reason": o.cancel_reason, "order_id": o.id
+                    })
+                else:
+                    kept_working.append(o)
+            self.working_orders = kept_working
 
         if self.working_orders:
             pre_remaining = []
             for o in self.working_orders:
                 if o.id not in print_touched_ids:
                     target_book = book_up if o.side == "Up" else book_down
+                    if not o.activated and now >= float(o.live_at or 0.0) - 1e-9:
+                        if not self.matcher.activate_order(o, target_book, now, post_only=True):
+                            self.actions.append({
+                                "t": round(now, 2), "action": "cancel", "side": o.side,
+                                "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                                "reason": o.cancel_reason, "order_id": o.id
+                            })
+                            continue
                     fill_sz = self.matcher.match_order(o, target_book, now)
                     if fill_sz > 0:
                         self._apply_maker_fill(now, o, fill_sz)
@@ -883,7 +972,7 @@ class PaperRunner:
         # must see the real (possibly negative) free balance after subtracting
         # capital already committed in this window.
         total_equity_cap = self._initial_capital + self.total_pnl
-        committed_cost = self.pos_up.cash + self.pos_down.cash
+        committed_cost = self.pos_up.cash + self.pos_down.cash - getattr(self, "realized_unwind_pnl", 0.0)
         available_cap = total_equity_cap - committed_cost
         last_entry_t = getattr(self, "last_entry_fill_t", None)
         secs_since_entry = max(0.0, now - float(last_entry_t)) if last_entry_t is not None else 9999.0
@@ -989,6 +1078,7 @@ class PaperRunner:
             is_buy = action.action in ("taker_buy", "taker_hedge")
             target_book = book_down if action.side == "Down" else book_up
             reject_reason = None
+            fill_ts = now
 
             if want < min_order_sh - 1e-4:
                 filled, vwap = 0.0, 0.0
@@ -999,26 +1089,33 @@ class PaperRunner:
                 wire_lat = float(config.PARAMS.get("LATENCY_S", 0.30))
                 if not replay_mode:
                     time.sleep(wire_lat)
-                post_book = delayed_book_fetcher(action.side)
+                fill_ts = now + wire_lat
+                fetched = delayed_book_fetcher(action.side)
+                post_up = None
+                post_dn = None
+                if isinstance(fetched, tuple) and len(fetched) == 2:
+                    post_up, post_dn = fetched
+                    post_book = post_up if action.side == "Up" else post_dn
+                else:
+                    post_book = fetched
+                    if action.side == "Up":
+                        post_up = post_book
+                    else:
+                        post_dn = post_book
 
-                # Settle any in-flight pending_cancels that got hit during the 300ms transit
-                # window BEFORE executing a same-side taker_buy (prevents double-fill race).
+                # Settle any in-flight pending_cancels (BOTH sides) that got hit during the 300ms transit
+                # window BEFORE executing a same-side taker_buy (prevents double-fill race and opposite-side drops).
                 # In offline replay without a delayed print stream, preserve pending_cancels
                 # so the next replay tick at t + dt still matches them at their true timestamp.
                 if self.pending_cancels and (not replay_mode or delayed_prints_fetcher is not None):
                     pre_side_shares = self.pos_up.shares if action.side == "Up" else self.pos_down.shares
-                    delayed_now = now + wire_lat
+                    delayed_now = fill_ts
                     delayed_touched = set()
                     if delayed_prints_fetcher is not None:
                         for tp in (delayed_prints_fetcher() or []):
                             tp_side = tp.get("outcome")
                             tp_dir = str(tp.get("side") or "")
-                            exch_t = float(tp.get("timestamp") or 0.0)
-                            recv_t = float(tp.get("received_at") or 0.0)
-                            if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
-                                tp_t = exch_t
-                            else:
-                                tp_t = recv_t or exch_t or delayed_now
+                            tp_t = self._resolve_print_timestamp(tp, delayed_now)
                             for o in list(self.pending_cancels):
                                 if tp_side and o.side != tp_side:
                                     continue
@@ -1034,13 +1131,14 @@ class PaperRunner:
                         if o.remaining <= 1e-6:
                             continue
                         cancel_eff = float(getattr(o, "cancel_effective_at", 0.0) or 0.0)
+                        o_book = post_up if o.side == "Up" else post_dn
                         # Check crossed book during the in-flight cancel window [placed_cancel, cancel_eff].
                         # When wire_lat == cancel_lat == 0.30s, delayed_now == cancel_eff, so we evaluate
                         # just inside the cancel boundary (cancel_eff - 1e-3) rather than making this dead code.
-                        if o.side == action.side and post_book is not None and o.id not in delayed_touched:
+                        if o_book is not None and o.id not in delayed_touched:
                             if delayed_now <= cancel_eff + 1e-9:
                                 eval_t = min(delayed_now, cancel_eff - 1e-3)
-                                fill_sz = self.matcher.match_order(o, post_book, eval_t)
+                                fill_sz = self.matcher.match_order(o, o_book, eval_t)
                                 if fill_sz > 0:
                                     self._apply_maker_fill(delayed_now, o, fill_sz)
                         if o.remaining > 1e-6 and delayed_now < cancel_eff - 1e-9:
@@ -1063,6 +1161,40 @@ class PaperRunner:
                 elif post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
                     filled, vwap = 0.0, 0.0
                     reject_reason = "延迟后重拉盘口为空，IOC 放弃成交"
+                elif bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True)):
+                    inconsistent = False
+                    if action.action == "taker_buy":
+                        # 新开仓严格要求四价全齐且双边盘口一致
+                        if post_up is not None and post_dn is not None and not is_books_consistent(post_up, post_dn):
+                            inconsistent = True
+                    elif action.action == "taker_hedge":
+                        # 黑天鹅锁利/对冲处于极端单边盘口（一方可能无买或无卖），仅拦截自交叉或明确双边倒挂
+                        if post_book.best_bid is not None and post_book.best_ask is not None and post_book.best_bid >= post_book.best_ask:
+                            inconsistent = True
+                        elif post_up is not None and post_dn is not None:
+                            au, ad = post_up.best_ask, post_dn.best_ask
+                            bu, bd = post_up.best_bid, post_dn.best_bid
+                            if (bu is not None and au is not None and bu >= au) or (bd is not None and ad is not None and bd >= ad):
+                                inconsistent = True
+                            elif au is not None and ad is not None and (au + ad) < 0.995:
+                                inconsistent = True
+                    else:
+                        # taker_unwind 仅减仓卖出己侧 bid，只检查己侧未自交叉，绝不被对侧空盘阻断止损
+                        if post_book.best_bid is not None and post_book.best_ask is not None and post_book.best_bid >= post_book.best_ask:
+                            inconsistent = True
+
+                    if inconsistent:
+                        filled, vwap = 0.0, 0.0
+                        reject_reason = "300ms 延迟后双边盘口不一致，IOC 放弃成交"
+                    else:
+                        filled, vwap = self.matcher.taker_ioc_fill(
+                            post_book, want, limit_price=float(action.price), is_buy=is_buy
+                        )
+                        if filled <= 1e-6:
+                            reject_reason = (
+                                f"300ms 延迟后盘口已移动 (原信号限价 {action.price:.2f}, "
+                                f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
+                            )
                 else:
                     filled, vwap = self.matcher.taker_ioc_fill(
                         post_book, want, limit_price=float(action.price), is_buy=is_buy
@@ -1133,22 +1265,32 @@ class PaperRunner:
                     else:
                         self.insurance_paid = 0.0
                 else:
-                    if action.side == "Up":
-                        self.pos_up.shares -= filled
-                        self.pos_up.cash -= (filled * px - fee)
-                    else:
-                        self.pos_down.shares -= filled
-                        self.pos_down.cash -= (filled * px - fee)
+                    # Proportional cost basis removal preserves true avg_price on any remaining
+                    # shares while keeping total_cost = pos_cash - realized_unwind_pnl exact.
+                    pos = self.pos_up if action.side == "Up" else self.pos_down
+                    avg_entry = pos.avg_price
+                    cost_removed = min(pos.cash, filled * avg_entry)
+                    proceeds_unwind = filled * px - fee
+                    pos.shares = max(0.0, pos.shares - filled)
+                    pos.cash = max(0.0, pos.cash - cost_removed)
+                    if pos.shares <= 1e-6:
+                        cost_removed += pos.cash
+                        pos.shares = 0.0
+                        pos.cash = 0.0
+                    self.unwind_cost_basis = getattr(self, "unwind_cost_basis", 0.0) + cost_removed
+                    self.unwind_proceeds = getattr(self, "unwind_proceeds", 0.0) + proceeds_unwind
+                    self.realized_unwind_pnl = self.unwind_proceeds - self.unwind_cost_basis
                 if action.action == "taker_unwind":
                     purpose = "unwind"
                 elif action.action == "taker_buy":
                     purpose = "entry"
                 else:
                     purpose = "hedge"
-                self._record_fill(now, action.side, px, filled, "taker", purpose)
+                self._record_fill(fill_ts, action.side, px, filled, "taker", purpose)
                 if filled + 1e-6 < want:
                     self.actions.append({
-                        "t": round(now, 2), "action": "taker_partial", "side": action.side,
+                        "t": round(fill_ts, 2), "action": "taker_partial", "side": action.side,
+                        "price": px, "size": round(filled, 4),
                         "requested": round(want, 4), "filled": round(filled, 4),
                         "reason": "insufficient visible book depth"
                     })
@@ -1162,10 +1304,12 @@ class PaperRunner:
                 })
 
         # 2. Maker quote placement (hard rule: every placed order must be >= min_order_sh = 5.0 shares)
-        elif action and action.action == "quote" and float(action.size or 0.0) >= min_order_sh - 1e-4:
+        placed_oid = None
+        if action and action.action == "quote" and float(action.size or 0.0) >= min_order_sh - 1e-4:
             purpose = "entry"
             self._next_order_id += 1
             oid = self._next_order_id
+            placed_oid = oid
             new_order = Order(
                 id=oid,
                 client_order_id=f"pm_{self.current_slug}_{oid}",
@@ -1190,21 +1334,26 @@ class PaperRunner:
                 "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
             })
 
-        # 3. Crossed-book matching for newly placed zero-latency orders (unit-test compatibility)
-        remaining_working = []
-        for o in self.working_orders:
-            if o.id in print_touched_ids:
+        # 3. 仅针对零延迟模式本 tick 新挂且已到达 live_at 的挂单执行 Post-Only 激活校验（老单已在 0b 处理）
+        if placed_oid is not None and self.working_orders:
+            remaining_working = []
+            for o in self.working_orders:
+                if o.id == placed_oid and now >= float(o.live_at or 0.0) - 1e-9:
+                    target_book = book_up if o.side == "Up" else book_down
+                    if not o.activated:
+                        if not self.matcher.activate_order(o, target_book, now, post_only=True):
+                            self.actions.append({
+                                "t": round(now, 2), "action": "cancel", "side": o.side,
+                                "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                                "reason": o.cancel_reason, "order_id": o.id
+                            })
+                            continue
+                    fill_sz = self.matcher.match_order(o, target_book, now)
+                    if fill_sz > 0:
+                        self._apply_maker_fill(now, o, fill_sz)
                 if o.remaining > 1e-6:
                     remaining_working.append(o)
-                continue
-            target_book = book_up if o.side == "Up" else book_down
-            fill_sz = self.matcher.match_order(o, target_book, now)
-            if fill_sz > 0:
-                self._apply_maker_fill(now, o, fill_sz)
-
-            if o.remaining > 1e-6:
-                remaining_working.append(o)
-        self.working_orders = remaining_working
+            self.working_orders = remaining_working
 
         # Update atomic live.json (skipped in offline replay for ~15x speedup;
         # throttled to 4 Hz on quiet ticks at 10 Hz event-driven cadence, instant on actions)
@@ -1275,8 +1424,17 @@ class PaperRunner:
             if close_px <= 0.0:
                 close_px = getattr(self, "last_spot_price", self.open_price)
             winner = "Up" if close_px >= self.open_price else "Down"
-        proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
-        total_cost = self.pos_up.cash + self.pos_down.cash
+        unwind_cost = max(0.0, float(getattr(self, "unwind_cost_basis", 0.0) or 0.0))
+        unwind_proc = max(0.0, float(getattr(self, "unwind_proceeds", 0.0) or 0.0))
+        if unwind_cost <= 1e-9 and unwind_proc <= 1e-9 and abs(getattr(self, "realized_unwind_pnl", 0.0)) > 1e-9:
+            realized_u = float(getattr(self, "realized_unwind_pnl", 0.0))
+            if realized_u >= 0.0:
+                unwind_proc = realized_u
+            else:
+                unwind_cost = -realized_u
+        expiry_proceeds = (self.pos_up.shares if winner == "Up" else self.pos_down.shares) * 1.00
+        proceeds = expiry_proceeds + unwind_proc
+        total_cost = self.pos_up.cash + self.pos_down.cash + unwind_cost
         net_pnl = round(proceeds - total_cost, 4)
         self._last_settled_slug = self.current_slug
         self.last_round_abs_move = self._compute_same_chain_abs_move(close_px, winner_source)
@@ -1321,6 +1479,8 @@ class PaperRunner:
             "regime_source": "entry_time" if self.entry_regime else "dwell",
             "batch_id": config.BATCH_ID
         }
+        if unwind_proc > 1e-9:
+            record["unwind_proceeds"] = round(unwind_proc, 4)
         
         # 1. Fast append to summary.jsonl with trailing-newline guard + flush + fsync durability
         need_leading_nl = False
@@ -1408,7 +1568,8 @@ class PaperRunner:
         pos_up = float(r.get("pos_up", 0.0))
         pos_down = float(r.get("pos_down", 0.0))
         total_cost = float(r.get("total_cost", 0.0))
-        proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
+        unwind_proc = float(r.get("unwind_proceeds", 0.0) or 0.0)
+        proceeds = (pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0) + unwind_proc
         new_pnl = round(proceeds - total_cost, 4)
         r["proceeds"] = round(proceeds, 4)
         r["net_pnl"] = new_pnl
@@ -1572,7 +1733,8 @@ class PaperRunner:
                 pos_up = float(detail.get("pos_up", 0.0))
                 pos_down = float(detail.get("pos_down", 0.0))
                 total_cost = float(detail.get("total_cost", 0.0))
-                proceeds = pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0
+                unwind_proc = float(detail.get("unwind_proceeds", 0.0) or 0.0)
+                proceeds = (pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0) + unwind_proc
                 detail["proceeds"] = round(proceeds, 4)
                 detail["net_pnl"] = round(proceeds - total_cost, 4)
                 detail["result"] = "win" if detail["net_pnl"] > 1e-4 else ("loss" if detail["net_pnl"] < -1e-4 else "flat")
@@ -1652,6 +1814,9 @@ class PaperRunner:
             "fills_count": len(self.fills),
             "actions": self.actions,
             "insurance_paid": round(self.insurance_paid, 4),
+            "realized_unwind_pnl": round(getattr(self, "realized_unwind_pnl", 0.0), 4),
+            "unwind_cost_basis": round(getattr(self, "unwind_cost_basis", 0.0), 4),
+            "unwind_proceeds": round(getattr(self, "unwind_proceeds", 0.0), 4),
             "network": getattr(self, "net_stats", {}),
             "api_schema_guard": getattr(self, "_api_schema_guard", {"paused": False, "source": "", "reason": ""}),
             "last_decision": self.decisions[-1] if self.decisions else None,

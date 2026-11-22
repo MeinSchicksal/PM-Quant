@@ -287,6 +287,11 @@ class TradeStreamClient:
         if not is_relevant:
             return False
 
+        tx_id = str(payload.get("transactionHash") or payload.get("id") or payload.get("matchId") or "").strip()
+        raw_ts = _safe_float(payload.get("timestamp"), time.time())
+        # 兼容 Polymarket 偶尔返回 13 位毫秒级时间戳，防止落盘后卡死离线回放游标
+        if raw_ts > 1e11:
+            raw_ts /= 1000.0
         trade_record = {
             "token_id": tr_asset,
             "slug": tr_slug,
@@ -294,15 +299,27 @@ class TradeStreamClient:
             "price": _safe_float(payload.get("price", 0.0)),
             "size": _safe_float(payload.get("size", 0.0)),
             "side": payload.get("side", ""),
-            "timestamp": _safe_float(payload.get("timestamp"), time.time()),
+            "timestamp": raw_ts,
             "received_at": time.time()
         }
-        dedupe_key = (
-            trade_record["token_id"],
-            round(trade_record["timestamp"], 3),
-            round(trade_record["price"], 6),
-            round(trade_record["size"], 6),
-        )
+        # Prefer exchange transaction/match hash so distinct same-second trades at
+        # identical price & size are never dropped due to whole-second RTDS timestamps.
+        if tx_id:
+            dedupe_key = (
+                tx_id,
+                trade_record["token_id"],
+                str(trade_record["side"]).upper(),
+                round(trade_record["price"], 6),
+                round(trade_record["size"], 6),
+            )
+        else:
+            dedupe_key = (
+                trade_record["token_id"],
+                str(trade_record["side"]).upper(),
+                round(trade_record["timestamp"], 3),
+                round(trade_record["price"], 6),
+                round(trade_record["size"], 6),
+            )
         with self._lock:
             if dedupe_key in self._seen_keys:
                 return False

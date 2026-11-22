@@ -6,9 +6,20 @@ Guards the account against catastrophic regime failure:
 3. "Reduce-only / Hedge-only" mode when active: strictly disables new Leg-1 entries,
    while permitting inventory-reducing hedges or unwinds.
 """
+import os
 import time
 import datetime
 from typing import Tuple, Dict, Any, List
+
+
+def _cb_tz() -> datetime.timezone:
+    """与 Web 看板保持一致的跨日时区（读取 PM_TZ_OFFSET_HOURS，默认 UTC+8）。"""
+    try:
+        hrs = float(os.environ.get("PM_TZ_OFFSET_HOURS", "8"))
+        hrs = max(-12.0, min(14.0, hrs))
+    except (TypeError, ValueError):
+        hrs = 8.0
+    return datetime.timezone(datetime.timedelta(hours=hrs))
 
 
 class CircuitBreaker:
@@ -34,7 +45,7 @@ class CircuitBreaker:
     @staticmethod
     def _get_day_str(ts: float = None) -> str:
         t = ts or time.time()
-        return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%d")
+        return datetime.datetime.fromtimestamp(t, _cb_tz()).strftime("%Y-%m-%d")
 
     def _check_day_rollover(self, ts: float = None):
         today = self._get_day_str(ts)

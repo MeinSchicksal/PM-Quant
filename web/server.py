@@ -13,6 +13,7 @@ import gzip
 import hmac
 import base64
 import shutil
+import signal
 import datetime
 import platform
 import mimetypes
@@ -99,16 +100,21 @@ def _clean_action(raw):
     action = raw.get("action", "fill")
     if action not in ("quote", "fill", "cancel", "taker_reject", "taker_partial"):
         action = "fill"
-    if action in ("fill", "taker_partial") and (_num(raw.get("price")) <= 0 or _num(raw.get("size")) <= 0):
+    size_val = _num(raw.get("size"))
+    if action == "taker_partial" and size_val <= 0:
+        size_val = _num(raw.get("filled"))
+    if action == "fill" and (_num(raw.get("price")) <= 0 or size_val <= 0):
         action = "taker_reject"
-    return {
+    elif action == "taker_partial" and size_val <= 0:
+        action = "taker_reject"
+    out = {
         "t": _num(raw.get("t")),
         "action": action,
         "side": raw.get("side") if raw.get("side") in ("Up", "Down") else None,
         "price": _num(raw.get("price")),
-        "size": _num(raw.get("size")),
+        "size": size_val,
         "purpose": raw.get("purpose", "entry"),
-        "kind": raw.get("kind", "maker"),
+        "kind": raw.get("kind", "taker" if action in ("taker_partial", "taker_reject") else "maker"),
         "poly_up": _num(raw.get("poly_up")) if raw.get("poly_up") is not None else None,
         "poly_down": _num(raw.get("poly_down")) if raw.get("poly_down") is not None else None,
         "spot_price": _num(raw.get("spot_price")) if raw.get("spot_price") is not None else None,
@@ -117,6 +123,11 @@ def _clean_action(raw):
         "order_id": raw.get("order_id"),
         "queue_ahead": _num(raw.get("queue_ahead")) if raw.get("queue_ahead") is not None else None,
     }
+    if raw.get("requested") is not None:
+        out["requested"] = _num(raw.get("requested"))
+    if raw.get("filled") is not None:
+        out["filled"] = _num(raw.get("filled"))
+    return out
 
 
 def _legacy_actions(detail):
@@ -264,6 +275,10 @@ _DETAIL_CACHE_MAX_ENTRIES = 24
 _HISTORY_CACHE = OrderedDict()
 _HISTORY_CACHE_LOCK = threading.Lock()
 _HISTORY_CACHE_MAX_ENTRIES = 8
+
+_SUMMARY_AGG_CACHE = OrderedDict()
+_SUMMARY_AGG_LOCK = threading.Lock()
+_SUMMARY_AGG_MAX_ENTRIES = 8
 
 _STATIC_CACHE = OrderedDict()
 _STATIC_CACHE_LOCK = threading.Lock()
@@ -627,6 +642,8 @@ class _AuthRateLimiter:
                 self._fails.pop(next(iter(self._fails)), None)
             if len(self._banned) > 2048:
                 self._banned.pop(next(iter(self._banned)), None)
+            if len(self._last_log) > 2048:
+                self._last_log.pop(next(iter(self._last_log)), None)
         if should_log:
             if ban_left > 0:
                 print(f"[WebAuth] BANNED {ip} for {int(ban_left)}s after {self.max_failures} failed login attempts.")
@@ -638,6 +655,7 @@ class _AuthRateLimiter:
         with self._lock:
             self._fails.pop(ip, None)
             self._banned.pop(ip, None)
+            self._last_log.pop(ip, None)
 
 
 _AUTH_LIMITER = _AuthRateLimiter()
@@ -719,7 +737,8 @@ class QuantHandler(BaseHTTPRequestHandler):
                 return real_ip
             xff = (self.headers.get("X-Forwarded-For") or "").strip()
             if xff:
-                return xff.split(",")[0].strip() or peer_ip
+                # 取最右侧由本地反代追加的真实来源 IP，防止客户端伪造左侧 XFF 绕过防爆破
+                return xff.split(",")[-1].strip() or peer_ip
         return peer_ip
 
     def _require_auth(self) -> bool:
@@ -859,7 +878,10 @@ class QuantHandler(BaseHTTPRequestHandler):
             force = qs.get("refresh", ["0"])[0] in ("1", "true", "yes")
             self.send_json(_get_system_status(force_storage=force))
         elif path == "/api/batches":
-            available = sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")])
+            available = (
+                sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")])
+                if config.LEDGERS_DIR.exists() else []
+            )
             self.send_json({"batches": available, "current_batch": config.BATCH_ID})
         elif path == "/api/live":
             active = _read_live()
@@ -877,18 +899,24 @@ class QuantHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Invalid slug or batch"}, status=400)
                 return
             detail = _read_detail(ledger_dir, slug)
+            summary_file = ledger_dir / "summary.jsonl"
+            rec = _lookup_summary_record(summary_file, slug)
             if not detail:
-                active = _read_live()
+                active = _read_live() if target_batch == config.BATCH_ID else None
                 if active and active.get("slug") == slug:
                     detail = dict(active)
+                elif rec:
+                    detail = dict(rec)
+                    detail["archive_pruned"] = True
+                    detail.setdefault("actions", [])
+                    detail.setdefault("fills", [])
+                    detail.setdefault("price_history", [])
                 else:
                     self.send_json({"error": "Window not found"}, status=404)
                     return
             else:
                 detail = dict(detail)
             # Authoritative tail-first O(1)-RAM overlay from summary.jsonl guarantees 100% consistency
-            summary_file = ledger_dir / "summary.jsonl"
-            rec = _lookup_summary_record(summary_file, slug)
             if rec:
                 for key in ("open_px", "close_px", "winner", "winner_source", "proceeds", "net_pnl", "result", "traded"):
                     if rec.get(key) is not None:
@@ -946,17 +974,23 @@ class QuantHandler(BaseHTTPRequestHandler):
             if active:
                 pos_up = active.get("pos_up") or {}
                 pos_dn = active.get("pos_down") or {}
-                active_cost = round(_num(pos_up.get("cash")) + _num(pos_dn.get("cash")), 4)
+                active_unwind_pnl = _num(active.get("realized_unwind_pnl"))
+                # 与 runner.py 的 committed_cost 保持 100% 一致：已平仓实现的损益也计入本轮在途占用
+                active_cost = round(max(0.0, _num(pos_up.get("cash")) + _num(pos_dn.get("cash")) - active_unwind_pnl), 4)
                 active_sig = (
                     active.get("slug"),
                     active.get("open_px"),
                     round(_num(pos_up.get("shares")), 4),
                     round(_num(pos_dn.get("shares")), 4),
                     active_cost,
+                    round(active_unwind_pnl, 4),
                     int(active.get("fills_count") or 0),
                     len(active.get("actions") or []),
                 )
-            available_batches = tuple(sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")]))
+            available_batches = (
+                tuple(sorted([d.name for d in config.LEDGERS_DIR.iterdir() if d.is_dir() and d.name.startswith("v")]))
+                if config.LEDGERS_DIR.exists() else ()
+            )
             today_cal = datetime.datetime.now(_display_tz()).strftime("%Y-%m-%d")
             hist_cache_key = (target_batch, include_details, record_limit, sum_sig, active_sig, available_batches, today_cal)
             if not include_details:
@@ -967,146 +1001,220 @@ class QuantHandler(BaseHTTPRequestHandler):
                         self._send_json_bytes(cached_pair[0], gz_body=cached_pair[1])
                         return
 
-            # Single-pass streaming aggregation (constant O(limit) memory even on 1-year 105k+ row ledgers)
-            latest_cap = 20 if include_details else 50
-            keep_recent = max(record_limit, latest_cap)
-            recent_buf = deque(maxlen=keep_recent)
-            total_rounds = 0
-            total_pnl = 0.0
-            total_won = 0.0
-            total_lost = 0.0
-            turnover = 0.0
-            wins = 0
-            losses = 0
-            paired_rounds = 0
-            total_fills = 0
-            count = 0
-            running_pnl = 0.0
-            equity_curve_raw = []
-            regime_stats = {}
-            occurrence = {}
-            tz = _display_tz()
-            today_key = datetime.datetime.now(tz).strftime("%Y-%m-%d")
-            daily_map = {}
+            # 静态 summary.jsonl 聚合按 (batch, file_sig, limit, today) 独立缓存，
+            # 避免当前活跃轮次每 1 秒写 live.json 导致 10 万行账本被高频重扫。
+            agg_cache_key = (target_batch, sum_sig, record_limit, today_cal)
+            agg = None
+            with _SUMMARY_AGG_LOCK:
+                agg = _SUMMARY_AGG_CACHE.get(agg_cache_key)
+                if agg is not None:
+                    _SUMMARY_AGG_CACHE.move_to_end(agg_cache_key)
 
-            if summary_file.exists():
-                try:
-                    with open(summary_file, "r", encoding="utf-8") as f:
-                        for line in f:
-                            if not line.strip():
-                                continue
-                            try:
-                                w = json.loads(line)
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            if not isinstance(w, dict):
-                                continue
-                            # Unit-test journals must never be presented as investor returns.
-                            if str(w.get("slug", "")).startswith("test_"):
-                                continue
+            if agg is None:
+                keep_recent = max(record_limit, 50)
+                recent_buf = deque(maxlen=keep_recent)
+                total_rounds = 0
+                total_pnl = 0.0
+                total_won = 0.0
+                total_lost = 0.0
+                turnover = 0.0
+                wins = 0
+                losses = 0
+                paired_rounds = 0
+                total_fills = 0
+                count = 0
+                running_pnl = 0.0
+                peak_pnl = 0.0
+                max_drawdown = 0.0
+                equity_curve_raw = []
+                regime_stats = {}
+                occurrence = {}
+                tz = _display_tz()
+                daily_map = {}
 
-                            total_rounds += 1
-                            recent_buf.append(w)
-                            fills_c = int(_num(w.get("fills_count")))
-                            total_fills += fills_c
-                            pnl = _num(w.get("net_pnl"))
-                            is_traded = bool(w.get("traded") or fills_c > 0 or abs(pnl) > 1e-9)
+                if summary_file.exists():
+                    try:
+                        with open(summary_file, "r", encoding="utf-8") as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                try:
+                                    w = json.loads(line)
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if not isinstance(w, dict):
+                                    continue
+                                # Unit-test journals must never be presented as investor returns.
+                                if str(w.get("slug", "")).startswith("test_"):
+                                    continue
 
-                            raw_reg = w.get("regime") or "unlabeled"
-                            occurrence[raw_reg] = occurrence.get(raw_reg, 0) + 1
+                                total_rounds += 1
+                                recent_buf.append(w)
+                                fills_c = int(_num(w.get("fills_count")))
+                                total_fills += fills_c
+                                pnl = _num(w.get("net_pnl"))
+                                is_traded = bool(w.get("traded") or fills_c > 0 or abs(pnl) > 1e-9)
 
-                            if is_traded:
-                                count += 1
-                                total_pnl += pnl
-                                running_pnl += pnl
-                                turnover += _num(w.get("total_cost"))
-                                if pnl > 1e-9:
-                                    total_won += pnl
-                                    wins += 1
-                                elif pnl < -1e-9:
-                                    total_lost += abs(pnl)
-                                    losses += 1
-                                if _num(w.get("pos_up")) > 1e-6 and _num(w.get("pos_down")) > 1e-6:
-                                    paired_rounds += 1
+                                raw_reg = w.get("regime") or "unlabeled"
+                                occurrence[raw_reg] = occurrence.get(raw_reg, 0) + 1
 
-                                equity_curve_raw.append((w.get("slug"), round(running_pnl, 4), _num(w.get("start"))))
-                                if len(equity_curve_raw) > 2400:
-                                    equity_curve_raw = _downsample_curve(equity_curve_raw, max_points=1200)
+                                if is_traded:
+                                    count += 1
+                                    total_pnl += pnl
+                                    running_pnl += pnl
+                                    if running_pnl > peak_pnl:
+                                        peak_pnl = running_pnl
+                                    dd_now = peak_pnl - running_pnl
+                                    if dd_now > max_drawdown:
+                                        max_drawdown = dd_now
+                                    turnover += _num(w.get("total_cost"))
+                                    if pnl > 1e-9:
+                                        total_won += pnl
+                                        wins += 1
+                                    elif pnl < -1e-9:
+                                        total_lost += abs(pnl)
+                                        losses += 1
+                                    if _num(w.get("pos_up")) > 1e-6 and _num(w.get("pos_down")) > 1e-6:
+                                        paired_rounds += 1
 
-                                ts = _num(w.get("end", w.get("start")))
-                                day_k = datetime.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d") if ts > 0 else today_key
-                                b_day = daily_map.setdefault(day_k, {"date": day_k, "pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
-                                b_day["pnl"] = round(b_day["pnl"] + pnl, 4)
-                                b_day["traded"] += 1
-                                if pnl > 1e-9:
-                                    b_day["wins"] += 1
-                                elif pnl < -1e-9:
-                                    b_day["losses"] += 1
+                                    equity_curve_raw.append((
+                                        count,
+                                        w.get("slug"),
+                                        round(running_pnl, 4),
+                                        round(pnl, 4),
+                                        _num(w.get("start")),
+                                    ))
 
-                                # Welford online mean/variance for O(1) memory regime attribution
-                                reg = raw_reg if w.get("regime_source") == "entry_time" else "legacy"
-                                bucket = regime_stats.setdefault(reg, {
-                                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
-                                    "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
-                                })
-                                bucket["traded"] += 1
-                                bucket["net_pnl"] = round(bucket["net_pnl"] + pnl, 4)
-                                if pnl > 1e-9:
-                                    bucket["wins"] += 1
-                                elif pnl < -1e-9:
-                                    bucket["losses"] += 1
-                                else:
-                                    bucket["flats"] += 1
-                                n_cur = bucket["_n"] + 1
-                                delta = pnl - bucket["_mean"]
-                                new_mean = bucket["_mean"] + delta / n_cur
-                                bucket["_n"] = n_cur
-                                bucket["_mean"] = new_mean
-                                bucket["_m2"] += delta * (pnl - new_mean)
-                except OSError:
-                    pass
+                                    ts = _num(w.get("end", w.get("start")))
+                                    day_k = datetime.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d") if ts > 0 else today_cal
+                                    b_day = daily_map.setdefault(day_k, {"date": day_k, "pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
+                                    b_day["pnl"] = round(b_day["pnl"] + pnl, 4)
+                                    b_day["traded"] += 1
+                                    if pnl > 1e-9:
+                                        b_day["wins"] += 1
+                                    elif pnl < -1e-9:
+                                        b_day["losses"] += 1
 
-            flats = count - wins - losses
+                                    # Welford online mean/variance for O(1) memory regime attribution
+                                    reg = raw_reg if w.get("regime_source") == "entry_time" else "legacy"
+                                    bucket = regime_stats.setdefault(reg, {
+                                        "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
+                                        "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
+                                    })
+                                    bucket["traded"] += 1
+                                    bucket["net_pnl"] = round(bucket["net_pnl"] + pnl, 4)
+                                    if pnl > 1e-9:
+                                        bucket["wins"] += 1
+                                    elif pnl < -1e-9:
+                                        bucket["losses"] += 1
+                                    else:
+                                        bucket["flats"] += 1
+                                    n_cur = bucket["_n"] + 1
+                                    delta = pnl - bucket["_mean"]
+                                    new_mean = bucket["_mean"] + delta / n_cur
+                                    bucket["_n"] = n_cur
+                                    bucket["_mean"] = new_mean
+                                    bucket["_m2"] += delta * (pnl - new_mean)
+                    except OSError:
+                        pass
 
-            for reg, r_cnt in occurrence.items():
-                regime_stats.setdefault(reg, {
-                    "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
-                    "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
-                })["rounds"] = r_cnt
+                flats = count - wins - losses
 
-            if "legacy" in regime_stats:
-                regime_stats["legacy"]["rounds"] = regime_stats["legacy"]["traded"]
+                for reg, r_cnt in occurrence.items():
+                    regime_stats.setdefault(reg, {
+                        "rounds": 0, "traded": 0, "wins": 0, "losses": 0, "flats": 0,
+                        "net_pnl": 0.0, "_n": 0, "_mean": 0.0, "_m2": 0.0,
+                    })["rounds"] = r_cnt
 
-            for bucket in regime_stats.values():
-                n = bucket.pop("_n", 0)
-                mean = bucket.pop("_mean", 0.0)
-                m2 = bucket.pop("_m2", 0.0)
-                if n:
-                    var = (m2 / (n - 1)) if n > 1 else 0.0
-                    sd = math.sqrt(max(0.0, var))
-                    se = sd / math.sqrt(n) if n else 0.0
-                    bucket["mean"] = round(mean, 4)
-                    bucket["sd"] = round(sd, 4)
-                    bucket["ci_low"] = round(mean - 1.96 * se, 4)
-                    bucket["ci_high"] = round(mean + 1.96 * se, 4)
-                    bucket["t_stat"] = round(mean / se, 2) if se else 0.0
-                else:
-                    bucket["mean"] = bucket["sd"] = 0.0
-                    bucket["ci_low"] = bucket["ci_high"] = 0.0
-                    bucket["t_stat"] = 0.0
-                bucket["sample_ok"] = n >= ATTRIBUTION_MIN_SAMPLES
+                if "legacy" in regime_stats:
+                    regime_stats["legacy"]["rounds"] = regime_stats["legacy"]["traded"]
 
-            rev_recent = list(reversed(recent_buf))
-            latest = rev_recent[:latest_cap]
-            rounds = [
-                _public_round(w, _read_detail(ledger_dir, w.get("slug", "")) if include_details else {})
-                for w in latest
-            ]
+                for bucket in regime_stats.values():
+                    n = bucket.pop("_n", 0)
+                    mean = bucket.pop("_mean", 0.0)
+                    m2 = bucket.pop("_m2", 0.0)
+                    if n:
+                        var = (m2 / (n - 1)) if n > 1 else 0.0
+                        sd = math.sqrt(max(0.0, var))
+                        se = sd / math.sqrt(n) if n else 0.0
+                        bucket["mean"] = round(mean, 4)
+                        bucket["sd"] = round(sd, 4)
+                        bucket["ci_low"] = round(mean - 1.96 * se, 4)
+                        bucket["ci_high"] = round(mean + 1.96 * se, 4)
+                        bucket["t_stat"] = round(mean / se, 2) if se else 0.0
+                    else:
+                        bucket["mean"] = bucket["sd"] = 0.0
+                        bucket["ci_low"] = bucket["ci_high"] = 0.0
+                        bucket["t_stat"] = 0.0
+                    bucket["sample_ok"] = n >= ATTRIBUTION_MIN_SAMPLES
+
+                rev_recent = list(reversed(recent_buf))
+                daily_summary = [daily_map[k] for k in sorted(daily_map.keys(), reverse=True)[:14]]
+                today_bucket = daily_map.get(today_cal, {"pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
+                curve_pts = _downsample_curve(equity_curve_raw, max_points=600)
+                curve_compact = [
+                    {"idx": idx, "slug": s, "pnl": cum_p, "round_pnl": r_p, "start": st_t}
+                    for idx, s, cum_p, r_p, st_t in curve_pts
+                ]
+                base_rounds_50 = [_public_round(w, {}) for w in rev_recent[:50]]
+                agg = {
+                    "total_rounds": total_rounds,
+                    "total_pnl": total_pnl,
+                    "total_won": total_won,
+                    "total_lost": total_lost,
+                    "turnover": turnover,
+                    "wins": wins,
+                    "losses": losses,
+                    "flats": flats,
+                    "paired_rounds": paired_rounds,
+                    "total_fills": total_fills,
+                    "peak_pnl": peak_pnl,
+                    "max_drawdown": max_drawdown,
+                    "count": count,
+                    "regime_stats": regime_stats,
+                    "rev_recent": rev_recent,
+                    "page_records": rev_recent[:record_limit],
+                    "base_rounds_50": base_rounds_50,
+                    "daily_summary": daily_summary,
+                    "today_bucket": today_bucket,
+                    "curve_compact": curve_compact,
+                }
+                with _SUMMARY_AGG_LOCK:
+                    _SUMMARY_AGG_CACHE[agg_cache_key] = agg
+                    _SUMMARY_AGG_CACHE.move_to_end(agg_cache_key)
+                    while len(_SUMMARY_AGG_CACHE) > _SUMMARY_AGG_MAX_ENTRIES:
+                        _SUMMARY_AGG_CACHE.popitem(last=False)
+
+            total_rounds = agg["total_rounds"]
+            total_pnl = agg["total_pnl"]
+            total_won = agg["total_won"]
+            total_lost = agg["total_lost"]
+            turnover = agg["turnover"]
+            wins = agg["wins"]
+            losses = agg["losses"]
+            flats = agg["flats"]
+            paired_rounds = agg["paired_rounds"]
+            total_fills = agg["total_fills"]
+            peak_pnl = agg["peak_pnl"]
+            max_drawdown = agg["max_drawdown"]
+            count = agg["count"]
+            regime_stats = agg["regime_stats"]
+            daily_summary = agg["daily_summary"]
+            today_bucket = agg["today_bucket"]
+            page_records = agg["page_records"]
+            curve_compact = agg["curve_compact"]
+            today_key = today_cal
+
+            if include_details:
+                latest = agg["rev_recent"][:20]
+                rounds = [
+                    _public_round(w, _read_detail(ledger_dir, w.get("slug", "")))
+                    for w in latest
+                ]
+            else:
+                rounds = list(agg["base_rounds_50"])
             if active and not any(r.get("slug") == active.get("slug") for r in rounds):
                 rounds.insert(0, _public_round(active, active, active=True))
-
-            daily_summary = [daily_map[k] for k in sorted(daily_map.keys(), reverse=True)[:14]]
-            today_bucket = daily_map.get(today_key, {"pnl": 0.0, "traded": 0, "wins": 0, "losses": 0})
 
             decisive = wins + losses
             win_rate = round((wins / decisive) * 100.0, 1) if decisive else 0.0
@@ -1117,9 +1225,6 @@ class QuantHandler(BaseHTTPRequestHandler):
             turnover_roi_pct = round((total_pnl / turnover) * 100.0, 2) if turnover > 1e-4 else 0.0
 
             free_capital = round(max(0.0, available_capital - active_cost), 4)
-            page_records = rev_recent[:record_limit]
-            curve_pts = _downsample_curve(equity_curve_raw, max_points=600)
-            curve_compact = [{"slug": s, "pnl": p, "start": st_t} for s, p, st_t in curve_pts]
 
             payload_obj = {
                 "batch_id": target_batch,
@@ -1132,6 +1237,8 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "roi_pct": roi_pct,
                 "turnover_roi_pct": turnover_roi_pct,
                 "total_pnl": round(total_pnl, 4),
+                "peak_pnl": round(peak_pnl, 4),
+                "max_drawdown": round(max_drawdown, 4),
                 "total_won": round(total_won, 4),
                 "total_lost": round(total_lost, 4),
                 "today_date": today_key,
@@ -1247,19 +1354,22 @@ def _resolve_bind_host(host=None) -> str:
 
 
 def _validate_bind_security(bind_host: str):
-    """Refuse to expose the dashboard on a non-loopback interface without a strong PM_WEB_PASS."""
-    if bind_host not in ("127.0.0.1", "localhost", "::1"):
-        pwd = os.environ.get("PM_WEB_PASS", "").strip()
-        if not pwd:
-            raise RuntimeError(
-                f"Refusing to bind non-loopback host '{bind_host}' without PM_WEB_PASS configured. "
-                f"Set PM_WEB_PASS (or keep PM_WEB_HOST=127.0.0.1 behind a HTTPS reverse proxy)."
-            )
-        if len(pwd) < 8 or pwd.lower() in _WEAK_PASSWORDS:
-            raise RuntimeError(
-                f"Refusing to bind non-loopback host '{bind_host}' with a weak/placeholder PM_WEB_PASS. "
-                f"Use a strong password (>= 8 chars, not a default placeholder)."
-            )
+    """拒绝弱密码/占位密码，且在非回环地址或 PM_REQUIRE_AUTH=1 时强制要求配置强密码。"""
+    pwd = os.environ.get("PM_WEB_PASS", "").strip()
+    require_auth = (
+        bind_host not in ("127.0.0.1", "localhost", "::1")
+        or os.environ.get("PM_REQUIRE_AUTH", "").strip().lower() in ("1", "true", "yes")
+    )
+    if require_auth and not pwd:
+        raise RuntimeError(
+            f"Refusing to start dashboard on '{bind_host}' without PM_WEB_PASS configured. "
+            f"Set a strong PM_WEB_PASS (>= 8 chars) in /etc/pm-quant.env."
+        )
+    if pwd and (len(pwd) < 8 or pwd.lower() in _WEAK_PASSWORDS):
+        raise RuntimeError(
+            f"Refusing to start dashboard on '{bind_host}' with a weak/placeholder PM_WEB_PASS. "
+            f"Use a strong password (>= 8 chars, not a default placeholder)."
+        )
 
 
 def start_server_in_background(port=8900, host=None):
@@ -1287,9 +1397,20 @@ def run(port=8900, host=None):
     disp_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
     auth_note = " [BasicAuth 已开启]" if os.environ.get("PM_WEB_PASS") else ""
     print(f"PM-Quant investor dashboard: http://{disp_host}:{port}/{auth_note}")
+
+    def _graceful_term(_sig, _frame):
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+        try:
+            signal.signal(signal.SIGTERM, _graceful_term)
+        except Exception:
+            pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
+        pass
+    finally:
         print("\nServer stopped.")
         httpd.server_close()
 

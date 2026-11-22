@@ -285,6 +285,8 @@ class PolymarketBookWSClient:
 
         self._active_tokens: Tuple[str, ...] = ()
         self._token_gen: int = 0
+        self._pending_sub_tokens: list = []
+        self._pending_unsub_tokens: list = []
         # asset_id -> {"bids": {px: sz}, "asks": {px: sz}, "last_trade": float|None, "t": float, "ready": bool}
         self._books: Dict[str, Dict[str, Any]] = {}
         self._last_ws_msg_t: float = 0.0
@@ -313,17 +315,38 @@ class PolymarketBookWSClient:
         self._invalidate_all_books()
 
     def set_tokens(self, token_ids: Sequence[str]):
-        """Update subscribed CLOB asset IDs; triggers immediate resubscription."""
+        """增量更新 CLOB 订阅：预热扩集与换窗退订旧 token 均不断连，保持已预热盘口 0ms 衔接。"""
         clean = tuple(sorted({str(t) for t in token_ids if t}))
         with self._lock:
             if clean == self._active_tokens:
                 return
+            old_set = set(self._active_tokens)
+            new_set = set(clean)
+            # 只要已连接且新旧集合存在交集（tau<=30s 预热扩集，或换窗瞬间退订旧 token），
+            # 原地发送增量 subscribe / unsubscribe，绝不断连清空刚预热好的新窗口盘口。
+            if self.connected and old_set and new_set and (old_set & new_set):
+                added = sorted(new_set - old_set)
+                removed = sorted(old_set - new_set)
+                self._active_tokens = clean
+                for tok in added:
+                    if tok in self._pending_unsub_tokens:
+                        self._pending_unsub_tokens.remove(tok)
+                    if tok not in self._pending_sub_tokens:
+                        self._pending_sub_tokens.append(tok)
+                for tok in removed:
+                    if tok in self._pending_sub_tokens:
+                        self._pending_sub_tokens.remove(tok)
+                    if tok not in self._pending_unsub_tokens:
+                        self._pending_unsub_tokens.append(tok)
+                    self._books.pop(tok, None)
+                return
             self._active_tokens = clean
+            self._pending_sub_tokens.clear()
+            self._pending_unsub_tokens.clear()
             self._token_gen += 1
             # Prune old tokens no longer subscribed
-            keep = set(clean)
             for k in list(self._books.keys()):
-                if k not in keep:
+                if k not in new_set:
                     self._books.pop(k, None)
 
     def start(self):
@@ -487,11 +510,11 @@ class PolymarketBookWSClient:
             src_t = float(st.get("t", 0.0))
             if self.connected:
                 if require_recent_msg:
-                    msg_age = t - float(self._last_ws_msg_t or src_t)
-                    if msg_age > max_age_s:
+                    # Validate freshness of THIS specific token, not unrelated prewarmed tokens
+                    if (t - src_t) > max_age_s:
                         return None
-                # Guard against silent single-token freeze even if global pong is alive
-                if src_t > 0.0 and (t - src_t) > max(60.0, self.idle_reconnect_s * 3.0):
+                # Tight single-token freeze guard (15s) so silent per-token drops cannot bypass deadman for 60s
+                if src_t > 0.0 and (t - src_t) > max(max_age_s, 15.0):
                     return None
                 # Live WS stream: validate connection-level liveness (msg or pong) against idle watchdog
                 last_alive = max(float(self._last_ws_msg_t or 0.0), float(self._last_pong_t or 0.0), src_t)
@@ -552,6 +575,9 @@ class PolymarketBookWSClient:
             with self._lock:
                 tokens = self._active_tokens
                 gen = self._token_gen
+                # 即将以最新 tokens 全量订阅，清空断连前残留的增量队列避免误退订
+                self._pending_sub_tokens.clear()
+                self._pending_unsub_tokens.clear()
             if not tokens:
                 self.connected = False
                 self._invalidate_all_books()
@@ -587,11 +613,21 @@ class PolymarketBookWSClient:
                         while self.running:
                             with self._lock:
                                 cur_gen = self._token_gen
+                                add_tokens = list(self._pending_sub_tokens)
+                                rem_tokens = list(self._pending_unsub_tokens)
+                                if add_tokens:
+                                    self._pending_sub_tokens.clear()
+                                if rem_tokens:
+                                    self._pending_unsub_tokens.clear()
                             if cur_gen != gen:
-                                # Token set changed (or crossed-book self-heal triggered) -> reconnect cleanly
+                                # 全量切换或交叉盘口自愈 -> 平滑重连
                                 self.connected = False
                                 consec_fails = 0
                                 break
+                            if rem_tokens:
+                                await ws.send(json.dumps({"assets_ids": rem_tokens, "operation": "unsubscribe"}))
+                            if add_tokens:
+                                await ws.send(json.dumps({"assets_ids": add_tokens, "operation": "subscribe"}))
 
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)

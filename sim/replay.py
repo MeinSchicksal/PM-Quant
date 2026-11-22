@@ -126,10 +126,12 @@ def _load_date_batch(date_dir: Path, settlements: Dict[str, Dict[str, Any]]):
         from datetime import datetime, timedelta
         d_obj = datetime.strptime(date_dir.name, "%Y-%m-%d")
         prev_day = (d_obj - timedelta(days=1)).strftime("%Y-%m-%d")
+        next_day = (d_obj + timedelta(days=1)).strftime("%Y-%m-%d")
         oracle_dirs.append(oracle_root / prev_day)
+        oracle_dirs.append(oracle_root / date_dir.name)
+        oracle_dirs.append(oracle_root / next_day)
     except ValueError:
-        pass
-    oracle_dirs.append(oracle_root / date_dir.name)
+        oracle_dirs.append(oracle_root / date_dir.name)
     for oracle_dir in oracle_dirs:
         if not oracle_dir.exists():
             continue
@@ -231,8 +233,13 @@ def replay_window(
 
         spot_row, isp = _spot_at(spot_rows, isp, t)
         poly_row, ipoly = _spot_at(poly_rows, ipoly, t)
-        if poly_row:
+        poly_max_age = float(config.PARAMS.get("POLY_PRICE_MAX_AGE_S", 10.0))
+        poly_ts = None
+        if poly_row and (t - float(poly_row.get("t", 0.0))) <= poly_max_age:
             last_poly = float(poly_row.get("price") or 0.0)
+            poly_ts = float(poly_row.get("t", 0.0))
+        else:
+            last_poly = None
 
         # Always drain the print cursor, even when this tick has no oracle row.
         prints = list(carry_prints)
@@ -252,21 +259,25 @@ def replay_window(
             continue
 
         cur_px = float(spot_row.get("price") or 0.0)
-        # Compute 2-3s velocity from recorded spot_rows for accurate anti-toxicity parity
+        # Compute 2-3s velocity by elapsed time (not fixed 10-row count, which fails during 10Hz bursts)
         vel_bps = 0.0
         if isp > 0 and cur_px > 0:
-            for k in range(isp - 1, max(-1, isp - 10), -1):
+            for k in range(isp - 1, -1, -1):
                 old_t = float(spot_rows[k].get("t", 0.0))
+                dt_v = t - old_t
+                if dt_v > 5.0:
+                    break
                 old_px = float(spot_rows[k].get("price") or 0.0)
-                if (t - old_t) >= 2.0 and old_px > 0:
+                if dt_v >= 2.0 and old_px > 0:
                     vel_bps = ((cur_px - old_px) / old_px) * 10000.0
                     break
 
-        def _delayed_replay_book(side_name: str, _t=t, _iu=iu, _idn=idn):
+        def _delayed_replay_book(_side_name: str, _t=t, _iu=iu, _idn=idn):
             target_t = _t + lat_s
-            if side_name == "Up":
-                return _book_at_time(events_up, _iu, target_t)
-            return _book_at_time(events_dn, _idn, target_t)
+            return (
+                _book_at_time(events_up, _iu, target_t),
+                _book_at_time(events_dn, _idn, target_t),
+            )
 
         spot = SpotState(
             timestamp=t,
@@ -281,7 +292,7 @@ def replay_window(
             velocity_bps=round(vel_bps, 3),
         )
         runner.step(t, spot, book_up, book_dn, trade_prints=prints,
-                    poly_spot=last_poly, replay_mode=True,
+                    poly_spot=last_poly, poly_spot_ts=poly_ts, replay_mode=True,
                     delayed_book_fetcher=_delayed_replay_book)
 
     if not times:

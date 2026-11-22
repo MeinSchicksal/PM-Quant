@@ -47,6 +47,14 @@ const REGIME_META = {
     label: "温和偏态漂移 (Skewed Drift)",
     desc: "存在轻度方向性漂移但尚未形成单边趋势突破",
   },
+  trending_up: {
+    label: "单边强势拉升 (Trending Up)",
+    desc: "SNR > 1.8 多头动量突破，严格禁止逆势挂单以防逆向选择",
+  },
+  trending_down: {
+    label: "单边强势下挫 (Trending Down)",
+    desc: "SNR > 1.8 空头动量突破，严格禁止逆势挂单以防逆向选择",
+  },
   strong_trend: {
     label: "单边强趋势动量 (Strong Trend)",
     desc: "SNR > 1.8 强动量突破，严格禁止逆势挂单以防逆向选择",
@@ -55,9 +63,17 @@ const REGIME_META = {
     label: "宽价差 · 低流动性 (Wide Spread)",
     desc: "盘口价差 > $0.06，造市商撤退或流动性枯竭窗口",
   },
+  toxic: {
+    label: "知情交易毒性冲击 (Toxic)",
+    desc: "3 秒内价格剧烈跳变 > 3.5bps 或极端波动，触发瞬时防逆向选择保护",
+  },
   toxic_shock: {
     label: "知情交易毒性冲击 (Toxic Shock)",
     desc: "3 秒内价格剧烈跳变 > 3.5bps，触发瞬时防逆向选择保护",
+  },
+  transitional: {
+    label: "过渡观察区间 (Transitional)",
+    desc: "1.5 < SNR ≤ 1.8 过渡带或参考基准待就绪，保守观望",
   },
   tail_freeze: {
     label: "尾盘伽马冻结区 (Tail Freeze)",
@@ -644,7 +660,7 @@ function translateDecisionReason(rawReason) {
     return "行情流延迟或断流触发死人开关保护，已撤单并暂停开仓";
   }
   if (s.includes("Max entries per window")) {
-    return "本轮已达到单窗开仓上限（1 次），锁定仓位等待结算";
+    return "本轮已达到单窗开仓上限，锁定仓位等待结算";
   }
   if (s.includes("Fully hedged pair") || s.includes("Max position reached")) {
     return "已达本轮最大持仓或双边配平，静待到期交割";
@@ -778,6 +794,26 @@ function updateOverview(live, hist) {
   }
 
   // Active Round Card in Overview
+  const liveStatusPill = $("overview-live-status");
+  const nowSecOv = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const hbAgeOv = live?.now ? Math.max(0, nowSecOv - Number(live.now)) : Infinity;
+  const apiPausedOv = Boolean(live?.api_schema_guard?.paused);
+  if (liveStatusPill) {
+    let stCls = "status-pill status-ready";
+    let stText = "当前轮次进行中";
+    if (!live || !live.slug || hbAgeOv > 60) {
+      stCls = "status-pill status-critical";
+      stText = "交易引擎离线";
+    } else if (apiPausedOv) {
+      stCls = "status-pill status-critical";
+      stText = "接口变更 · 安全暂停";
+    } else if (hbAgeOv > 15) {
+      stCls = "status-pill status-warn";
+      stText = "行情心跳延迟";
+    }
+    liveStatusPill.className = stCls;
+    setHtmlIfChanged(liveStatusPill, `<span class="status-dot"></span><span>${stText}</span>`);
+  }
   if (live && live.slug) {
     if (live.slug && live.slug !== liveSelectedActionSlug) {
     liveSelectedActionIdx = null;
@@ -823,23 +859,22 @@ function updateOverview(live, hist) {
     $("kpi-avg-split").textContent = `均盈 +$${avgWin.toFixed(2)} · 均亏 -$${avgLoss.toFixed(2)}`;
   }
 
-  // Compute hedge lock rate & total fills across ALL settled records (prefer server full-history totals)
+  // Full-history Max Drawdown & Peak PnL (prefer server exact full-ledger stats)
   const rawRecords = Array.isArray(hist.records) ? hist.records : [];
   const normRecords = rawRecords.map(normalizeRecord).filter(Boolean);
-  let pairedCount = Number.isFinite(Number(hist.paired_rounds)) ? Number(hist.paired_rounds) : 0;
   let totalFills = Number.isFinite(Number(hist.total_fills)) ? Number(hist.total_fills) : 0;
-  if (!Number.isFinite(Number(hist.paired_rounds)) || !Number.isFinite(Number(hist.total_fills))) {
-    pairedCount = 0;
-    totalFills = 0;
-    normRecords.forEach((r) => {
-      totalFills += r.fills_count;
-      if (r.up_shares > 0 && r.down_shares > 0) pairedCount += 1;
-    });
+  if (!Number.isFinite(Number(hist.total_fills))) {
+    totalFills = normRecords.reduce((acc, r) => acc + r.fills_count, 0);
   }
-  const hedgeRate = tradedRounds > 0 ? (pairedCount / tradedRounds) * 100 : 0;
-  if ($("kpi-hedge-rate")) $("kpi-hedge-rate").textContent = `${hedgeRate.toFixed(1)}%`;
+  const peakPnl = Number.isFinite(Number(hist.peak_pnl)) ? Number(hist.peak_pnl) : Math.max(0, totalPnl);
+  const maxDd = Number.isFinite(Number(hist.max_drawdown)) ? Math.max(0, Number(hist.max_drawdown)) : 0;
+  const maxDdEl = $("kpi-max-dd");
+  if (maxDdEl) {
+    maxDdEl.textContent = maxDd > 1e-4 ? `-$${maxDd.toFixed(2)}` : "$0.00";
+    maxDdEl.className = `kpi-box-val ${maxDd > 1e-4 ? "down" : ""}`;
+  }
   if ($("kpi-total-fills")) {
-    $("kpi-total-fills").textContent = `配平 ${pairedCount}/${tradedRounds} 场 · ${totalFills} 笔成交`;
+    $("kpi-total-fills").textContent = `峰值 ${fmtUsd(peakPnl, true)} · 共 ${totalFills} 笔成交`;
   }
 
   const partRate = totalRounds > 0 ? (tradedRounds / totalRounds) * 100 : 0;
@@ -876,15 +911,16 @@ function drawEquityCurve(hist) {
   const pal = getPalette();
   const rawCurve = Array.isArray(hist?.equity_curve) ? hist.equity_curve : [];
 
-  // Backend equity_curve has { slug, pnl (cumulative!), start }
+  // Backend equity_curve has { idx, slug, pnl (cumulative!), round_pnl, start }
   const pts = [{ idx: 0, cum_pnl: 0, round_pnl: 0, slug: "", ts: 0 }];
   let prevCum = 0;
   rawCurve.forEach((p, idx) => {
     const cum = Number(p.cum_pnl ?? p.pnl ?? 0);
     const delta = p.round_pnl !== undefined ? Number(p.round_pnl) : cum - prevCum;
     prevCum = cum;
+    const realIdx = Number.isFinite(Number(p.idx)) && Number(p.idx) > 0 ? Number(p.idx) : idx + 1;
     pts.push({
-      idx: idx + 1,
+      idx: realIdx,
       cum_pnl: cum,
       round_pnl: delta,
       slug: p.slug || "",
@@ -1072,7 +1108,7 @@ function drawEquityCurve(hist) {
   ctx.textAlign = "left";
   ctx.fillText("起点 #0", padL, padT + plotH + 7);
   ctx.textAlign = "right";
-  ctx.fillText(`最新 #${pts.length - 1}`, w - padR, padT + plotH + 7);
+  ctx.fillText(`最新 #${pts[pts.length - 1].idx}`, w - padR, padT + plotH + 7);
 }
 
 function initEquityCurveInteractions() {
@@ -1110,7 +1146,7 @@ function initEquityCurveInteractions() {
       const delta = Number(pt.round_pnl || 0);
       const cum = Number(pt.cum_pnl || 0);
       tooltip.innerHTML = `
-        <div class="tt-time">第 #${bestIdx} 场 · ${escapeHtml(winInfo.range)}</div>
+        <div class="tt-time">第 #${pt.idx} 场 · ${escapeHtml(winInfo.range)}</div>
         <div class="tt-row">
           <span>单场净损益</span>
           <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtUsd(delta, true)}</b>
@@ -1388,14 +1424,14 @@ function renderHistoryTable(hist) {
   }
 
   if (visible.length === 0) {
-    setHtmlIfChanged(tbody, `<tr><td colspan="10" class="action-empty">当前筛选条件下暂无场次记录</td></tr>`);
+    setHtmlIfChanged(tbody, `<tr><td colspan="9" class="action-empty">当前筛选条件下暂无场次记录</td></tr>`);
     return;
   }
-  let rowsHtml = visible.map((r) => buildRoundTableRow(r, true)).join("");
+  let rowsHtml = visible.map((r) => buildRoundTableRow(r, false)).join("");
   if (filtered.length > visible.length) {
-    rowsHtml += `<tr><td colspan="10" class="action-empty"><button type="button" class="filter-btn" id="history-load-more-btn">显示更多（剩余 ${filtered.length - visible.length} 场）</button></td></tr>`;
+    rowsHtml += `<tr><td colspan="9" class="action-empty"><button type="button" class="filter-btn" id="history-load-more-btn">显示更多（剩余 ${filtered.length - visible.length} 场）</button></td></tr>`;
   } else if (hist?.records_truncated && totalServerRounds > allRecords.length) {
-    rowsHtml += `<tr><td colspan="10" class="action-empty"><button type="button" class="filter-btn" id="history-fetch-older-btn">从服务端加载更早记录（已载入 ${allRecords.length} / ${totalServerRounds} 场）</button></td></tr>`;
+    rowsHtml += `<tr><td colspan="9" class="action-empty"><button type="button" class="filter-btn" id="history-fetch-older-btn">从服务端加载更早记录（已载入 ${allRecords.length} / ${totalServerRounds} 场）</button></td></tr>`;
   }
   if (setHtmlIfChanged(tbody, rowsHtml)) {
     const moreBtn = $("history-load-more-btn");
@@ -1490,6 +1526,9 @@ function updateMarket(live) {
     } else if (live.spot_stale || live.poly_spot_stale) {
       riskPill.className = "status-pill status-warn";
       riskText.textContent = `${regLabel} · 单源滞后`;
+    } else if (regKey === "toxic" || regKey === "toxic_shock") {
+      riskPill.className = "status-pill status-warn";
+      riskText.textContent = `${regLabel} · 防护撤单`;
     } else {
       riskPill.className = "status-pill status-ready";
       riskText.textContent = `${regLabel} · 双源同步`;
@@ -1519,13 +1558,14 @@ function updateMarket(live) {
   if ($("down-pos-avg")) $("down-pos-avg").textContent = dnShares > 0 ? fmtPriceCents(posDn.avg_px) : "--";
   if ($("down-pos-cost")) $("down-pos-cost").textContent = fmtUsd(dnCost);
 
-  const upWinNet = upShares * 1.0 - totalCost;
-  const dnWinNet = dnShares * 1.0 - totalCost;
+  const unwindPnl = Number(live.realized_unwind_pnl || 0);
+  const upWinNet = upShares * 1.0 - totalCost + unwindPnl;
+  const dnWinNet = dnShares * 1.0 - totalCost + unwindPnl;
 
   const renderSideForecast = (elId, sideName, netVal) => {
     const el = $(elId);
     if (!el) return;
-    if (totalCost > 0) {
+    if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
       setHtmlIfChanged(
         el,
         `<span class="pnl-hint">若 ${sideName} 胜出</span><span class="pnl-amt ${netVal >= 0 ? "pos" : "neg"}">${escapeHtml(fmtUsd(netVal, true))}</span>`
@@ -1606,14 +1646,6 @@ function updateMarket(live) {
   const dnMid =
     dnBid && dnAsk ? (Number(dnBid) + Number(dnAsk)) / 2 : Number(live.poly_down ?? dnBid ?? dnAsk ?? 0.5);
   renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
-
-  const upPctNum = Math.min(100, Math.max(0, upMid * 100));
-  const dnPctNum = Math.min(100, Math.max(0, dnMid * 100));
-  const sumMid = upMid + dnMid;
-  const barSplit = sumMid > 0 ? Math.min(99, Math.max(1, (upMid / sumMid) * 100)) : 50;
-  if ($("prob-tug-up-pct")) $("prob-tug-up-pct").textContent = `${upPctNum.toFixed(1)}%`;
-  if ($("prob-tug-down-pct")) $("prob-tug-down-pct").textContent = `${dnPctNum.toFixed(1)}%`;
-  if ($("up-prob-bar")) $("up-prob-bar").style.flexBasis = `${barSplit.toFixed(2)}%`;
 
   renderWorkingOrders(live.working_orders || []);
   renderActionFeed(live.actions || [], live.start);
@@ -2495,6 +2527,7 @@ const REGIME_LABELS_ZH = {
   wide_spread: "宽价差低流动性",
   toxic: "毒流冲击",
   toxic_shock: "毒流冲击",
+  transitional: "过渡观察区间",
   tail_freeze: "尾盘冻结",
 };
 
@@ -2594,6 +2627,25 @@ async function openRoundModal(slug) {
       winnerEl.textContent = wLatest === "UP" ? "▲ UP 胜出" : wLatest === "DOWN" ? "▼ DOWN 胜出" : "平局";
     }
     updateModalHeaderBadges(slug, rec, winData);
+    if (winData?.archive_pruned) {
+      const rFallback = normalizeRecord(winData) || rec;
+      const pnlVal = Number(rFallback?.pnl ?? 0);
+      const pnlCls = pnlVal > 1e-6 ? "up" : pnlVal < -1e-6 ? "down" : "";
+      body.innerHTML = `
+        <div class="settings-section" style="margin: 6px 0;">
+          <div class="settings-section-head">
+            <h3>历史结算收益汇总（详情回放已自动清理）</h3>
+            <span class="settings-sub">${escapeHtml(winInfo.fullLabel)}</span>
+          </div>
+          <div class="settings-storage-grid">
+            <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(pnlVal, true)}</div><div class="st-note">结算方向: ${escapeHtml(rFallback?.winner || "--")} · ${fmtUsd(rFallback?.open_px)} → ${fmtUsd(rFallback?.close_px)}</div></div>
+            <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rFallback?.up_shares)} / DN ${fmtShares(rFallback?.down_shares)}</div><div class="st-note">总成本 $${Number(rFallback?.cost || 0).toFixed(2)} → 兑现 $${Number(rFallback?.payout || 0).toFixed(2)}</div></div>
+          </div>
+          <div class="settings-sub" style="margin-top: 10px;">该场次的逐秒详情回放包已按保留策略自动释放，但永久收益账本（summary.jsonl）已完整保留。</div>
+        </div>
+      `;
+      return;
+    }
     renderModalDetailContent(winData, rec);
   } catch (err) {
     body.innerHTML = `<div class="action-empty">无法加载该轮次详细轨迹数据 (${escapeHtml(err.message)})</div>`;
@@ -2729,20 +2781,26 @@ function renderModalDetailContent(winData, rec) {
       ? (((Math.max(...twapVals) - Math.min(...twapVals)) / openPx) * 10000).toFixed(1)
       : "0.0";
 
-  // Compute exact per-leg VWAP & cost from fills
+  // Compute exact per-leg entry VWAP & cost from fills (exclude defensive unwinds)
   let upFillSh = 0;
   let upFillCost = 0;
   let dnFillSh = 0;
   let dnFillCost = 0;
   let makerFills = 0;
   let takerFills = 0;
+  let hasUnwindFill = false;
   fills.forEach((f) => {
     const s = String(f.side || "").toUpperCase();
     const sh = Number(f.size ?? f.shares ?? 0);
     const px = Number(f.price ?? 0);
     const k = String(f.kind || "maker").toLowerCase();
+    const purp = String(f.purpose || "entry").toLowerCase();
     if (k === "taker") takerFills += 1;
     else makerFills += 1;
+    if (purp === "unwind") {
+      hasUnwindFill = true;
+      return;
+    }
     if (s === "UP") {
       upFillSh += sh;
       upFillCost += sh * px;
@@ -2801,7 +2859,7 @@ function renderModalDetailContent(winData, rec) {
           <span class="review-focal-val ${pnlCls}">${fmtUsd(pnl, true)}</span>
           ${cost > 0.01 ? `<span class="review-focal-roi ${pnlCls}">ROI ${roiSign}${roiPct}%</span>` : ""}
         </div>
-        <span class="review-focal-sub">总成本 ${fmtUsd(cost)} → 期末兑现 ${fmtUsd(payout)}</span>
+        <span class="review-focal-sub">总成本 ${fmtUsd(cost)}${!hasUnwindFill && feeDiff >= 0.005 ? ` (${feeText})` : ""} → 期末兑现 ${fmtUsd(payout)}</span>
       </div>
 
       <!-- Supporting Metric 1: UP Position -->
@@ -3791,13 +3849,17 @@ function updateSystemStatusWidgets(sys, live) {
   }
 
   if (feedsEl) {
-    const net = (live && live.network) || {};
-    let okCnt = 0;
-    if (net.spot_ws_connected) okCnt += 1;
-    if (net.book_ws_connected && !net.book_empty) okCnt += 1;
-    if (net.ws_connected) okCnt += 1;
-    if (net.chainlink_age_s !== null && net.chainlink_age_s !== undefined && net.chainlink_age_s <= 12) okCnt += 1;
-    feedsEl.textContent = `数据源 ${okCnt}/4`;
+    if (svc === "offline" || (hb !== null && hb !== undefined && hb > 15)) {
+      feedsEl.textContent = "数据源 0/4 (离线)";
+    } else {
+      const net = (live && live.network) || {};
+      let okCnt = 0;
+      if (net.spot_ws_connected) okCnt += 1;
+      if (net.book_ws_connected && !net.book_empty) okCnt += 1;
+      if (net.ws_connected) okCnt += 1;
+      if (net.chainlink_age_s !== null && net.chainlink_age_s !== undefined && net.chainlink_age_s <= 12) okCnt += 1;
+      feedsEl.textContent = `数据源 ${okCnt}/4`;
+    }
   }
 
   if (ramEl) {

@@ -83,26 +83,72 @@ class QueueMatcher:
         # same unchanged snapshot was consumed repeatedly: a 2-share ask level
         # could fill a 5-share resting order with zero trade prints.
         self._crossed_snapshot: Dict[int, tuple] = {}
+        self._crossed_avail: Dict[int, float] = {}
 
     @staticmethod
-    def _snapshot_key(book: OrderBook) -> tuple:
-        """Content fingerprint of the visible ladder (timestamps excluded)."""
-        return (
-            tuple((round(float(px), 6), round(float(sz), 6)) for px, sz in (book.asks or [])),
-            tuple((round(float(px), 6), round(float(sz), 6)) for px, sz in (book.bids or [])),
+    def _crossed_ask_key(book: OrderBook, limit_price: float) -> tuple:
+        """Fingerprint ONLY the ask levels priced at or below `limit_price`.
+
+        Unrelated bid or higher-ask size fluctuations must never reset the
+        crossed-book guard and cause the same static ask depth to be consumed
+        multiple times.
+        """
+        return tuple(
+            (round(float(px), 6), round(float(sz), 6))
+            for px, sz in (book.asks or [])
+            if float(px) <= limit_price + 1e-6
         )
 
+    @staticmethod
+    def _bid_depth_at_price(book: OrderBook, price: float) -> float:
+        for px, sz in (book.bids or []):
+            if abs(float(px) - price) < 1e-4:
+                return float(sz)
+        return 0.0
+
     def register_order(self, order: Order, book: OrderBook):
-        """Register newly placed maker order and record initial queue ahead."""
+        """Register newly placed maker order and record provisional queue ahead."""
         order.live_at = (order.placed_at or 0.0) + self.latency_s
-        # Initial queue ahead is the resting bid volume at the same price
-        ahead = 0.0
-        for px, sz in book.bids:
-            if abs(px - order.price) < 1e-4:
-                ahead = float(sz)
-                break
-        self.queue_ahead[order.id] = ahead
+        order.activated = False
+        self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
         self._crossed_snapshot.pop(order.id, None)
+        self._crossed_avail.pop(order.id, None)
+
+    def activate_order(
+        self,
+        order: Order,
+        book: OrderBook,
+        now: float,
+        post_only: bool = True,
+    ) -> bool:
+        """Activate a maker order when it physically arrives at the CLOB (`now >= live_at`).
+
+        Models two real Polymarket CLOB rules:
+        1. Post-Only arrival rejection: if the book has already moved down so
+           `best_ask <= order.price` when the wire packet lands, a Post-Only
+           maker bid is rejected instead of getting a free zero-fee fill.
+        2. Arrival-time FIFO queue placement: `queue_ahead` is re-anchored to
+           the resting bid depth at `live_at`, eliminating free 300ms in-flight
+           queue jumping when price-improving into a level others already joined.
+
+        Returns True if order is active/resting (or not yet arrived), False if
+        Post-Only rejected on arrival.
+        """
+        if order.remaining <= 1e-6 or order.activated:
+            return True
+        if order.live_at is None or now < order.live_at - 1e-9:
+            return True
+        if post_only and book is not None and book.best_ask is not None and book.best_ask <= order.price + 1e-6:
+            order.cancel_at = now
+            order.cancel_effective_at = now
+            order.cancel_reason = f"Post-Only 到达穿盘拒单(挂买=${order.price:.2f}, 现卖一=${book.best_ask:.2f})"
+            return False
+        order.activated = True
+        if book is not None:
+            self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
+        self._crossed_snapshot.pop(order.id, None)
+        self._crossed_avail.pop(order.id, None)
+        return True
 
     def on_trade_print(
         self,
@@ -150,7 +196,9 @@ class QueueMatcher:
             # A real print changes the queue, so a later (new) snapshot may be
             # matched again. The runner's print_touched_ids guard already skips
             # the stale snapshot on this same tick.
+            order.activated = True
             self._crossed_snapshot.pop(order.id, None)
+            self._crossed_avail.pop(order.id, None)
             ahead = self.queue_ahead.get(order.id, 0.0)
             if trade_size <= ahead:
                 self.queue_ahead[order.id] = ahead - trade_size
@@ -240,30 +288,45 @@ class QueueMatcher:
         if order.live_at is None or now < order.live_at:
             return 0.0
 
-        # One fill opportunity per distinct book snapshot. A static ladder is
-        # not a stream of new sell orders and must never be consumed twice.
-        snap = self._snapshot_key(book)
+        # Case: Not crossed -> reset crossed-book stock tracking and wait
+        if book.best_ask is None or book.best_ask > order.price + 1e-6:
+            self._crossed_snapshot.pop(order.id, None)
+            self._crossed_avail.pop(order.id, None)
+            return 0.0
+
+        # Fingerprint ONLY asks <= order.price so irrelevant bid/high-ask churn
+        # cannot re-consume the same static ask stock across ticks.
+        snap = self._crossed_ask_key(book, order.price)
         if self._crossed_snapshot.get(order.id) == snap:
             return 0.0
         self._crossed_snapshot[order.id] = snap
-
-        # Case: Crossed book (market ask is at or below our bid)
-        if book.best_ask is None or book.best_ask > order.price + 1e-6:
-            return 0.0
 
         # Only liquidity priced at or below our bid can hit it.
         available = sum(
             float(sz) for px, sz in book.asks if px <= order.price + 1e-6
         )
+        prev_avail = self._crossed_avail.get(order.id, 0.0)
+        self._crossed_avail[order.id] = available
         if available <= 1e-9:
             return 0.0
 
         ahead = self.queue_ahead.get(order.id, 0.0)
-        if available <= ahead:
-            self.queue_ahead[order.id] = ahead - available
+        strictly_through = book.best_ask < order.price - 1e-6
+        if ahead > 1e-9 and not strictly_through:
+            # At exact bid==ask touch with a queue ahead of us, only net-new ask
+            # liquidity above the previously seen resting stock can eat queue;
+            # shrinking or oscillating resting asks must never drain queue_ahead.
+            effective_flow = max(0.0, available - prev_avail)
+            if effective_flow <= 1e-9:
+                return 0.0
+        else:
+            effective_flow = available
+
+        if effective_flow <= ahead:
+            self.queue_ahead[order.id] = ahead - effective_flow
             return 0.0
 
-        executable = available - ahead
+        executable = effective_flow - ahead
         self.queue_ahead[order.id] = 0.0
         fill = min(order.remaining, executable)
         order.remaining -= fill

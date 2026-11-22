@@ -196,7 +196,14 @@ class PipelineDriver:
         if self.runner.summary_file.exists():
             try:
                 now_boot = time.time()
-                tail_lines = self.runner.summary_file.read_text(encoding="utf-8").splitlines()[-100:]
+                # O(1) RAM tail read (128KB covers ~250+ recent windows even on a 1-year ledger)
+                # and never drop unverified non-gamma windows just because downtime exceeded 6h.
+                fsize = self.runner.summary_file.stat().st_size
+                with open(self.runner.summary_file, "rb") as sf_in:
+                    if fsize > 131072:
+                        sf_in.seek(fsize - 131072)
+                        sf_in.readline()
+                    tail_lines = sf_in.read().decode("utf-8", errors="ignore").splitlines()[-200:]
                 for raw_ln in tail_lines:
                     if not raw_ln.strip():
                         continue
@@ -205,23 +212,22 @@ class PipelineDriver:
                     except (json.JSONDecodeError, ValueError):
                         continue
                     if rec.get("winner_source") != "gamma" and rec.get("slug") and rec.get("start"):
-                        if (now_boot - float(rec.get("end", 0.0))) <= 21600.0:
-                            o_px = float(rec.get("open_px", 0.0) or 0.0)
-                            c_px = float(rec.get("close_px", 0.0) or 0.0)
-                            twap_tpl = (
-                                (o_px, c_px, rec.get("winner", "Up"))
-                                if (rec.get("winner_source") == "twap" and o_px > 0 and c_px > 0)
-                                else None
-                            )
-                            pending_settlements.append({
-                                "slug": rec["slug"],
-                                "start_t": float(rec["start"]),
-                                "open_px": o_px,
-                                "close_px": c_px,
-                                "twap_prices": twap_tpl,
-                                "attempts": 0,
-                                "added_at": now_boot,
-                            })
+                        o_px = float(rec.get("open_px", 0.0) or 0.0)
+                        c_px = float(rec.get("close_px", 0.0) or 0.0)
+                        twap_tpl = (
+                            (o_px, c_px, rec.get("winner", "Up"))
+                            if (rec.get("winner_source") == "twap" and o_px > 0 and c_px > 0)
+                            else None
+                        )
+                        pending_settlements.append({
+                            "slug": rec["slug"],
+                            "start_t": float(rec["start"]),
+                            "open_px": o_px,
+                            "close_px": c_px,
+                            "twap_prices": twap_tpl,
+                            "attempts": 0,
+                            "added_at": now_boot,
+                        })
             except Exception:
                 pass
         # Recover & provisionally settle any orphaned window from live.json if restart crossed a 5m boundary
@@ -332,6 +338,13 @@ class PipelineDriver:
                         rec_results = self._reconcile_future.result()
                         for rec_ev in rec_results:
                             r_slug = rec_ev["slug"]
+                            for pit in pending_settlements:
+                                if pit.get("slug") == r_slug:
+                                    if rec_ev.get("polled"):
+                                        pit["attempts"] = pit.get("attempts", 0) + 1
+                                        pit["last_poll_t"] = rec_ev.get("poll_t", loop_start)
+                                    if rec_ev.get("drop_done"):
+                                        pit["done"] = True
                             try:
                                 if rec_ev.get("twap_prices"):
                                     off_open, off_close, off_winner = rec_ev["twap_prices"]
@@ -377,7 +390,8 @@ class PipelineDriver:
                 reconcile_interval_s = 4.0 if has_fresh_unconfirmed_twap else 15.0
                 if self._reconcile_future is None and (loop_mono - last_reconcile_mono >= reconcile_interval_s) and pending_settlements:
                     last_reconcile_mono = loop_mono
-                    snapshot_items = list(pending_settlements)
+                    # Pass immutable shallow-dict copies so worker thread never mutates main-thread state
+                    snapshot_items = [dict(it) for it in pending_settlements]
 
                     def _bg_reconcile(items):
                         out_events = []
@@ -390,11 +404,10 @@ class PipelineDriver:
                             # Slow down polling after 30 minutes to avoid hammering Gamma during outages
                             if age_s > 1800.0 and (now_w - float(item.get("last_poll_t", 0.0))) < 120.0:
                                 continue
-                            item["last_poll_t"] = now_w
                             p_slug = item["slug"]
                             p_start = item["start_t"]
-                            item["attempts"] = item.get("attempts", 0) + 1
-                            ev = {"slug": p_slug}
+                            next_attempts = item.get("attempts", 0) + 1
+                            ev = {"slug": p_slug, "polled": True, "poll_t": now_w}
 
                             # Query Gamma only if not already confirmed
                             official = None
@@ -431,7 +444,6 @@ class PipelineDriver:
                                 except Exception:
                                     pass
                                 if official_poly:
-                                    item["twap_prices"] = official_poly
                                     ev["twap_prices"] = official_poly
 
                             if official:
@@ -442,13 +454,12 @@ class PipelineDriver:
                             elif item.get("gamma_confirmed") and not official_poly:
                                 # Stop retrying TWAP if still unavailable 10 minutes after Gamma confirmation
                                 if (now_w - float(item.get("gamma_confirmed_at", now_w))) > 600.0:
-                                    item["done"] = True
+                                    ev["drop_done"] = True
                             elif age_s > 21600.0:
-                                print(f"\n[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts, 6h). Dropping.")
-                                item["done"] = True
+                                print(f"\n[Pipeline] Reconcile timeout for {p_slug} ({next_attempts} attempts, 6h). Dropping.")
+                                ev["drop_done"] = True
 
-                            if ev.get("twap_prices") or ev.get("gamma_winner"):
-                                out_events.append(ev)
+                            out_events.append(ev)
                         return out_events
 
                     self._reconcile_future = self._bg_executor.submit(_bg_reconcile, snapshot_items)
@@ -655,14 +666,16 @@ class PipelineDriver:
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
 
-                    def _delayed_book(side_name: str):
-                        tok = active_tokens.get("token_up" if side_name == "Up" else "token_down")
-                        if not tok:
-                            return None
-                        ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
-                        if ws_bk is not None:
-                            return ws_bk
-                        return self.feed.fetch_order_book(tok, side_name)
+                    def _delayed_book(_side_name: str):
+                        def _one(tok_key: str, label: str):
+                            tok = active_tokens.get(tok_key)
+                            if not tok:
+                                return None
+                            ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
+                            if ws_bk is not None:
+                                return ws_bk
+                            return self.feed.fetch_order_book(tok, label)
+                        return (_one("token_up", "Up"), _one("token_down", "Down"))
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)
@@ -684,6 +697,7 @@ class PipelineDriver:
                         net_stats=net_summary,
                         trade_prints=trades,
                         poly_spot=poly_spot,
+                        poly_spot_ts=getattr(self.feed, "last_poly_btc_ts", None),
                         delayed_book_fetcher=_delayed_book,
                         delayed_prints_fetcher=lambda: self.trade_stream.drain_trades(slug=slug),
                         api_schema_guard=schema_guard,

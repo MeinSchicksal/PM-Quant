@@ -93,6 +93,7 @@ class Order:
     cancel_at: Optional[float] = None
     cancel_effective_at: Optional[float] = None
     cancel_reason: str = ""
+    activated: bool = False
 
 
 @dataclass

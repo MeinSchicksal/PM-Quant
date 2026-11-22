@@ -89,18 +89,10 @@
           <strong class="source-metric-val" id="src-chainlink-val">--</strong>
         </div>
 
-        <div class="conn-subhead">网络遥测</div>
+        <div class="conn-subhead">网络延迟</div>
         <div class="conn-row">
-          <span class="conn-name">吞吐</span>
-          <strong class="source-metric-val" id="side-net-kbps">0.0 KB/s</strong>
-        </div>
-        <div class="conn-row">
-          <span class="conn-name">RTT</span>
+          <span class="conn-name">平均 RTT</span>
           <strong class="source-metric-val" id="side-net-latency">-- ms</strong>
-        </div>
-        <div class="conn-row">
-          <span class="conn-name">累计</span>
-          <strong class="source-metric-val" id="side-net-total">0.0 MB</strong>
         </div>
 
         <div class="conn-subhead">服务器与存储</div>
@@ -191,7 +183,7 @@
           <span class="strip-divider" aria-hidden="true"></span>
 
           <div class="active-strip-cell">
-            <span class="cap-label">BTC 实时现货</span>
+            <span class="cap-label">Chainlink 60s TWAP</span>
             <strong class="cap-val" id="overview-live-spot"><span class="val-currency">$</span>0.00</strong>
           </div>
 
@@ -290,6 +282,7 @@
               <h2>已结算轮次净值曲线</h2>
               <span class="card-head-hint">悬停检视单场损益</span>
             </div>
+            <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
           </div>
           <div class="equity-canvas-wrap">
             <canvas id="equity-curve-canvas" height="220"></canvas>
@@ -313,9 +306,9 @@
         </div>
 
         <div class="panel kpi-box">
-          <span class="kpi-box-label">双边对冲配平率</span>
-          <strong class="kpi-box-val" id="kpi-hedge-rate">0.0%</strong>
-          <span class="kpi-box-sub" id="kpi-total-fills">配平 0/0 场 · 共 0 笔成交</span>
+          <span class="kpi-box-label">最大回撤 (Max DD)</span>
+          <strong class="kpi-box-val" id="kpi-max-dd">$0.00</strong>
+          <span class="kpi-box-sub" id="kpi-total-fills">峰值 +$0.00 · 共 0 笔成交</span>
         </div>
 
         <div class="panel kpi-box">
@@ -474,26 +467,6 @@
             <div class="canvas-container">
               <canvas id="live-price-canvas" height="510"></canvas>
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
-            </div>
-          </section>
-
-          <!-- Dual-Sided Implied Probability Tug-of-War Meter -->
-          <section class="panel prob-tug-card" aria-label="市场隐含胜率实时博弈">
-            <div class="prob-tug-header">
-              <div class="prob-tug-side up">
-                <span class="prob-side-tag">▲ UP 市场胜率</span>
-                <strong class="prob-side-pct" id="prob-tug-up-pct">--%</strong>
-              </div>
-              <span class="prob-tug-title">盘口隐含胜率实时博弈 · 50% 均衡线</span>
-              <div class="prob-tug-side down">
-                <strong class="prob-side-pct" id="prob-tug-down-pct">--%</strong>
-                <span class="prob-side-tag">DOWN 市场胜率 ▼</span>
-              </div>
-            </div>
-            <div class="prob-tug-track" aria-hidden="true">
-              <div class="prob-tug-fill up-bar" id="up-prob-bar" style="flex-basis: 50%"></div>
-              <div class="prob-tug-fill down-bar" id="down-prob-bar"></div>
-              <span class="prob-tug-midtick"></span>
             </div>
           </section>
 
@@ -678,16 +651,15 @@
         <div class="table-wrap">
           <table class="data-table rounds-table">
             <colgroup>
-              <col style="width: 13%">
+              <col style="width: 14%">
               <col style="width: 11%">
-              <col style="width: 17%">
+              <col style="width: 19%">
+              <col style="width: 9%">
+              <col style="width: 9%">
+              <col style="width: 10%">
+              <col style="width: 10%">
+              <col style="width: 10%">
               <col style="width: 8%">
-              <col style="width: 8%">
-              <col style="width: 9%">
-              <col style="width: 9%">
-              <col style="width: 9%">
-              <col style="width: 7%">
-              <col style="width: 9%">
             </colgroup>
             <thead>
               <tr>
@@ -700,11 +672,10 @@
                 <th class="center col-payout-hdr">兑现收入</th>
                 <th class="center">净收益</th>
                 <th class="center" title="该窗口成交笔数">笔数</th>
-                <th class="center" title="双边对冲锁仓时，若 (UP均价 + DN均价) > $1.00，超出的对冲溢价即为保险成本">保险成本</th>
               </tr>
             </thead>
             <tbody id="history-tbody">
-              <tr><td colspan="10" class="action-empty">加载历史记录中...</td></tr>
+              <tr><td colspan="9" class="action-empty">加载历史记录中...</td></tr>
             </tbody>
           </table>
         </div>
@@ -721,6 +692,8 @@
         <div class="modal-header-left">
           <h2 class="modal-title" id="modal-round-title">5 分钟轮次复盘详情</h2>
           <span class="winner-pill pending" id="modal-round-winner">--</span>
+          <span class="modal-meta-badge" id="modal-round-source" hidden></span>
+          <span class="modal-meta-badge" id="modal-round-regime" hidden></span>
         </div>
         <div class="modal-header-right">
           <button type="button" class="modal-close-btn" id="modal-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
@@ -770,7 +743,7 @@
             </div>
             <div class="guide-item">
               <span class="guide-tag tag-bad">风控告警</span>
-              <div class="guide-desc"><strong>触发账户保护</strong>：达到单日最大回撤（$15）或连亏 3 轮冷却，系统已自动锁仓/暂停开新仓，防止连续逆风扩大亏损。</div>
+              <div class="guide-desc"><strong>触发账户保护</strong>：达到配置的日度回撤上限或连续亏损冷却阈值，系统已自动锁仓/暂停开新仓，防止连续逆风扩大亏损。</div>
             </div>
             <div class="guide-item">
               <span class="guide-tag tag-muted">管道待机/离线</span>
@@ -791,8 +764,8 @@
               <div class="guide-desc">拉取 BTC 现货与 Chainlink 官方结算参考价的延迟（ms）。注意本市场正式结算依据为 Chainlink 60 秒时间加权均价（TWAP）。</div>
             </div>
             <div class="guide-item">
-              <span class="guide-metric">吞吐 / RTT / 累计</span>
-              <div class="guide-desc">依次代表<strong>每秒下行行情速率（KB/s）</strong>、<strong>平均网络往返延迟（ms）</strong>、<strong>本次启动累计接收流量（MB）</strong>。管道运行中吞吐通常在 <code>3 ~ 15 KB/s</code> 波动。</div>
+              <span class="guide-metric">平均 RTT</span>
+              <div class="guide-desc">平均网络往返延迟（ms）。若海外云服务器持续高于 <code>400 ms</code>，可按实测值调高 <code>LATENCY_S</code> 让模拟盘延迟更贴近实盘。</div>
             </div>
           </div>
         </div>
@@ -857,7 +830,7 @@
             </div>
             <div class="guide-item">
               <span class="guide-tag tag-bad">风控熔断</span>
-              <div class="guide-desc">触发日度回撤上限（$15）或连亏 3 轮冷却期，强制禁止新开第一腿。</div>
+              <div class="guide-desc">触发配置的日度回撤上限或连续亏损冷却期，强制禁止新开第一腿。</div>
             </div>
           </div>
         </div>
@@ -957,6 +930,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.47"></script>
+  <script src="/static/app.js?v=3.2.50"></script>
 </body>
 </html>
