@@ -305,6 +305,68 @@ class TestRuntimeAndIntegrityHardening(unittest.TestCase):
             self.assertTrue(send_alert("dedupe_test_key", "Title", "Body", cooldown_s=300.0, now=1301.0))
             self.assertEqual(mock_put.call_count, 2)
 
+    def test_estimate_twap_close_price_same_chain_and_rounding(self):
+        """Provisional close_px must stay on the Chainlink 60s TWAP chain, not raw Binance spot."""
+        tmp = Path(tempfile.mkdtemp(prefix="pm_twap_close_"))
+        try:
+            t0 = 1800000000.0
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window(
+                "btc-updown-5m-1800000000", t0, t0 + 300.0,
+                open_px=65000.123456, binance_open_px=65080.0,
+                poly_spot=65010.0, poly_open_provisional=False,
+            )
+            # Basis is +80 (Binance 80 higher than Chainlink); last 60s Binance averages 65100 -> Chainlink TWAP ~ 65020
+            runner._basis_ema = 80.0
+            runner._spot_buf = [(t0 + 240.0 + i * 10.0, 65100.0) for i in range(7)]
+            runner.last_spot_price = 65195.0  # Instantaneous spike that must NOT pollute 60s TWAP estimate
+
+            est = runner.estimate_twap_close_price(t0 + 300.0)
+            self.assertAlmostEqual(est, 65020.0, places=2)
+
+            # Fallback when _spot_buf coverage < 15s: prefer fresh Chainlink poly_spot
+            runner._spot_buf = [(t0 + 295.0, 65195.0), (t0 + 300.0, 65195.0)]
+            runner.poly_spot_fresh = True
+            runner.last_poly_spot = 65018.456
+            self.assertAlmostEqual(runner.estimate_twap_close_price(t0 + 300.0), 65018.46, places=2)
+
+            # close_window rounds open_px & close_px cleanly to 2 decimals
+            runner.close_window(65018.456, official_winner=None, winner_source="spot_fallback")
+            row = json.loads((tmp / "summary.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(row["open_px"], 65000.12)
+            self.assertEqual(row["close_px"], 65018.46)
+            self.assertEqual(row["winner_source"], "spot_fallback")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_late_twap_updates_prices_after_gamma_confirmed_without_overwriting_winner(self):
+        """If Gamma settles before TWAP publishes, later TWAP reconcile must fix open/close prices while preserving Gamma winner."""
+        tmp = Path(tempfile.mkdtemp(prefix="pm_gamma_then_twap_"))
+        try:
+            slug = "btc-updown-5m-1800000900"
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window(slug, 1800000900.0, 1800001200.0, open_px=65000.0, poly_open_provisional=False)
+            runner.pos_up = Position(5.0, 2.40)
+            # Initial rollover wrote provisional fallback close price
+            runner.close_window(64990.0, official_winner=None, winner_source="spot_fallback")
+
+            # Gamma confirms winner="Up" first while TWAP is still missing (reusing provisional prices)
+            runner.reconcile_record(slug, 65000.0, 64990.0, "Up", winner_source="gamma")
+            row1 = json.loads((tmp / "summary.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(row1["winner"], "Up")
+            self.assertEqual(row1["winner_source"], "gamma")
+
+            # Official Chainlink TWAP arrives later with true open/close prices
+            runner.reconcile_record(slug, 65002.35, 65001.10, "Down", winner_source="twap")
+            row2 = json.loads((tmp / "summary.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(row2["open_px"], 65002.35)
+            self.assertEqual(row2["close_px"], 65001.10)
+            self.assertEqual(row2["winner"], "Up", "Gamma truth must never be overwritten by TWAP")
+            self.assertEqual(row2["winner_source"], "gamma")
+            self.assertAlmostEqual(row2["net_pnl"], 2.60, places=4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestWebSecurityAndScalabilityHardening(unittest.TestCase):
     def test_web_path_traversal_dotdot_blocked_and_weak_password_rejected(self):

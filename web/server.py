@@ -890,7 +890,7 @@ class QuantHandler(BaseHTTPRequestHandler):
             summary_file = ledger_dir / "summary.jsonl"
             rec = _lookup_summary_record(summary_file, slug)
             if rec:
-                for key in ("open_px", "close_px", "winner", "proceeds", "net_pnl", "result", "traded"):
+                for key in ("open_px", "close_px", "winner", "winner_source", "proceeds", "net_pnl", "result", "traded"):
                     if rec.get(key) is not None:
                         detail[key] = rec[key]
 

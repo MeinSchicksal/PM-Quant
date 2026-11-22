@@ -1216,6 +1216,41 @@ class PaperRunner:
                 self._last_live_write_t = now
                 self._last_live_action_cnt = len(self.actions)
 
+    def estimate_twap_close_price(self, now: float) -> float:
+        """Estimate Chainlink-chain 60s TWAP close price when official TWAP is not yet published.
+
+        Avoids mixing Chainlink TWAP open_px with raw Binance instantaneous spot
+        during the 5-20s window right after a 5-minute rollover.
+        """
+        basis = getattr(self, "_basis_ema", None)
+        if basis is not None and math.isfinite(float(basis)) and self._spot_buf:
+            pts = [(ts, px) for ts, px in self._spot_buf if (now - ts) <= 60.5 and px > 0]
+            if len(pts) >= 2:
+                w_sum = 0.0
+                dt_sum = 0.0
+                for i in range(1, len(pts)):
+                    dt = pts[i][0] - pts[i - 1][0]
+                    if dt > 0.0:
+                        w_sum += 0.5 * (pts[i - 1][1] + pts[i][1]) * dt
+                        dt_sum += dt
+                if dt_sum >= 15.0:
+                    est = (w_sum / dt_sum) - float(basis)
+                    if math.isfinite(est) and est > 0.0:
+                        return round(est, 2)
+
+        if getattr(self, "poly_spot_fresh", False) and float(getattr(self, "last_poly_spot", 0.0) or 0.0) > 0.0:
+            return round(float(self.last_poly_spot), 2)
+
+        last_spot = float(getattr(self, "last_spot_price", 0.0) or 0.0)
+        if basis is not None and math.isfinite(float(basis)) and last_spot > 0.0:
+            est = last_spot - float(basis)
+            if math.isfinite(est) and est > 0.0:
+                return round(est, 2)
+
+        if last_spot > 0.0:
+            return round(last_spot, 2)
+        return round(float(getattr(self, "open_price", 0.0) or 0.0), 2)
+
     def close_window(self, close_px: float, official_winner: str = None,
                      winner_source: str = "spot_fallback"):
         """Settle session, append summary record, and compress window archive."""
@@ -1269,8 +1304,8 @@ class PaperRunner:
             "end": self.window_end,
             "winner": winner,
             "winner_source": winner_source if official_winner in ("Up", "Down") else "spot_fallback",
-            "open_px": self.open_price,
-            "close_px": close_px,
+            "open_px": round(float(self.open_price), 2),
+            "close_px": round(float(close_px), 2),
             "net_pnl": net_pnl,
             "pos_up": self.pos_up.shares,
             "pos_down": self.pos_down.shares,
@@ -1342,7 +1377,11 @@ class PaperRunner:
             if getattr(self, "poly_spot_fresh", False) and getattr(self, "last_poly_spot", 0.0) > 0:
                 return round(abs(self.last_poly_spot - self.open_price), 2)
             if getattr(self, "_basis_ema", None) is not None and close_px > 0:
-                return round(abs((close_px - float(self._basis_ema)) - self.open_price), 2)
+                last_spot = float(getattr(self, "last_spot_price", 0.0) or 0.0)
+                # Avoid double-subtracting basis if close_px was already de-biased via estimate_twap_close_price()
+                if last_spot > 0 and abs(close_px - last_spot) < 1.0:
+                    return round(abs((close_px - float(self._basis_ema)) - self.open_price), 2)
+                return round(abs(close_px - self.open_price), 2)
         bin_open = float(getattr(self, "binance_open_price", 0.0) or 0.0)
         if bin_open > 0 and close_px > 0:
             return round(abs(close_px - bin_open), 2)

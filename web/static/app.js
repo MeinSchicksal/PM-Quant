@@ -273,6 +273,8 @@ function normalizeRecord(r) {
     start_ts: startTs,
     end_ts: endTs,
     winner: r.winner || "PENDING",
+    winner_source: String(r.winner_source || ""),
+    regime: String(r.regime || ""),
     open_px: Number(r.open_px || 0),
     close_px: Number(r.close_px || 0),
     up_shares: upShares,
@@ -531,12 +533,17 @@ function updateNetworkTelemetry(live) {
     }
   }
 
+  const apiGuard = (live && live.api_schema_guard) || {};
+  const apiPaused = Boolean(apiGuard.paused);
   const connPill = $("conn-pill");
   const connText = $("conn-text");
   if (connPill && connText) {
-    if (isIdle) {
+    if (apiPaused) {
+      connPill.className = "status-pill status-critical";
+      connText.textContent = "接口变更暂停";
+    } else if (isIdle) {
       connPill.className = "status-pill status-warn";
-      connText.textContent = "管道未启";
+      connText.textContent = live && live.status === "idle" ? "等待开盘" : "引擎离线";
     } else if (badCount > 0) {
       connPill.className = "status-pill status-critical";
       connText.textContent = "数据异常";
@@ -551,7 +558,9 @@ function updateNetworkTelemetry(live) {
 
   const tripped = Boolean(cb.active || cb.tripped);
   if (netCountEl) {
-    if (isIdle) {
+    if (apiPaused) {
+      netCountEl.textContent = "接口异常暂停";
+    } else if (isIdle) {
       netCountEl.textContent = "管道离线";
       netCountEl.style.color = "var(--caption)";
       netCountEl.style.background = "var(--surface-2, rgba(148,163,184,0.14))";
@@ -787,7 +796,8 @@ function updateOverview(live, hist) {
     if ($("overview-tau-bar")) $("overview-tau-bar").style.width = `${elapsedPct.toFixed(1)}%`;
 
     if ($("overview-live-spot")) {
-      const spotNum = Number(live.spot || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const displaySpot = Number(live.poly_spot || live.spot || 0);
+      const spotNum = displaySpot.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       setHtmlIfChanged($("overview-live-spot"), `<span class="val-currency">$</span>${spotNum}`);
     }
     const upS = Number(live.pos_up?.shares || 0);
@@ -1286,12 +1296,16 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
   const r = rawRec.up_shares !== undefined ? rawRec : normalizeRecord(rawRec);
   const winInfo = slugToWindowText(r.slug, r.start_ts, r.end_ts);
   const winner = String(r.winner || "PENDING").toUpperCase();
+  const isProvisional = String(r.winner_source || "").toLowerCase() === "spot_fallback";
   let winnerBadge = `<span class="winner-pill pending">平局 / 未定</span>`;
   if (winner === "UP") {
     winnerBadge = `<span class="winner-pill up">${SVG_ICONS.up}UP 胜出</span>`;
   } else if (winner === "DOWN") {
     winnerBadge = `<span class="winner-pill down">${SVG_ICONS.down}DOWN 胜出</span>`;
   }
+  const provNote = isProvisional
+    ? `<small style="display:block;font-size:10.5px;color:var(--caption);margin-top:2px" title="Polymarket 官方 60s TWAP 结算价尚未公布，当前为同链暂估价，确认后将自动刷新">暂估 · 待官方核验</small>`
+    : "";
 
   const openPx = Number(r.open_px || 0);
   const closePx = Number(r.close_px || 0);
@@ -1326,7 +1340,7 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
         <span class="time-cell-main">${escapeHtml(winInfo.range)}</span>
         <small style="display:block;font-size:11.5px;color:var(--caption)">${escapeHtml(winInfo.dateStr)}</small>
       </td>
-      <td class="center">${winnerBadge}</td>
+      <td class="center">${winnerBadge}${provNote}</td>
       <td class="center col-price-cell">
         <span class="price-open-close">${fmtUsd(openPx)} → ${fmtUsd(closePx)}</span>
         <span class="price-diff-bps ${diffClass}">
@@ -1453,15 +1467,30 @@ function updateMarket(live) {
 
   // Risk & Circuit Breaker Status
   const cb = live.circuit_breaker || {};
+  const apiGuard = live.api_schema_guard || {};
+  const nowSec = live.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const hbAge = live.now ? Math.max(0, nowSec - Number(live.now)) : 0;
   const riskPill = $("market-risk-pill");
   const riskText = $("market-risk");
   if (riskPill && riskText) {
-    if (cb.active || cb.tripped) {
+    const regKey = live.regime || live.micro_regime || "normal_oscillation";
+    const regLabel = REGIME_META[regKey]?.label?.split(" ")[0] || "流动性正常";
+    if (hbAge > 60) {
+      riskPill.className = "status-pill status-critical";
+      riskText.textContent = "交易引擎离线";
+    } else if (apiGuard.paused) {
+      riskPill.className = "status-pill status-critical";
+      riskText.textContent = "接口变更 · 安全暂停";
+    } else if (cb.active || cb.tripped) {
       riskPill.className = "status-pill status-critical";
       riskText.textContent = translateCircuitBreakerReason(cb.reason);
+    } else if (hbAge > 15) {
+      riskPill.className = "status-pill status-warn";
+      riskText.textContent = `${regLabel} · 心跳延迟`;
+    } else if (live.spot_stale || live.poly_spot_stale) {
+      riskPill.className = "status-pill status-warn";
+      riskText.textContent = `${regLabel} · 单源滞后`;
     } else {
-      const regKey = live.regime || live.micro_regime || "normal_oscillation";
-      const regLabel = REGIME_META[regKey]?.label?.split(" ")[0] || "流动性正常";
       riskPill.className = "status-pill status-ready";
       riskText.textContent = `${regLabel} · 双源同步`;
     }
@@ -2459,11 +2488,13 @@ const REGIME_LABELS_ZH = {
   normal: "常态波动",
   calm: "低波静默",
   skewed_drift: "温和偏态漂移",
+  strong_trend: "单边强趋势",
   trending_up: "单边强势上行",
   trending_down: "单边强势下行",
   volatile: "高波剧震",
   wide_spread: "宽价差低流动性",
   toxic: "毒流冲击",
+  toxic_shock: "毒流冲击",
   tail_freeze: "尾盘冻结",
 };
 
@@ -2479,6 +2510,10 @@ function updateModalHeaderBadges(slug, rec, winData) {
       sourceEl.hidden = false;
     } else if (srcRaw === "twap") {
       sourceEl.textContent = "Chainlink 60s TWAP";
+      sourceEl.className = "modal-meta-badge";
+      sourceEl.hidden = false;
+    } else if (srcRaw === "spot_fallback") {
+      sourceEl.textContent = "暂估 · 待官方核验";
       sourceEl.className = "modal-meta-badge";
       sourceEl.hidden = false;
     } else if (srcRaw) {
@@ -2541,8 +2576,8 @@ async function openRoundModal(slug) {
               <span class="settings-sub">${escapeHtml(winInfo.fullLabel)}</span>
             </div>
             <div class="settings-storage-grid">
-              <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(rec.pnl, true)}</div><div class="st-note">结算方向: ${escapeHtml(rec.winner || "--")}</div></div>
-              <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${rec.posUp} / DN ${rec.posDown}</div><div class="st-note">总成本 $${rec.cost.toFixed(2)} → 兑现 $${rec.proceeds.toFixed(2)}</div></div>
+              <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(rec.pnl, true)}</div><div class="st-note">结算方向: ${escapeHtml(rec.winner || "--")} · ${fmtUsd(rec.open_px)} → ${fmtUsd(rec.close_px)}</div></div>
+              <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rec.up_shares)} / DN ${fmtShares(rec.down_shares)}</div><div class="st-note">总成本 $${Number(rec.cost || 0).toFixed(2)} → 兑现 $${Number(rec.payout || 0).toFixed(2)}</div></div>
             </div>
             <div class="settings-sub" style="margin-top: 10px;">该场次的逐秒详情回放包已按保留策略自动释放，但永久收益账本（summary.jsonl）已完整保留。</div>
           </div>
@@ -2553,6 +2588,11 @@ async function openRoundModal(slug) {
     }
     const winData = await res.json();
     cachedModalWindow = winData;
+    if (winnerEl && winData?.winner) {
+      const wLatest = String(winData.winner).toUpperCase();
+      winnerEl.className = `winner-pill ${wLatest === "UP" ? "up" : wLatest === "DOWN" ? "down" : "pending"}`;
+      winnerEl.textContent = wLatest === "UP" ? "▲ UP 胜出" : wLatest === "DOWN" ? "▼ DOWN 胜出" : "平局";
+    }
     updateModalHeaderBadges(slug, rec, winData);
     renderModalDetailContent(winData, rec);
   } catch (err) {
@@ -2656,14 +2696,18 @@ function renderModalDetailContent(winData, rec) {
   if (!body) return;
 
   const normWin = normalizeRecord(winData);
-  const openPx = Number(rec?.open_px || normWin?.open_px || 0);
-  const closePx = Number(rec?.close_px || normWin?.close_px || 0);
-  const upShares = Number(rec?.up_shares ?? normWin?.up_shares ?? 0);
-  const dnShares = Number(rec?.down_shares ?? normWin?.down_shares ?? 0);
-  const cost = Number(rec?.cost ?? normWin?.cost ?? 0);
-  const payout = Number(rec?.payout ?? normWin?.payout ?? 0);
-  const pnl = Number(rec?.pnl ?? normWin?.pnl ?? 0);
-  const winner = String(rec?.winner || normWin?.winner || "UP").toUpperCase();
+  const openPx = Number((normWin?.open_px > 0 ? normWin.open_px : rec?.open_px) || 0);
+  const closePx = Number((normWin?.close_px > 0 ? normWin.close_px : rec?.close_px) || 0);
+  const upShares = Number(normWin?.up_shares ?? rec?.up_shares ?? 0);
+  const dnShares = Number(normWin?.down_shares ?? rec?.down_shares ?? 0);
+  const cost = Number(normWin?.cost ?? rec?.cost ?? 0);
+  const payout = Number(normWin?.payout ?? rec?.payout ?? 0);
+  const pnl = Number(normWin?.pnl ?? rec?.pnl ?? 0);
+  const winner = String(
+    (normWin?.winner && normWin.winner !== "PENDING" ? normWin.winner : rec?.winner) || "UP"
+  ).toUpperCase();
+  const winnerSource = String(normWin?.winner_source || rec?.winner_source || "").toLowerCase();
+  const isProvisionalPrice = winnerSource === "spot_fallback";
   const startTs = Number(winData?.start || rec?.start_ts || 0);
   const actions = Array.isArray(winData?.actions) ? winData.actions : [];
   const fills = Array.isArray(winData?.fills) ? winData.fills : [];
@@ -2776,7 +2820,7 @@ function renderModalDetailContent(winData, rec) {
 
       <!-- Supporting Metric 3: Settlement Price -->
       <div class="review-kpi-col">
-        <span class="review-kpi-label">开盘基准 → 交割收盘</span>
+        <span class="review-kpi-label">${isProvisionalPrice ? "开盘基准 → 暂估收盘（待官方核验）" : "开盘基准 → 交割收盘"}</span>
         <span class="review-kpi-val">$${openShort} → $${closeShort}</span>
         <span class="review-kpi-sub ${diffCls}">${diffSign}$${diffPx.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)</span>
       </div>
@@ -3730,9 +3774,12 @@ function updateSystemStatusWidgets(sys, live) {
 
   const svc = sys.service_status || "offline";
   const hb = sys.heartbeat_age_s;
-  if (dot) dot.className = `sh-dot ${svc === "online" ? "ok" : svc === "lagging" ? "warn" : "bad"}`;
+  const apiPaused = Boolean(live && live.api_schema_guard && live.api_schema_guard.paused);
+  if (dot) dot.className = `sh-dot ${apiPaused ? "bad" : svc === "online" ? "ok" : svc === "lagging" ? "warn" : "bad"}`;
   if (procEl) {
-    if (gd.paused) {
+    if (apiPaused) {
+      procEl.textContent = "接口变更 · 安全暂停";
+    } else if (gd.paused) {
       procEl.textContent = "磁盘危急 · 已暂停录行情";
     } else if (svc === "online") {
       procEl.textContent = `服务器在线${hb !== null && hb !== undefined ? ` (${hb.toFixed(0)}s)` : ""}`;
@@ -3819,9 +3866,16 @@ async function fetchAll(isManual = false) {
     }
 
     const nowMs = Date.now();
+    const nowSec = live && live.server_time ? Number(live.server_time) : (nowMs / 1000);
     const curSlug = (live && live.slug) || null;
     const curFills = Number((live && live.fills_count) || 0);
-    const histIntervalMs = document.hidden ? 60000 : 30000;
+    const recentRecs = Array.isArray(cachedHistory?.records) ? cachedHistory.records.slice(0, 3) : [];
+    const hasFreshProvisional = recentRecs.some((r) => {
+      if (String(r?.winner_source || "").toLowerCase() !== "spot_fallback") return false;
+      const endTs = Number(r?.end || (Number(r?.start || 0) ? Number(r.start) + 300 : 0));
+      return endTs <= 0 || (nowSec - endTs) <= 300;
+    });
+    const histIntervalMs = document.hidden ? 60000 : (hasFreshProvisional ? 5000 : 30000);
     const needHistory =
       isManual ||
       !cachedHistory ||
@@ -3843,9 +3897,6 @@ async function fetchAll(isManual = false) {
       _lastHistoryFillsCount = curFills;
       histUpdated = true;
     }
-
-    if (connPill) connPill.className = "status-pill status-ready";
-    if (connText) connText.textContent = "服务在线";
 
     const versionEl = $("page-version");
     const activeVer = (hist && (hist.current_batch || hist.batch_id)) || (live && live.batch_id);

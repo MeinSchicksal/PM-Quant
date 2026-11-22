@@ -340,6 +340,13 @@ class PipelineDriver:
                                         winner_source="twap"
                                     )
                                     print(f"\n[Pipeline] Official Chainlink TWAP confirmed for {r_slug}: ${off_open:,.2f} -> ${off_close:,.2f} ({off_winner})")
+                                    for pit in pending_settlements:
+                                        if pit.get("slug") == r_slug:
+                                            pit["twap_prices"] = rec_ev["twap_prices"]
+                                            pit["open_px"] = off_open
+                                            pit["close_px"] = off_close
+                                            if pit.get("gamma_confirmed"):
+                                                pit["done"] = True
                                 if rec_ev.get("gamma_winner"):
                                     off_open, off_close = rec_ev["gamma_prices"]
                                     self.runner.reconcile_record(
@@ -349,7 +356,11 @@ class PipelineDriver:
                                     print(f"\n[Pipeline] Official Gamma/UMA truth confirmed for {r_slug}: {rec_ev['gamma_winner']}")
                                     for pit in pending_settlements:
                                         if pit.get("slug") == r_slug:
-                                            pit["done"] = True
+                                            pit["gamma_confirmed"] = True
+                                            pit.setdefault("gamma_confirmed_at", loop_start)
+                                            # Keep item alive until official TWAP prices also arrive (prevents locking fallback prices)
+                                            if pit.get("twap_prices"):
+                                                pit["done"] = True
                             except Exception as rec_exc:
                                 print(f"\n[Pipeline] Reconcile write warning for {r_slug}: {rec_exc}")
                     except Exception as fut_exc:
@@ -359,7 +370,12 @@ class PipelineDriver:
                         pending_settlements = [it for it in pending_settlements if not it.get("done")]
 
                 pending_settlements = [it for it in pending_settlements if not it.get("done")]
-                if self._reconcile_future is None and (loop_mono - last_reconcile_mono >= 15.0) and pending_settlements:
+                has_fresh_unconfirmed_twap = any(
+                    (not it.get("twap_prices")) and ((loop_start - float(it.get("added_at", loop_start))) < 60.0)
+                    for it in pending_settlements
+                )
+                reconcile_interval_s = 4.0 if has_fresh_unconfirmed_twap else 15.0
+                if self._reconcile_future is None and (loop_mono - last_reconcile_mono >= reconcile_interval_s) and pending_settlements:
                     last_reconcile_mono = loop_mono
                     snapshot_items = list(pending_settlements)
 
@@ -380,23 +396,24 @@ class PipelineDriver:
                             item["attempts"] = item.get("attempts", 0) + 1
                             ev = {"slug": p_slug}
 
-                            # Query Gamma & TWAP using worker thread session
+                            # Query Gamma only if not already confirmed
                             official = None
-                            try:
-                                r = sess.get(f"https://gamma-api.polymarket.com/events?slug={p_slug}", timeout=(1.5, 2.5))
-                                if r.status_code == 200:
-                                    d = r.json()
-                                    if d and d[0].get("markets"):
-                                        m = d[0]["markets"][0]
-                                        if m.get("closed") is True or m.get("umaResolutionStatus") == "resolved":
-                                            outcomes = json.loads(m["outcomes"]) if isinstance(m.get("outcomes"), str) else m.get("outcomes", [])
-                                            oprices = json.loads(m["outcomePrices"]) if isinstance(m.get("outcomePrices"), str) else m.get("outcomePrices", [])
-                                            payouts = [float(p) for p in oprices]
-                                            if len(payouts) == 2 and sorted(payouts) == [0.0, 1.0]:
-                                                official = {"slug": p_slug, "winner": outcomes[payouts.index(1.0)], "payouts": payouts, "condition_id": m.get("conditionId"), "verified": True, "resolved_at": time.time()}
-                                                self.feed.record_raw_event("settlements", official)
-                            except Exception:
-                                pass
+                            if not item.get("gamma_confirmed"):
+                                try:
+                                    r = sess.get(f"https://gamma-api.polymarket.com/events?slug={p_slug}", timeout=(1.5, 2.5))
+                                    if r.status_code == 200:
+                                        d = r.json()
+                                        if d and d[0].get("markets"):
+                                            m = d[0]["markets"][0]
+                                            if m.get("closed") is True or m.get("umaResolutionStatus") == "resolved":
+                                                outcomes = json.loads(m["outcomes"]) if isinstance(m.get("outcomes"), str) else m.get("outcomes", [])
+                                                oprices = json.loads(m["outcomePrices"]) if isinstance(m.get("outcomePrices"), str) else m.get("outcomePrices", [])
+                                                payouts = [float(p) for p in oprices]
+                                                if len(payouts) == 2 and sorted(payouts) == [0.0, 1.0]:
+                                                    official = {"slug": p_slug, "winner": outcomes[payouts.index(1.0)], "payouts": payouts, "condition_id": m.get("conditionId"), "verified": True, "resolved_at": time.time()}
+                                                    self.feed.record_raw_event("settlements", official)
+                                except Exception:
+                                    pass
 
                             official_poly = item.get("twap_prices")
                             if not official_poly:
@@ -422,6 +439,10 @@ class PipelineDriver:
                                 off_close = official_poly[1] if official_poly else item.get("close_px", 0.0)
                                 ev["gamma_winner"] = official["winner"]
                                 ev["gamma_prices"] = (off_open, off_close)
+                            elif item.get("gamma_confirmed") and not official_poly:
+                                # Stop retrying TWAP if still unavailable 10 minutes after Gamma confirmation
+                                if (now_w - float(item.get("gamma_confirmed_at", now_w))) > 600.0:
+                                    item["done"] = True
                             elif age_s > 21600.0:
                                 print(f"\n[Pipeline] Reconcile timeout for {p_slug} ({item['attempts']} attempts, 6h). Dropping.")
                                 item["done"] = True
@@ -448,11 +469,12 @@ class PipelineDriver:
                         official_winner = poly_winner
                         winner_source = "twap"
                     else:
-                        close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
-                        close_px = (
-                            getattr(self.runner, "last_spot_price", 0.0)
-                            or (close_spot.price if close_spot.price > 0 else self.runner.open_price)
-                        )
+                        est_close = self.runner.estimate_twap_close_price(loop_start)
+                        if est_close > 0.0:
+                            close_px = est_close
+                        else:
+                            close_spot = self.feed.fetch_spot_state(self.runner.open_price, loop_start)
+                            close_px = close_spot.price if close_spot.price > 0 else self.runner.open_price
 
                     if last_start_t:
                         pending_settlements.append({
