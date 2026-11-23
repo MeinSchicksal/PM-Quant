@@ -57,64 +57,90 @@
 
     <div class="sidebar-group sidebar-connections">
       <div class="sidebar-group-head">
-        <div class="sidebar-group-label">数据源连接</div>
-        <button type="button" class="conn-help-btn" id="conn-help-btn" title="查看数据源状态与指标说明" aria-label="数据源状态说明">?</button>
+        <div class="sidebar-group-label">系统遥测与数据源</div>
+        <button type="button" class="conn-help-btn" id="conn-help-btn" title="查看数据源状态、颜色规则与指标说明" aria-label="数据源状态说明">?</button>
       </div>
-      <div class="conn-card">
-        <div class="conn-head">
-          <div class="status-pill status-ready" id="conn-pill" title="本地看板与交易管道状态">
-            <span class="status-dot"></span>
-            <span id="conn-text">服务在线</span>
+      <div class="conn-card" id="conn-card">
+        <div class="conn-head" id="conn-head">
+          <div class="conn-head-left">
+            <div class="status-pill status-ready" id="conn-pill" title="本地看板与交易管道状态">
+              <span class="status-dot"></span>
+              <span id="conn-text">服务在线</span>
+            </div>
+            <span class="telemetry-badge" id="net-count">检测中</span>
           </div>
-          <span class="telemetry-badge" id="net-count">检测中</span>
-        </div>
-        <div class="conn-row">
-          <span class="source-dot" id="dot-spot"></span>
-          <span class="conn-name">Binance 现货</span>
-          <strong class="source-metric-val" id="src-spot-val">--</strong>
-        </div>
-        <div class="conn-row">
-          <span class="source-dot" id="dot-book"></span>
-          <span class="conn-name">Polymarket 盘口</span>
-          <strong class="source-metric-val" id="src-book-val">--</strong>
-        </div>
-        <div class="conn-row">
-          <span class="source-dot" id="dot-trades"></span>
-          <span class="conn-name">Polymarket 成交</span>
-          <strong class="source-metric-val" id="src-trades-val">--</strong>
-        </div>
-        <div class="conn-row">
-          <span class="source-dot" id="dot-chainlink"></span>
-          <span class="conn-name">Chainlink 预言机</span>
-          <strong class="source-metric-val" id="src-chainlink-val">--</strong>
+          <div class="conn-head-mobile-actions">
+            <button type="button" class="conn-help-btn conn-help-btn-mobile" id="conn-help-btn-mobile" title="查看指标与颜色说明" aria-label="指标说明">?</button>
+            <button type="button" class="conn-mobile-toggle" id="conn-mobile-toggle" aria-expanded="false" aria-controls="conn-body">
+              <span id="conn-mobile-toggle-label">详情</span>
+              <svg class="conn-chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l5 5 5-5"/></svg>
+            </button>
+          </div>
         </div>
 
-        <div class="conn-subhead">网络延迟与基准</div>
-        <div class="conn-row">
-          <span class="conn-name">平均 RTT</span>
-          <strong class="source-metric-val" id="side-net-latency">-- ms</strong>
-        </div>
-        <div class="conn-row" title="现货信号源延迟减去 Polymarket 交易所延迟；正值过大(&gt;100ms)说明信号落后于盘口">
-          <span class="conn-name">信号-交易所差</span>
-          <strong class="source-metric-val" id="side-net-sig-diff">--</strong>
-        </div>
-        <div class="conn-row" title="窗口中段 Brier Score (越小越准)：模型预测 P* vs 盘口市场价">
-          <span class="conn-name">Brier (模/市)</span>
-          <strong class="source-metric-val" id="side-brier-score">--</strong>
+        <!-- 手机端折叠时常驻的一行核心摘要（桌面端隐藏） -->
+        <div class="conn-mobile-strip" id="conn-mobile-strip" aria-label="手机端核心网络与准度摘要">
+          <span class="mob-chip">RTT <strong id="mob-net-rtt">--</strong></span>
+          <span class="mob-chip">信号差 <strong id="mob-net-diff">--</strong></span>
+          <span class="mob-chip">Brier <strong id="mob-brier-val">--</strong></span>
+          <span class="mob-chip">内存 <strong id="mob-sys-ram">--</strong></span>
         </div>
 
-        <div class="conn-subhead">服务器与存储</div>
-        <div class="conn-row">
-          <span class="conn-name">内存</span>
-          <strong class="source-metric-val" id="side-sys-ram">--</strong>
-        </div>
-        <div class="conn-row">
-          <span class="conn-name">磁盘</span>
-          <strong class="source-metric-val" id="side-sys-disk">--</strong>
-        </div>
-        <div class="conn-row conn-row-clickable" id="side-storage-row" title="点击查看数据占用与清理设置">
-          <span class="conn-name">数据</span>
-          <strong class="source-metric-val" id="side-sys-data">--</strong>
+        <div class="conn-body" id="conn-body">
+          <div class="conn-sources">
+            <div class="conn-row">
+              <span class="source-dot" id="dot-spot"></span>
+              <span class="conn-name">BTC 现货</span>
+              <strong class="source-metric-val source-chip" id="src-spot-val">--</strong>
+            </div>
+            <div class="conn-row">
+              <span class="source-dot" id="dot-book"></span>
+              <span class="conn-name">Poly 盘口</span>
+              <strong class="source-metric-val source-chip" id="src-book-val">--</strong>
+            </div>
+            <div class="conn-row">
+              <span class="source-dot" id="dot-trades"></span>
+              <span class="conn-name">Poly 成交</span>
+              <strong class="source-metric-val source-chip" id="src-trades-val">--</strong>
+            </div>
+            <div class="conn-row">
+              <span class="source-dot" id="dot-chainlink"></span>
+              <span class="conn-name">Chainlink</span>
+              <strong class="source-metric-val source-chip" id="src-chainlink-val">--</strong>
+            </div>
+          </div>
+
+          <div class="conn-subhead">网络延迟与准度基准</div>
+          <div class="conn-bench-grid">
+            <div class="conn-tile" title="4 条核心行情链路的平均往返延迟">
+              <span class="conn-tile-label">平均 RTT</span>
+              <strong class="source-metric-val conn-tile-val" id="side-net-latency">-- ms</strong>
+            </div>
+            <div class="conn-tile" title="现货信号源延迟减去 Polymarket 盘口延迟；绿色 <=30ms，黄色 >100ms">
+              <span class="conn-tile-label">信号-交易所差</span>
+              <strong class="source-metric-val conn-tile-val" id="side-net-sig-diff">--</strong>
+            </div>
+            <div class="conn-tile conn-tile-wide" title="窗口中段 Brier Score (越小越准)：左侧模型 P* vs 右侧盘口市价；模型更小变绿，明显更大变黄">
+              <span class="conn-tile-label">Brier 准度 (模型 / 盘口)</span>
+              <strong class="source-metric-val conn-tile-val" id="side-brier-score">--</strong>
+            </div>
+          </div>
+
+          <div class="conn-subhead">服务器与存储</div>
+          <div class="conn-sys-grid">
+            <div class="conn-sys-tile" title="宿主机物理内存占用率">
+              <span class="conn-tile-label">内存</span>
+              <strong class="source-metric-val conn-tile-val" id="side-sys-ram">--</strong>
+            </div>
+            <div class="conn-sys-tile" id="side-disk-tile" title="宿主机磁盘占用与剩余空间">
+              <span class="conn-tile-label">磁盘</span>
+              <strong class="source-metric-val conn-tile-val" id="side-sys-disk">--</strong>
+            </div>
+            <div class="conn-sys-tile conn-row-clickable" id="side-storage-row" title="点击查看数据占用明细与清理设置">
+              <span class="conn-tile-label">数据 ›</span>
+              <strong class="source-metric-val conn-tile-val" id="side-sys-data">--</strong>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -685,49 +711,51 @@
       </div>
       <div class="modal-body conn-guide-body">
         <div class="guide-section">
-          <h3 class="guide-section-title">一、顶部连接与右侧状态徽章含义</h3>
+          <h3 class="guide-section-title">一、顶部状态与 4 条实时行情源（绿 / 黄 / 红规则）</h3>
           <div class="guide-list">
             <div class="guide-item">
-              <span class="guide-tag tag-ok">服务在线</span>
-              <div class="guide-desc"><strong>浏览器 ↔ 本地看板正常</strong>：页面与本地 8900 Web 服务通信正常；若显示 <span class="guide-inline-bad">连接中断</span>，说明看板服务已停止。</div>
+              <span class="guide-tag tag-ok">绿色 · 正常</span>
+              <div class="guide-desc"><strong>4/4 正常 · 服务在线</strong>：BTC 现货（<code>BN</code>/<code>KR</code>/<code>CB</code>/<code>OKX</code>）、Poly 盘口、Poly 成交 3 条 WebSocket 与 Chainlink 预言机全部实时同步无滞后。</div>
             </div>
             <div class="guide-item">
-              <span class="guide-tag tag-ok">4 源正常</span>
-              <div class="guide-desc"><strong>全部数据流实时健康</strong>：交易管道运行中，且 Polymarket 盘口、WebSocket 成交、BTC 现货、Chainlink TWAP 均新鲜无阻断，系统可正常交易。</div>
+              <span class="guide-tag tag-warn">黄色 · 降级</span>
+              <div class="guide-desc"><strong>链路降级（HTTP 降级 / 滞后 &gt;10s）</strong>：某条 WS 断开或触发“防积压滞后护栏”正在重连，系统已自动由实时 HTTP REST 或稳态基差顶上，不中断监控。</div>
             </div>
             <div class="guide-item">
-              <span class="guide-tag tag-warn">TWAP 滞后</span>
-              <div class="guide-desc"><strong>Chainlink 60s TWAP 暂未更新（&gt;10s）</strong>：属外部预言机接口短时延迟，系统会自动切换至「实时现货 + 稳态基差」估算真实价格，无需人工干预。</div>
+              <span class="guide-tag tag-bad">红色 · 异常</span>
+              <div class="guide-desc"><strong>断流 / 空盘口 / 接口变更暂停</strong>：现货超过 <code>3s</code> 无更新、盘口为空或上游接口格式漂移；死人开关已自动撤单并禁止开新仓保护资金。</div>
             </div>
             <div class="guide-item">
-              <span class="guide-tag tag-bad">现货断流</span>
-              <div class="guide-desc"><strong>BTC 现货连续失败（&gt;3s）</strong>：Binance/OKX 均无法获取最新价格。死人开关已自动撤回所有在途挂单并禁止新开仓，请检查本机网络或代理节点。</div>
-            </div>
-            <div class="guide-item">
-              <span class="guide-tag tag-bad">风控告警</span>
-              <div class="guide-desc"><strong>触发账户保护</strong>：达到配置的日度回撤上限或连续亏损冷却阈值，系统已自动锁仓/暂停开新仓，防止连续逆风扩大亏损。</div>
-            </div>
-            <div class="guide-item">
-              <span class="guide-tag tag-muted">管道待机/离线</span>
-              <div class="guide-desc"><strong>后台交易管道未运行</strong>：仅看板服务开着，<code>live.json</code> 超过 10 秒未更新（不会下单或录行情）。执行 <code>python main.py start</code> 或 <code>run</code> 即可启动。</div>
+              <span class="guide-tag tag-muted">灰色 · 离线</span>
+              <div class="guide-desc"><strong>引擎离线 / 等待开盘</strong>：仅看板服务开着，后台交易管道未运行（<code>live.json</code> 超 10s 未更新）。运行 <code>python main.py start</code> 或 <code>run</code> 即可启动。</div>
             </div>
           </div>
         </div>
 
         <div class="guide-section">
-          <h3 class="guide-section-title">二、实时延迟与网络遥测指标</h3>
+          <h3 class="guide-section-title">二、网络延迟与准度基准（判断真 Alpha 的核心指标）</h3>
           <div class="guide-list">
             <div class="guide-item">
-              <span class="guide-metric">Polymarket 盘口</span>
-              <div class="guide-desc">拉取 Up / Down 订单簿的往返耗时（ms）。正常范围 <code>150 ~ 500 ms</code>；若持续超过 <code>1500 ms</code> 可能导致 300ms 延迟 IOC 吃单错失率上升。</div>
-            </div>
-            <div class="guide-item">
-              <span class="guide-metric">Chainlink 预言机</span>
-              <div class="guide-desc">拉取 BTC 现货与 Chainlink 官方结算参考价的延迟（ms）。注意本市场正式结算依据为 Chainlink 60 秒时间加权均价（TWAP）。</div>
-            </div>
-            <div class="guide-item">
               <span class="guide-metric">平均 RTT</span>
-              <div class="guide-desc">平均网络往返延迟（ms）。若海外云服务器持续高于 <code>400 ms</code>，可按实测值调高 <code>LATENCY_S</code> 让模拟盘延迟更贴近实盘。</div>
+              <div class="guide-desc">4 条行情链路的平均往返耗时（ms）。海外低延迟服务器通常在 <code>10 ~ 80 ms</code>；本机代理偏高属正常现象，策略会自动按实测 RTT 建模发单延迟。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-metric">信号-交易所差</span>
+              <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示信号领先或同步；<strong>黄色（&gt; +100ms）</strong>说明现货比盘口慢太多易接飞刀，建议跑 <code>python main.py probe</code> 并设 <code>PM_SPOT_WS_PROVIDER=auto</code> 切换低延迟现货源。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-metric">Brier (模型 / 盘口)</span>
+              <div class="guide-desc">固定中段（<code>tau ≤ 150s</code>）预测均方误差，<strong>越小越准</strong>（<code>0</code>=神准，<code>0.25</code>=瞎猜 50/50）。<strong>绿色</strong>代表模型预测打赢盘口市价（存在独立概率 Alpha）；<strong>黄色</strong>代表模型暂时弱于盘口（小样本有噪声，建议观察 ≥300 窗）。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="guide-section">
+          <h3 class="guide-section-title">三、服务器与存储监控</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-metric">内存 / 磁盘 / 数据</span>
+              <div class="guide-desc">实时展示宿主机物理内存、磁盘占用与 <code>data/</code> 体积。点击<strong>「数据 ›」</strong>可查看分目录占用并一键清理过期原始行情（<code>summary.jsonl</code> 账本永久保留）。</div>
             </div>
           </div>
         </div>

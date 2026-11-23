@@ -269,42 +269,103 @@ body {
   background: var(--surface-subtle);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 12px;
+  padding: 11px;
 }
 
 .conn-head {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.conn-head-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 .conn-head .status-pill {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 11.5px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .conn-head .telemetry-badge {
-  font-size: 11px;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.conn-head-mobile-actions {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.conn-mobile-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong, var(--border));
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.conn-mobile-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.conn-chevron {
+  transition: transform 0.2s ease;
+}
+
+.conn-card.is-mobile-open .conn-chevron {
+  transform: rotate(180deg);
+}
+
+.conn-mobile-strip {
+  display: none;
+}
+
+.conn-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .conn-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 2px;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 2px;
+  font-size: 11.5px;
+  min-width: 0;
 }
 
 .conn-subhead {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   color: var(--caption);
-  margin-top: 12px;
-  padding: 8px 2px 2px;
+  margin-top: 10px;
+  margin-bottom: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
 }
 
 .conn-name {
@@ -312,6 +373,95 @@ body {
   min-width: 0;
   color: var(--label);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-chip {
+  font-size: 10.5px;
+  line-height: 1.25;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.source-chip.is-ok {
+  color: var(--up);
+  background: var(--up-soft);
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.source-chip.is-warn {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.30);
+}
+
+.source-chip.is-bad {
+  color: var(--down);
+  background: var(--down-soft);
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.conn-bench-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.conn-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+
+.conn-tile-wide {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.conn-tile-label {
+  font-size: 10.5px;
+  color: var(--caption);
+  white-space: nowrap;
+}
+
+.conn-tile-val {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.conn-sys-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.conn-sys-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 7px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+
+.conn-sys-tile .conn-tile-val {
+  font-size: 11.5px;
 }
 
 .topbar-page-title {
@@ -688,8 +838,10 @@ body {
   font-weight: 600;
   color: var(--ink-secondary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
+.source-metric-val.is-ok { color: var(--up); }
 .source-metric-val.is-warn { color: #d97706; }
 .source-metric-val.is-bad { color: var(--down); }
 
@@ -3365,21 +3517,70 @@ body {
     display: none;
   }
   .sidebar-connections {
-    margin-left: auto;
+    flex: 1 1 100%;
+    margin-left: 0;
     padding: 0;
   }
   .conn-card {
-    background: transparent;
-    border: 0;
-    padding: 0;
+    background: var(--surface-subtle);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px 10px;
   }
   .conn-head {
-    margin-bottom: 0;
+    margin-bottom: 6px;
     flex-wrap: nowrap;
+    cursor: pointer;
   }
-  .conn-row,
-  .conn-subhead {
+  .conn-head-mobile-actions {
+    display: inline-flex;
+  }
+  .conn-mobile-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border);
+    font-size: 11px;
+    color: var(--caption);
+  }
+  .conn-card.is-mobile-open .conn-mobile-strip {
     display: none;
+  }
+  .mob-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .mob-chip strong {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--ink-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .mob-chip strong.is-ok { color: var(--up); }
+  .mob-chip strong.is-warn { color: #d97706; }
+  .mob-chip strong.is-bad { color: var(--down); }
+  .conn-body {
+    display: none;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+  .conn-card.is-mobile-open .conn-body {
+    display: block;
+  }
+  .conn-sources {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 10px;
+  }
+  .conn-row {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 8px;
   }
   .sidebar-nav {
     flex-direction: row;
@@ -3467,8 +3668,8 @@ body {
     font-size: 12.5px;
     gap: 6px;
   }
-  .conn-head .telemetry-badge {
-    display: none;
+  .conn-sources {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

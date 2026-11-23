@@ -459,24 +459,37 @@ function updateNetworkTelemetry(live) {
   const rttMs = realRtts.length > 0 ? realRtts.reduce((a, b) => a + b, 0) / realRtts.length : 0;
 
   if (kbpsEl) kbpsEl.textContent = `${Number(rxKbps || 0).toFixed(1)} KB/s`;
+  const rttText = rttMs ? `${Math.round(rttMs)}ms` : "--";
   if (latEl) latEl.textContent = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
+  const mobRttEl = $("mob-net-rtt");
+  if (mobRttEl) mobRttEl.textContent = rttText;
   if (totalEl) totalEl.textContent = `${Number(net.total_mb || 0).toFixed(2)} MB`;
 
   const sigDiffEl = $("side-net-sig-diff");
-  if (sigDiffEl) {
+  const mobDiffEl = $("mob-net-diff");
+  {
     const rawDiff = net.signal_minus_venue_ms;
     const sigDiff = (rawDiff !== null && rawDiff !== undefined)
       ? Number(rawDiff)
       : (binMs > 0 && polyMs > 0 ? (binMs - polyMs) : null);
-    if (sigDiff !== null && Number.isFinite(sigDiff)) {
-      sigDiffEl.textContent = `${sigDiff >= 0 ? "+" : ""}${Math.round(sigDiff)} ms`;
-      sigDiffEl.className = `source-metric-val ${sigDiff > 100 ? "is-warn" : ""}`;
-      sigDiffEl.title = sigDiff > 100
-        ? `现货源 (${net.spot_provider || "binance"}) 比 Polymarket 慢 ${Math.round(sigDiff)}ms，建议测速换更近现货源`
-        : `现货源 (${net.spot_provider || "binance"}) 与 Polymarket 延迟差正常`;
-    } else {
-      sigDiffEl.textContent = "--";
-      sigDiffEl.className = "source-metric-val";
+    const diffText = (sigDiff !== null && Number.isFinite(sigDiff))
+      ? `${sigDiff >= 0 ? "+" : ""}${Math.round(sigDiff)}ms`
+      : "--";
+    const diffCls = (sigDiff !== null && Number.isFinite(sigDiff))
+      ? (sigDiff > 100 ? "is-warn" : sigDiff <= 30 ? "is-ok" : "")
+      : "";
+    if (sigDiffEl) {
+      sigDiffEl.textContent = diffText;
+      sigDiffEl.className = `source-metric-val conn-tile-val ${diffCls}`;
+      sigDiffEl.title = (sigDiff !== null && Number.isFinite(sigDiff))
+        ? (sigDiff > 100
+          ? `现货源 (${net.spot_provider || "binance"}) 比 Polymarket 慢 ${Math.round(sigDiff)}ms，建议测速换更近现货源`
+          : `现货源 (${net.spot_provider || "binance"}) 与 Polymarket 延迟差 ${diffText}`)
+        : "";
+    }
+    if (mobDiffEl) {
+      mobDiffEl.textContent = diffText;
+      mobDiffEl.className = diffCls;
     }
   }
 
@@ -499,10 +512,11 @@ function updateNetworkTelemetry(live) {
   const setSourceState = (dotId, valId, state, text, title = "") => {
     const dot = $(dotId);
     const val = $(valId);
-    if (dot) dot.className = `source-dot ${state === "ok" ? "is-ok" : state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : ""}`;
+    const stateCls = state === "ok" ? "is-ok" : state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : "";
+    if (dot) dot.className = `source-dot ${stateCls}`;
     if (val) {
       val.textContent = text;
-      val.className = `source-metric-val ${state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : ""}`;
+      val.className = `source-metric-val source-chip ${stateCls}`;
       if (title) val.title = title;
     }
   };
@@ -516,6 +530,8 @@ function updateNetworkTelemetry(live) {
     else badCount += 1;
   };
 
+  const spotShortMap = { binance: "BN", kraken: "KR", coinbase: "CB", okx: "OKX" };
+
   if (isIdle) {
     setSourceState("dot-spot", "src-spot-val", "bad", "离线");
     setSourceState("dot-book", "src-book-val", "bad", "离线");
@@ -528,12 +544,25 @@ function updateNetworkTelemetry(live) {
       setSourceState("dot-spot", "src-spot-val", "bad", "断流", "现货行情超时 >3s");
     } else if (spotWsOk && spotSrc.endsWith("_ws")) {
       tally("ok");
-      const provTag = String(net.spot_provider || spotSrc.replace("_ws", "")).toUpperCase();
-      setSourceState("dot-spot", "src-spot-val", "ok", binMs > 0 ? `${provTag} ${Math.round(binMs)}ms` : `${provTag} WS`, `${provTag} WebSocket 实时推送`);
+      const rawProv = String(net.spot_provider || spotSrc.replace("_ws", "")).toLowerCase();
+      const shortTag = spotShortMap[rawProv] || rawProv.slice(0, 3).toUpperCase();
+      setSourceState(
+        "dot-spot",
+        "src-spot-val",
+        "ok",
+        binMs > 0 ? `${shortTag} ${Math.round(binMs)}ms` : `${shortTag} WS`,
+        `${rawProv.toUpperCase()} WebSocket 实时推送`
+      );
     } else {
       tally("warn");
-      const fallbackTag = spotSrc === "okx" ? "OKX 降级" : "HTTP 降级";
-      setSourceState("dot-spot", "src-spot-val", "warn", binMs > 0 ? `${fallbackTag} ${Math.round(binMs)}ms` : fallbackTag, `现货 WS 断开，当前降级源: ${spotSrc || "REST"}`);
+      const fallbackTag = spotSrc === "okx" ? "OKX" : "HTTP";
+      setSourceState(
+        "dot-spot",
+        "src-spot-val",
+        "warn",
+        binMs > 0 ? `${fallbackTag} ${Math.round(binMs)}ms` : `${fallbackTag} 降级`,
+        `现货 WS 断开，当前降级源: ${spotSrc || "REST"}`
+      );
     }
 
     // 2. Polymarket CLOB Book Source
@@ -545,7 +574,7 @@ function updateNetworkTelemetry(live) {
       setSourceState("dot-book", "src-book-val", "ok", polyMs > 0 ? `WS ${Math.round(polyMs)}ms` : "WS 正常", "Polymarket CLOB WebSocket 实时增量");
     } else {
       tally("warn");
-      setSourceState("dot-book", "src-book-val", "warn", polyMs > 0 ? `HTTP ${Math.round(polyMs)}ms` : "HTTP 降级", "盘口 WS 断开，降级为 HTTP 轮询");
+      setSourceState("dot-book", "src-book-val", "warn", polyMs > 0 ? `HTTP ${Math.round(polyMs)}ms` : "HTTP 降级", "盘口 WS 断开或重连中，当前由实时 HTTP 顶上");
     }
 
     // 3. Polymarket Trade Prints WS Source
@@ -564,7 +593,7 @@ function updateNetworkTelemetry(live) {
       setSourceState("dot-chainlink", "src-chainlink-val", "warn", ageLbl, "Chainlink 60s TWAP 超过 10s 未更新，使用现货+基差估算");
     } else {
       tally("ok");
-      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clMs > 0 ? `${Math.round(clMs)} ms` : "实时同步", "Polymarket 官方 Chainlink 60s TWAP");
+      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clMs > 0 ? `${Math.round(clMs)}ms` : "实时", "Polymarket 官方 Chainlink 60s TWAP");
     }
   }
 
@@ -781,19 +810,34 @@ function updateOverview(live, hist) {
   if (settledBadge) settledBadge.textContent = `${totalRounds} 场已结算`;
 
   const brierEl = $("side-brier-score");
-  if (brierEl) {
+  const mobBrierEl = $("mob-brier-val");
+  {
     const bCnt = Number(hist.brier_count || 0);
     const bMod = hist.brier_model;
     const bMkt = hist.brier_market;
     if (bCnt > 0 && bMod !== null && bMod !== undefined && bMkt !== null && bMkt !== undefined) {
       const mVal = Number(bMod);
       const kVal = Number(bMkt);
-      brierEl.textContent = `${mVal.toFixed(3)} / ${kVal.toFixed(3)}`;
-      brierEl.className = `source-metric-val ${mVal > kVal + 0.002 ? "is-warn" : ""}`;
-      brierEl.title = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
+      const bText = `${mVal.toFixed(3)} / ${kVal.toFixed(3)}`;
+      const bCls = mVal < kVal - 0.001 ? "is-ok" : mVal > kVal + 0.002 ? "is-warn" : "";
+      if (brierEl) {
+        brierEl.textContent = bText;
+        brierEl.className = `source-metric-val conn-tile-val ${bCls}`;
+        brierEl.title = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
+      }
+      if (mobBrierEl) {
+        mobBrierEl.textContent = bText;
+        mobBrierEl.className = bCls;
+      }
     } else {
-      brierEl.textContent = "--";
-      brierEl.className = "source-metric-val";
+      if (brierEl) {
+        brierEl.textContent = "--";
+        brierEl.className = "source-metric-val conn-tile-val";
+      }
+      if (mobBrierEl) {
+        mobBrierEl.textContent = "--";
+        mobBrierEl.className = "";
+      }
     }
   }
 
@@ -3895,18 +3939,30 @@ function updateSystemStatusWidgets(sys, live) {
   const st = sys.storage || {};
   const gd = sys.disk_guard || {};
 
+  const ramText = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined
+    ? `${sys.mem_used_pct}%`
+    : "--";
+  const ramCls = Number(sys.mem_used_pct || 0) >= 85 ? "is-bad" : Number(sys.mem_used_pct || 0) >= 70 ? "is-warn" : "";
   if ($("side-sys-ram")) {
-    $("side-sys-ram").textContent = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined
-      ? `${sys.mem_used_pct}%`
-      : "--";
+    $("side-sys-ram").textContent = ramText;
+    $("side-sys-ram").className = `source-metric-val conn-tile-val ${ramCls}`;
+  }
+  if ($("mob-sys-ram")) {
+    $("mob-sys-ram").textContent = ramText;
+    $("mob-sys-ram").className = ramCls;
   }
   if ($("side-sys-disk")) {
-    $("side-sys-disk").textContent = sys.disk_used_pct !== null && sys.disk_used_pct !== undefined
-      ? `${sys.disk_used_pct}% · 剩${sys.disk_free_gb}G`
-      : "--";
+    const diskPct = sys.disk_used_pct !== null && sys.disk_used_pct !== undefined ? `${sys.disk_used_pct}%` : "--";
+    const diskCls = Number(sys.disk_used_pct || 0) >= 88 ? "is-bad" : Number(sys.disk_used_pct || 0) >= 75 ? "is-warn" : "";
+    $("side-sys-disk").textContent = diskPct;
+    $("side-sys-disk").className = `source-metric-val conn-tile-val ${diskCls}`;
+    const diskTile = $("side-disk-tile");
+    if (diskTile && sys.disk_free_gb !== null && sys.disk_free_gb !== undefined) {
+      diskTile.title = `磁盘已用 ${diskPct} · 剩余 ${sys.disk_free_gb} GB`;
+    }
   }
   if ($("side-sys-data")) {
-    $("side-sys-data").textContent = `${Number(st.total_mb || 0).toFixed(0)} MB ›`;
+    $("side-sys-data").textContent = `${Number(st.total_mb || 0).toFixed(0)}MB`;
   }
 
   const dot = $("sh-dot");
@@ -4167,14 +4223,43 @@ function initInteractions() {
   }
 
   const connHelpBtn = $("conn-help-btn");
+  const connHelpBtnMobile = $("conn-help-btn-mobile");
   const connGuideModal = $("conn-guide-modal");
   const connGuideClose = $("conn-guide-close-btn");
+  const openConnGuide = (e) => {
+    if (e) e.stopPropagation();
+    if (connGuideModal) connGuideModal.hidden = false;
+  };
   const closeConnGuide = () => {
     if (connGuideModal) connGuideModal.hidden = true;
   };
   if (connHelpBtn && connGuideModal) {
-    connHelpBtn.addEventListener("click", () => {
-      connGuideModal.hidden = false;
+    connHelpBtn.addEventListener("click", openConnGuide);
+  }
+  if (connHelpBtnMobile && connGuideModal) {
+    connHelpBtnMobile.addEventListener("click", openConnGuide);
+  }
+  const connCard = $("conn-card");
+  const connHead = $("conn-head");
+  const connMobileToggle = $("conn-mobile-toggle");
+  const connMobileToggleLabel = $("conn-mobile-toggle-label");
+  const toggleMobileConn = () => {
+    if (!connCard) return;
+    const isOpen = connCard.classList.toggle("is-mobile-open");
+    if (connMobileToggle) connMobileToggle.setAttribute("aria-expanded", String(isOpen));
+    if (connMobileToggleLabel) connMobileToggleLabel.textContent = isOpen ? "收起" : "详情";
+  };
+  if (connMobileToggle) {
+    connMobileToggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMobileConn();
+    });
+  }
+  if (connHead) {
+    connHead.addEventListener("click", () => {
+      if (window.matchMedia && window.matchMedia("(max-width: 960px)").matches) {
+        toggleMobileConn();
+      }
     });
   }
   if (connGuideClose) {
