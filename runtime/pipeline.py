@@ -670,17 +670,25 @@ class PipelineDriver:
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
 
-                    # 盘口 WS 积压滞后防呆护栏：用独立逐笔成交流实时成交价交叉校验 WS 盘口，
-                    # 一旦真实成交价已甩开 WS 盘口 >= $0.05，立刻作废积压缓存并拉取实时 HTTP 盘口。
+                    # 盘口 WS 积压滞后防呆护栏：仅当最新逐笔成交（<=1.2s）在时间上晚于/齐平于盘口更新时间，
+                    # 且实时成交价甩开 WS 盘口 >= $0.06 时，才判定积压并重连，彻底杜绝用老成交价误杀低延迟正常 WS。
                     book_diverged = False
                     for tok_key, bk_obj in (("token_up", b_up), ("token_down", b_dn)):
                         tok_id = active_tokens.get(tok_key)
                         if not tok_id or bk_obj.best_bid is None or bk_obj.best_ask is None:
                             continue
-                        tp_live = self.trade_stream.get_latest_price(tok_id, max_age_s=3.0, now=loop_start)
-                        if tp_live is not None and (tp_live > bk_obj.best_ask + 0.05 or tp_live < bk_obj.best_bid - 0.05):
-                            self.book_ws.invalidate_on_trade_divergence(tok_id, tp_live, max_gap=0.05)
-                            book_diverged = True
+                        tr_info = self.trade_stream.get_latest_trade(tok_id, max_age_s=1.2, now=loop_start)
+                        if tr_info is None:
+                            continue
+                        tp_live, tp_recv_t = tr_info
+                        if bk_obj.source_t > tp_recv_t + 0.15:
+                            continue
+                        if tp_live > bk_obj.best_ask + 0.06 or tp_live < bk_obj.best_bid - 0.06:
+                            if self.book_ws.invalidate_on_trade_divergence(
+                                tok_id, tp_live, max_gap=0.06, trade_recv_t=tp_recv_t
+                            ):
+                                self.trade_stream.clear_latest_price(tok_id)
+                                book_diverged = True
                     if book_diverged:
                         f_u = self.feed._executor.submit(
                             self.feed.fetch_order_book, active_tokens["token_up"], "Up", True, 1

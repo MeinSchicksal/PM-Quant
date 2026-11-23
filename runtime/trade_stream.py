@@ -81,8 +81,10 @@ class TradeStreamClient:
         self._dropped_unattributed = 0
         self._latest_price_by_token: Dict[str, tuple] = {}
 
-    def get_latest_price(self, token_id: str, max_age_s: float = 3.0, now: Optional[float] = None) -> Optional[float]:
-        """返回指定 Token 最近 max_age_s 秒内的真实逐笔成交价，供盘口 WS 滞后交叉校验。"""
+    def get_latest_trade(
+        self, token_id: str, max_age_s: float = 1.2, now: Optional[float] = None
+    ) -> Optional[tuple]:
+        """返回指定 Token 最近 max_age_s 秒内的 (最新成交价, 本地接收时间戳)，供盘口 WS 因果交叉校验。"""
         t = time.time() if now is None else float(now)
         with self._lock:
             rec = self._latest_price_by_token.get(str(token_id))
@@ -91,7 +93,17 @@ class TradeStreamClient:
             px, recv_t = rec
             if (t - recv_t) > max_age_s or px <= 0.0:
                 return None
-            return float(px)
+            return (float(px), float(recv_t))
+
+    def clear_latest_price(self, token_id: str):
+        """清除已消费的背离成交缓存，防止重连后被同一笔旧成交重复触发误杀。"""
+        with self._lock:
+            self._latest_price_by_token.pop(str(token_id), None)
+
+    def get_latest_price(self, token_id: str, max_age_s: float = 3.0, now: Optional[float] = None) -> Optional[float]:
+        """返回指定 Token 最近 max_age_s 秒内的真实逐笔成交价，供盘口 WS 滞后交叉校验。"""
+        rec = self.get_latest_trade(token_id, max_age_s=max_age_s, now=now)
+        return rec[0] if rec is not None else None
 
     def set_active_targets(self, slugs: List[str], token_ids: List[str] = None):
         """Update active slugs and token IDs to filter incoming trades."""

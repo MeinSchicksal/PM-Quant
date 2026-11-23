@@ -459,7 +459,7 @@ class PolymarketBookWSClient:
         self._last_pong_t: float = 0.0
         self._min_srv_delta_s: Optional[float] = None
         self.last_msg_lag_s: float = 0.0
-        self.max_msg_lag_s: float = 3.5
+        self.max_msg_lag_s: float = 5.0
         self.rtt_ms: float = 0.0
         self.msg_count: int = 0
         self.reconnect_count: int = 0
@@ -479,20 +479,26 @@ class PolymarketBookWSClient:
             self._min_srv_delta_s = None
             self.last_msg_lag_s = 0.0
 
-    def _is_server_msg_lagged_locked(self, msg: Dict[str, Any], recv_ts: float) -> bool:
-        """基于服务端时间戳相对基线漂移检测 TCP/代理积压旧帧（免疫本机固定时钟偏移）。"""
+    def _update_srv_delta_baseline_locked(self, msg: Dict[str, Any], recv_ts: float) -> Optional[float]:
+        """更新服务端时间戳相对基线，返回当前帧相对基线的滞后秒数（不触发重连）。"""
         raw_ts = msg.get("timestamp")
         if raw_ts is None:
-            return False
+            return None
         srv_t = _safe_float(raw_ts, 0.0)
         if srv_t > 1e11:
             srv_t /= 1000.0
         if not (1_600_000_000.0 < srv_t < 4_000_000_000.0):
-            return False
+            return None
         delta = recv_ts - srv_t
         if self._min_srv_delta_s is None or delta < self._min_srv_delta_s:
             self._min_srv_delta_s = delta
-        lag = max(0.0, delta - self._min_srv_delta_s)
+        return max(0.0, delta - self._min_srv_delta_s)
+
+    def _is_server_msg_lagged_locked(self, msg: Dict[str, Any], recv_ts: float) -> bool:
+        """基于服务端时间戳相对基线漂移检测实时增量帧的 TCP/代理积压（免疫本机时钟偏移与静态快照）。"""
+        lag = self._update_srv_delta_baseline_locked(msg, recv_ts)
+        if lag is None:
+            return False
         self.last_msg_lag_s = round(lag, 2)
         if lag > self.max_msg_lag_s:
             for st in self._books.values():
@@ -505,14 +511,21 @@ class PolymarketBookWSClient:
         self,
         token_id: str,
         trade_price: float,
-        max_gap: float = 0.05,
+        max_gap: float = 0.06,
+        trade_recv_t: Optional[float] = None,
     ) -> bool:
-        """若独立逐笔成交流的实时成交价已甩开盘口 WS >= max_gap，判定 WS 积压滞后并强制重连。"""
+        """若独立逐笔成交流的实时成交价已甩开盘口 WS >= max_gap，判定 WS 积压滞后并强制重连。
+
+        因果防误杀：若提供 `trade_recv_t` 且盘口 WS 已在成交之后更新过（`st["t"] > trade_recv_t + 0.15`），
+        说明是盘口比老成交更新，绝不误杀正常低延迟 WS。
+        """
         if not (0.0 < trade_price < 1.0):
             return False
         with self._lock:
             st = self._books.get(str(token_id))
             if not st or not st.get("ready") or not st.get("bids") or not st.get("asks"):
+                return False
+            if trade_recv_t is not None and float(st.get("t", 0.0)) > float(trade_recv_t) + 0.15:
                 return False
             best_bid = max(st["bids"])
             best_ask = min(st["asks"])
@@ -659,8 +672,8 @@ class PolymarketBookWSClient:
             ltp = msg.get("last_trade_price")
             ltp_f = _safe_float(ltp, -1.0) if ltp is not None else -1.0
             with self._lock:
-                if self._is_server_msg_lagged_locked(msg, ts):
-                    return False
+                # 初始 book 快照的 timestamp 可能是该安静盘口上次变动时间，只用于校准基线、绝不触发滞后自杀重连
+                self._update_srv_delta_baseline_locked(msg, ts)
                 self._books[aid] = {
                     "bids": bids,
                     "asks": asks,

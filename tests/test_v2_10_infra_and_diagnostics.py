@@ -345,6 +345,41 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
         self.assertFalse(ok_lag)
         self.assertGreater(ws._token_gen, gen_before_lag)
 
+        # 3. 静态初始 book 快照带 12 秒前旧 timestamp（安静/新预热盘口常见）不得误杀自杀重连
+        ws2 = PolymarketBookWSClient()
+        ws2.connected = True
+        ws2._active_tokens = ("tok_up", "tok_quiet")
+        ws2.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_up",
+            "timestamp": str(int(srv_t0 * 1000)),
+            "bids": [{"price": "0.55", "size": "100"}],
+            "asks": [{"price": "0.56", "size": "100"}],
+        }, now=srv_t0)
+        gen_quiet_before = ws2._token_gen
+        ok_quiet = ws2.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_quiet",
+            "timestamp": str(int((srv_t0 - 12.0) * 1000)),
+            "bids": [{"price": "0.01", "size": "500"}],
+            "asks": [{"price": "0.99", "size": "500"}],
+        }, now=srv_t0 + 1.0)
+        self.assertTrue(ok_quiet)
+        self.assertEqual(ws2._token_gen, gen_quiet_before)
+
+        # 4. 盘口已先于老成交价更新（st["t"] > trade_recv_t + 0.15）时，不得用老成交价误杀正常 WS
+        ws2.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_up",
+            "timestamp": str(int((srv_t0 + 2.0) * 1000)),
+            "bids": [{"price": "0.64", "size": "100"}],
+            "asks": [{"price": "0.65", "size": "100"}],
+        }, now=srv_t0 + 2.0)
+        self.assertFalse(
+            ws2.invalidate_on_trade_divergence("tok_up", 0.55, max_gap=0.06, trade_recv_t=srv_t0 + 0.5)
+        )
+        self.assertEqual(ws2._token_gen, gen_quiet_before)
+
     def test_post_only_arrival_reject_runs_before_trade_prints_and_clock_offset_aligns(self):
         """刚到站且已穿盘的 Post-Only Maker 挂单不得被逐笔成交打印绕过拒单白捡免费成交。"""
         tmp = tempfile.mkdtemp(prefix="pm_po_guard_")
