@@ -210,7 +210,7 @@ class TradeStreamClient:
                         "action": "subscribe",
                         "subscriptions": [{"topic": "activity", "type": "trades"}]
                     }
-                    await ws.send(json.dumps(sub_msg))
+                    await asyncio.wait_for(ws.send(json.dumps(sub_msg)), timeout=5.0)
                     ping_task = asyncio.create_task(
                         _ws_ping_rtt_loop(ws, lambda ms: setattr(self, "rtt_ms", ms), interval_s=5.0)
                     )

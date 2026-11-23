@@ -104,8 +104,8 @@ PARAMS = {
     "FLIP_MAX_SPREAD": 0.12,
     "FLIP_MIN_MAKER_EDGE": 0.045,
     "FLIP_MIN_TAKER_EDGE": 0.040,
-    "ALLOW_TAKER_UNWIND": True,       # Only extreme tail defensive salvage is allowed
-    "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry when P* < 0.12
+    "ALLOW_TAKER_UNWIND": False,      # 严格禁止任何卖出，买入后一律持有至到期结算
+    "DEFENSIVE_SALVAGE_ENABLE": False,# 关闭尾盘残值卖出，严守买入即持有至结算原则
     "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
     "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,
     "DEFENSIVE_SALVAGE_MAX_BID": 0.15,# Only sell into real bids in [$0.06, $0.15]

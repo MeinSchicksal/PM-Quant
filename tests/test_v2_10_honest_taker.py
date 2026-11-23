@@ -39,6 +39,8 @@ class TestV210ExperimentalIntegrityAndDiagnostics(unittest.TestCase):
         self.assertTrue(config.PARAMS["ENABLE_PYRAMID_ADD"])
         self.assertTrue(config.PARAMS["ENABLE_REVERSAL_FLIP"])
         self.assertFalse(config.PARAMS["ENABLE_BLACKSWAN_LOCK"])
+        self.assertFalse(config.PARAMS["ALLOW_TAKER_UNWIND"])
+        self.assertFalse(config.PARAMS["DEFENSIVE_SALVAGE_ENABLE"])
         self.assertFalse(config.PARAMS["ENABLE_CIRCUIT_BREAKER"])
         self.assertAlmostEqual(config.PARAMS["ENTRY_MAX_PRICE"], 0.80, places=4)
         self.assertAlmostEqual(config.PARAMS["ENTRY_MIN_PROB"], 0.52, places=4)

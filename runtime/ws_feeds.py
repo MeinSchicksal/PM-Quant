@@ -364,7 +364,7 @@ class BinanceSpotWSClient:
                     self.connected = True
                     connected_at = time.monotonic()
                     if sub_msg is not None:
-                        await ws.send(json.dumps(sub_msg))
+                        await asyncio.wait_for(ws.send(json.dumps(sub_msg)), timeout=5.0)
                     def _on_rtt(ms: float):
                         self.rtt_ms = ms
                         with self._lock:
@@ -880,7 +880,10 @@ class PolymarketBookWSClient:
                     with self._lock:
                         for aid in tokens:
                             self._token_sub_t[aid] = conn_wall
-                    await ws.send(json.dumps({"assets_ids": list(tokens), "type": "market"}))
+                    await asyncio.wait_for(
+                        ws.send(json.dumps({"assets_ids": list(tokens), "type": "market"})),
+                        timeout=5.0,
+                    )
                     def _on_rtt(ms: float):
                         self.rtt_ms = ms
                         with self._lock:
@@ -932,12 +935,24 @@ class PolymarketBookWSClient:
                                 consec_fails = 0
                                 break
                             if rem_tokens:
-                                await ws.send(json.dumps({"assets_ids": rem_tokens, "operation": "unsubscribe"}))
+                                await asyncio.wait_for(
+                                    ws.send(json.dumps({"assets_ids": rem_tokens, "operation": "unsubscribe"})),
+                                    timeout=5.0,
+                                )
                             if add_tokens:
-                                await ws.send(json.dumps({"assets_ids": add_tokens, "operation": "subscribe"}))
+                                await asyncio.wait_for(
+                                    ws.send(json.dumps({"assets_ids": add_tokens, "operation": "subscribe"})),
+                                    timeout=5.0,
+                                )
                             if resub_tokens:
-                                await ws.send(json.dumps({"assets_ids": resub_tokens, "operation": "unsubscribe"}))
-                                await ws.send(json.dumps({"assets_ids": resub_tokens, "operation": "subscribe"}))
+                                await asyncio.wait_for(
+                                    ws.send(json.dumps({"assets_ids": resub_tokens, "operation": "unsubscribe"})),
+                                    timeout=5.0,
+                                )
+                                await asyncio.wait_for(
+                                    ws.send(json.dumps({"assets_ids": resub_tokens, "operation": "subscribe"})),
+                                    timeout=5.0,
+                                )
 
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)

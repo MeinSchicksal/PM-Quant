@@ -737,14 +737,18 @@ class PaperRunner:
 
             post_up, post_dn = book_up, book_down
             if reject_reason is None and delayed_book_fetcher is not None:
-                fetched = delayed_book_fetcher(action.side)
-                if isinstance(fetched, tuple) and len(fetched) == 2:
-                    post_up, post_dn = fetched
-                elif fetched is not None:
-                    if action.side == "Up":
-                        post_up = fetched
-                    else:
-                        post_dn = fetched
+                try:
+                    fetched = delayed_book_fetcher(action.side)
+                    if isinstance(fetched, tuple) and len(fetched) == 2:
+                        post_up, post_dn = fetched
+                    elif fetched is not None:
+                        if action.side == "Up":
+                            post_up = fetched
+                        else:
+                            post_dn = fetched
+                except Exception as exc:
+                    post_up, post_dn = None, None
+                    reject_reason = f"延迟拉取盘口异常({type(exc).__name__})，IOC 放弃成交"
             post_book = post_up if action.side == "Up" else post_dn
 
             if reject_reason is not None:

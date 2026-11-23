@@ -386,6 +386,34 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_pending_taker_fetcher_exception_never_wedges_trading(self):
+        """在途 Taker 到站拉盘口抛异常时，必须干净拒单并出队，绝不能永久阻塞后续交易。"""
+        tmp = tempfile.mkdtemp(prefix="pm_pt_exc_")
+        try:
+            runner = PaperRunner(ledger_dir=tmp)
+            t0 = 1800000000.0
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0)
+            sp = SpotState(timestamp=t0 + 60.0, price=65080.0, open_price=65000.0, realized_vol_bps=14.0)
+            dec = Decision(action="taker_buy", side="Up", price=0.52, size=5.0, limit_price=0.54, reason="test")
+
+            def _boom(_side):
+                raise RuntimeError("simulated proxy hang")
+
+            with patch.object(runner, "_effective_wire_latency", return_value=0.20), \
+                 patch("runtime.runner.plan_decision", return_value=dec):
+                runner.step(t0 + 60.0, sp, _book(0.51, 0.52, t=t0 + 60.0), _book(0.47, 0.49, t=t0 + 60.0),
+                            delayed_book_fetcher=_boom, async_taker_delay=True)
+            self.assertEqual(len(runner.pending_takers), 1)
+
+            # 到站 tick 触发 _boom 异常：不得崩溃，且 pending_takers 必须清空并记入 taker_reject
+            with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="w")):
+                runner.step(t0 + 60.25, sp, _book(0.51, 0.52, t=t0 + 60.25), _book(0.47, 0.49, t=t0 + 60.25),
+                            delayed_book_fetcher=_boom, async_taker_delay=True)
+            self.assertEqual(len(runner.pending_takers), 0)
+            self.assertTrue(any(a.get("action") == "taker_reject" and "异常" in (a.get("reason") or "") for a in runner.actions))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -682,24 +682,43 @@ class PipelineDriver:
                             self.book_ws.invalidate_on_trade_divergence(tok_id, tp_live, max_gap=0.05)
                             book_diverged = True
                     if book_diverged:
-                        f_u = self.feed._executor.submit(self.feed.fetch_order_book, active_tokens["token_up"], "Up")
-                        f_d = self.feed._executor.submit(self.feed.fetch_order_book, active_tokens["token_down"], "Down")
-                        b_up = f_u.result()
-                        b_dn = f_d.result()
+                        f_u = self.feed._executor.submit(
+                            self.feed.fetch_order_book, active_tokens["token_up"], "Up", True, 1
+                        )
+                        f_d = self.feed._executor.submit(
+                            self.feed.fetch_order_book, active_tokens["token_down"], "Down", True, 1
+                        )
+                        try:
+                            b_up = f_u.result(timeout=2.2)
+                        except Exception:
+                            pass
+                        try:
+                            b_dn = f_d.result(timeout=2.2)
+                        except Exception:
+                            pass
 
                     def _delayed_book(_side_name: str):
-                        # Taker IOC 延迟到站核验优先直连实时 HTTP REST 盘口，彻底杜绝读到代理/TCP 积压旧 WS 帧
+                        # Taker IOC 延迟到站核验优先并发直连实时 HTTP REST 盘口（线程独立 Session + 单次快失败），
+                        # 彻底杜绝读到代理/TCP 积压旧 WS 帧或阻塞主循环。
                         def _one(tok_key: str, label: str):
                             tok = active_tokens.get(tok_key)
                             if not tok:
                                 return None
-                            rest_bk = self.feed.fetch_order_book(tok, label)
+                            rest_bk = self.feed.fetch_order_book(tok, label, use_worker_session=True, max_attempts=1)
                             if rest_bk is not None and (rest_bk.best_bid is not None or rest_bk.best_ask is not None):
                                 return rest_bk
                             return self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
                         f_du = self.feed._executor.submit(_one, "token_up", "Up")
                         f_dd = self.feed._executor.submit(_one, "token_down", "Down")
-                        return (f_du.result(), f_dd.result())
+                        try:
+                            r_u = f_du.result(timeout=2.2)
+                        except Exception:
+                            r_u = None
+                        try:
+                            r_d = f_dd.result(timeout=2.2)
+                        except Exception:
+                            r_d = None
+                        return (r_u, r_d)
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)

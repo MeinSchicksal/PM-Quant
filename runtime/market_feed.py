@@ -978,9 +978,18 @@ class MarketFeed:
                 return None, 0.0, 0, None
         return None, 0.0, 0, None
 
-    def fetch_order_book(self, token_id: str, outcome_name: str = "token") -> OrderBook:
-        """Fetch Polymarket CLOB order book and last_trade_price."""
-        book, lat_ms, byte_count, raw_ev = self._fetch_order_book_raw(token_id)
+    def fetch_order_book(
+        self,
+        token_id: str,
+        outcome_name: str = "token",
+        use_worker_session: bool = False,
+        max_attempts: int = 2,
+    ) -> OrderBook:
+        """Fetch Polymarket CLOB order book and last_trade_price (thread-safe when use_worker_session=True)."""
+        sess = self._get_worker_session() if use_worker_session else None
+        book, lat_ms, byte_count, raw_ev = self._fetch_order_book_raw(
+            token_id, sess=sess, max_attempts=max_attempts
+        )
         if lat_ms > 0:
             self._record_net("poly", lat_ms, byte_count)
         if book is not None and raw_ev is not None:
@@ -1041,7 +1050,10 @@ class MarketFeed:
             spot_lat = float(getattr(spot_ws, "rtt_ms", 0.0) or 0.0)
             spot_bytes = 96
         else:
-            live_px, src, spot_lat, spot_bytes = f_spot.result()
+            try:
+                live_px, src, spot_lat, spot_bytes = f_spot.result(timeout=2.5)
+            except Exception:
+                live_px, src, spot_lat, spot_bytes = None, "stale", 0.0, 0
 
         def _book_to_raw_ev(book: OrderBook, tok: str) -> Optional[dict]:
             # Record every top-5 L2 change immediately (0ms delay), with 2 Hz heartbeat on quiet ticks
@@ -1072,12 +1084,18 @@ class MarketFeed:
         if ws_up is not None:
             up_book, up_lat, up_bytes, up_ev = ws_up, ws_book_rtt, 256, _book_to_raw_ev(ws_up, token_up)
         else:
-            up_book, up_lat, up_bytes, up_ev = f_up.result()
+            try:
+                up_book, up_lat, up_bytes, up_ev = f_up.result(timeout=2.5)
+            except Exception:
+                up_book, up_lat, up_bytes, up_ev = None, 0.0, 0, None
 
         if ws_dn is not None:
             dn_book, dn_lat, dn_bytes, dn_ev = ws_dn, ws_book_rtt, 256, _book_to_raw_ev(ws_dn, token_down)
         else:
-            dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result()
+            try:
+                dn_book, dn_lat, dn_bytes, dn_ev = f_dn.result(timeout=2.5)
+            except Exception:
+                dn_book, dn_lat, dn_bytes, dn_ev = None, 0.0, 0, None
 
         spot = self._build_spot_state(
             open_price, t, live_px, src, spot_lat, spot_bytes,

@@ -117,7 +117,8 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.88, 20.0)], asks=[(0.92, 20.0)])
         spot = SpotState(timestamp=1275.0, price=74900.0, open_price=75000.0)
 
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=25.0, params=self.params)
+        params_salvage = dict(self.params, ALLOW_TAKER_UNWIND=True, DEFENSIVE_SALVAGE_ENABLE=True)
+        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=25.0, params=params_salvage)
         self.assertEqual(dec.action, "taker_unwind")
         self.assertEqual(dec.side, "Up")
         self.assertAlmostEqual(dec.price, 0.08)
