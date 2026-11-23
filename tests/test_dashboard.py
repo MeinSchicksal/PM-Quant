@@ -253,13 +253,14 @@ class TestInvestorDashboard(unittest.TestCase):
                     html = resp.read().decode("utf-8")
                     self.assertEqual(resp.status, 200)
                     self.assertIn("PM-Quant", html)
-                    self.assertIn("side-storage-row", html)
+                    self.assertIn("conn-status-modal", html)
+                    self.assertNotIn("side-storage-row", html)
                     self.assertIn("settings-modal", html)
                 # /m seamlessly redirects to the single unified responsive dashboard /
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/m", timeout=3) as resp:
                     html = resp.read().decode("utf-8")
                     self.assertEqual(resp.status, 200)
-                    self.assertIn("side-storage-row", html)
+                    self.assertIn("conn-status-modal", html)
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/system", timeout=3) as resp:
                     sys_data = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp.status, 200)

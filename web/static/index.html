@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.52">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.53">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -57,33 +57,19 @@
 
     <div class="sidebar-group sidebar-connections">
       <div class="sidebar-group-head">
-        <div class="sidebar-group-label">系统遥测与数据源</div>
+        <div class="sidebar-group-label">数据源与延迟</div>
         <button type="button" class="conn-help-btn" id="conn-help-btn" title="查看数据源状态、颜色规则与指标说明" aria-label="数据源状态说明">?</button>
       </div>
       <div class="conn-card" id="conn-card">
         <div class="conn-head" id="conn-head">
           <div class="conn-head-left">
-            <div class="status-pill status-ready" id="conn-pill" title="本地看板与交易管道状态">
+            <div class="status-pill status-ready" id="conn-pill" role="button" tabindex="0" title="点击查看数据源与延迟详情">
               <span class="status-dot"></span>
               <span id="conn-text">服务在线</span>
+              <svg class="conn-pill-caret" width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8l4 4 4-4"/></svg>
             </div>
             <span class="telemetry-badge" id="net-count">检测中</span>
           </div>
-          <div class="conn-head-mobile-actions">
-            <button type="button" class="conn-help-btn conn-help-btn-mobile" id="conn-help-btn-mobile" title="查看指标与颜色说明" aria-label="指标说明">?</button>
-            <button type="button" class="conn-mobile-toggle" id="conn-mobile-toggle" aria-expanded="false" aria-controls="conn-body">
-              <span id="conn-mobile-toggle-label">详情</span>
-              <svg class="conn-chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l5 5 5-5"/></svg>
-            </button>
-          </div>
-        </div>
-
-        <!-- 手机端折叠时常驻的一行核心摘要（桌面端隐藏） -->
-        <div class="conn-mobile-strip" id="conn-mobile-strip" aria-label="手机端核心网络与准度摘要">
-          <span class="mob-chip">RTT <strong id="mob-net-rtt">--</strong></span>
-          <span class="mob-chip">信号差 <strong id="mob-net-diff">--</strong></span>
-          <span class="mob-chip">Brier <strong id="mob-brier-val">--</strong></span>
-          <span class="mob-chip">内存 <strong id="mob-sys-ram">--</strong></span>
         </div>
 
         <div class="conn-body" id="conn-body">
@@ -123,22 +109,6 @@
             <div class="conn-tile conn-tile-wide" title="窗口中段 Brier Score (越小越准)：左侧模型 P* vs 右侧盘口市价；模型更小变绿，明显更大变黄">
               <span class="conn-tile-label">Brier 准度 (模型 / 盘口)</span>
               <strong class="source-metric-val conn-tile-val" id="side-brier-score">--</strong>
-            </div>
-          </div>
-
-          <div class="conn-subhead">服务器与存储</div>
-          <div class="conn-sys-grid">
-            <div class="conn-sys-tile" title="宿主机物理内存占用率">
-              <span class="conn-tile-label">内存</span>
-              <strong class="source-metric-val conn-tile-val" id="side-sys-ram">--</strong>
-            </div>
-            <div class="conn-sys-tile" id="side-disk-tile" title="宿主机磁盘占用与剩余空间">
-              <span class="conn-tile-label">磁盘</span>
-              <strong class="source-metric-val conn-tile-val" id="side-sys-disk">--</strong>
-            </div>
-            <div class="conn-sys-tile conn-row-clickable" id="side-storage-row" title="点击查看数据占用明细与清理设置">
-              <span class="conn-tile-label">数据 ›</span>
-              <strong class="source-metric-val conn-tile-val" id="side-sys-data">--</strong>
             </div>
           </div>
         </div>
@@ -696,9 +666,73 @@
   </div>
 
   <!-- ======================================================================
+       MOBILE CONNECTION STATUS MODAL (手机端点击连接胶囊弹出的实时遥测浮窗)
+       ====================================================================== -->
+  <div id="conn-status-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-dialog-sm conn-status-dialog" role="dialog" aria-modal="true" aria-labelledby="conn-status-title">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h2 class="modal-title" id="conn-status-title">数据源与延迟</h2>
+          <div class="status-pill status-ready" id="modal-conn-pill">
+            <span class="status-dot"></span>
+            <span id="modal-conn-text">服务在线</span>
+          </div>
+          <span class="telemetry-badge" id="modal-net-count">检测中</span>
+        </div>
+        <div class="modal-header-actions">
+          <button type="button" class="conn-help-btn" id="modal-conn-help-btn" title="查看指标与颜色规则说明" aria-label="指标说明">?</button>
+          <button type="button" class="modal-close-btn" id="conn-status-close-btn" title="关闭弹窗 (Esc)" aria-label="关闭弹窗">
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body conn-status-body">
+        <div class="conn-modal-sources">
+          <div class="conn-modal-row">
+            <span class="source-dot" id="modal-dot-spot"></span>
+            <span class="conn-name">BTC 现货</span>
+            <strong class="source-metric-val source-chip" id="modal-src-spot-val">--</strong>
+          </div>
+          <div class="conn-modal-row">
+            <span class="source-dot" id="modal-dot-book"></span>
+            <span class="conn-name">Poly 盘口</span>
+            <strong class="source-metric-val source-chip" id="modal-src-book-val">--</strong>
+          </div>
+          <div class="conn-modal-row">
+            <span class="source-dot" id="modal-dot-trades"></span>
+            <span class="conn-name">Poly 成交</span>
+            <strong class="source-metric-val source-chip" id="modal-src-trades-val">--</strong>
+          </div>
+          <div class="conn-modal-row">
+            <span class="source-dot" id="modal-dot-chainlink"></span>
+            <span class="conn-name">Chainlink</span>
+            <strong class="source-metric-val source-chip" id="modal-src-chainlink-val">--</strong>
+          </div>
+        </div>
+
+        <div class="conn-subhead">网络延迟与准度基准</div>
+        <div class="conn-bench-grid">
+          <div class="conn-tile">
+            <span class="conn-tile-label">平均 RTT</span>
+            <strong class="source-metric-val conn-tile-val" id="modal-net-latency">-- ms</strong>
+          </div>
+          <div class="conn-tile">
+            <span class="conn-tile-label">信号-交易所差</span>
+            <strong class="source-metric-val conn-tile-val" id="modal-net-sig-diff">--</strong>
+          </div>
+          <div class="conn-tile conn-tile-wide">
+            <span class="conn-tile-label">Brier 准度 (模型 / 盘口)</span>
+            <strong class="source-metric-val conn-tile-val" id="modal-brier-score">--</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
        DATA SOURCE GUIDE MODAL (数据源状态与指标新手说明弹窗)
        ====================================================================== -->
-  <div id="conn-guide-modal" class="modal-backdrop" hidden>
+  <div id="conn-guide-modal" class="modal-backdrop modal-backdrop-top" hidden>
     <div class="modal-dialog modal-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="conn-guide-title">
       <div class="modal-header">
         <div class="modal-header-left">
@@ -746,16 +780,6 @@
             <div class="guide-item">
               <span class="guide-metric">Brier (模型 / 盘口)</span>
               <div class="guide-desc">固定中段（<code>tau ≤ 150s</code>）预测均方误差，<strong>越小越准</strong>（<code>0</code>=神准，<code>0.25</code>=瞎猜 50/50）。<strong>绿色</strong>代表模型预测打赢盘口市价（存在独立概率 Alpha）；<strong>黄色</strong>代表模型暂时弱于盘口（小样本有噪声，建议观察 ≥300 窗）。</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="guide-section">
-          <h3 class="guide-section-title">三、服务器与存储监控</h3>
-          <div class="guide-list">
-            <div class="guide-item">
-              <span class="guide-metric">内存 / 磁盘 / 数据</span>
-              <div class="guide-desc">实时展示宿主机物理内存、磁盘占用与 <code>data/</code> 体积。点击<strong>「数据 ›」</strong>可查看分目录占用并一键清理过期原始行情（<code>summary.jsonl</code> 账本永久保留）。</div>
             </div>
           </div>
         </div>
@@ -920,6 +944,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.52"></script>
+  <script src="/static/app.js?v=3.2.53"></script>
 </body>
 </html>

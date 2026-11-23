@@ -446,8 +446,10 @@ function updateNetworkTelemetry(live) {
 
   const kbpsEl = $("side-net-kbps");
   const latEl = $("side-net-latency");
+  const modalLatEl = $("modal-net-latency");
   const totalEl = $("side-net-total");
   const netCountEl = $("net-count");
+  const modalNetCountEl = $("modal-net-count");
 
   const rxKbps = net.downstream_kbps ?? net.rx_kbps ?? net.kbps ?? 0;
   const polyMs = Number(net.poly_latency_ms ?? 0);
@@ -459,14 +461,13 @@ function updateNetworkTelemetry(live) {
   const rttMs = realRtts.length > 0 ? realRtts.reduce((a, b) => a + b, 0) / realRtts.length : 0;
 
   if (kbpsEl) kbpsEl.textContent = `${Number(rxKbps || 0).toFixed(1)} KB/s`;
-  const rttText = rttMs ? `${Math.round(rttMs)}ms` : "--";
-  if (latEl) latEl.textContent = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
-  const mobRttEl = $("mob-net-rtt");
-  if (mobRttEl) mobRttEl.textContent = rttText;
+  const rttDisplay = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
+  if (latEl) latEl.textContent = rttDisplay;
+  if (modalLatEl) modalLatEl.textContent = rttDisplay;
   if (totalEl) totalEl.textContent = `${Number(net.total_mb || 0).toFixed(2)} MB`;
 
   const sigDiffEl = $("side-net-sig-diff");
-  const mobDiffEl = $("mob-net-diff");
+  const modalSigDiffEl = $("modal-net-sig-diff");
   {
     const rawDiff = net.signal_minus_venue_ms;
     const sigDiff = (rawDiff !== null && rawDiff !== undefined)
@@ -478,19 +479,17 @@ function updateNetworkTelemetry(live) {
     const diffCls = (sigDiff !== null && Number.isFinite(sigDiff))
       ? (sigDiff > 100 ? "is-warn" : sigDiff <= 30 ? "is-ok" : "")
       : "";
-    if (sigDiffEl) {
-      sigDiffEl.textContent = diffText;
-      sigDiffEl.className = `source-metric-val conn-tile-val ${diffCls}`;
-      sigDiffEl.title = (sigDiff !== null && Number.isFinite(sigDiff))
-        ? (sigDiff > 100
-          ? `现货源 (${net.spot_provider || "binance"}) 比 Polymarket 慢 ${Math.round(sigDiff)}ms，建议测速换更近现货源`
-          : `现货源 (${net.spot_provider || "binance"}) 与 Polymarket 延迟差 ${diffText}`)
-        : "";
-    }
-    if (mobDiffEl) {
-      mobDiffEl.textContent = diffText;
-      mobDiffEl.className = diffCls;
-    }
+    const diffTitle = (sigDiff !== null && Number.isFinite(sigDiff))
+      ? (sigDiff > 100
+        ? `现货源 (${net.spot_provider || "binance"}) 比 Polymarket 慢 ${Math.round(sigDiff)}ms，建议测速换更近现货源`
+        : `现货源 (${net.spot_provider || "binance"}) 与 Polymarket 延迟差 ${diffText}`)
+      : "";
+    [sigDiffEl, modalSigDiffEl].forEach((el) => {
+      if (!el) return;
+      el.textContent = diffText;
+      el.className = `source-metric-val conn-tile-val ${diffCls}`;
+      el.title = diffTitle;
+    });
   }
 
   const nowSec = live && live.server_time ? Number(live.server_time) : (Date.now() / 1000);
@@ -510,15 +509,18 @@ function updateNetworkTelemetry(live) {
     (bookDn.best_bid == null && bookDn.best_ask == null);
 
   const setSourceState = (dotId, valId, state, text, title = "") => {
-    const dot = $(dotId);
-    const val = $(valId);
     const stateCls = state === "ok" ? "is-ok" : state === "warn" ? "is-warn" : state === "bad" ? "is-bad" : "";
-    if (dot) dot.className = `source-dot ${stateCls}`;
-    if (val) {
+    [dotId, `modal-${dotId}`].forEach((id) => {
+      const dot = $(id);
+      if (dot) dot.className = `source-dot ${stateCls}`;
+    });
+    [valId, `modal-${valId}`].forEach((id) => {
+      const val = $(id);
+      if (!val) return;
       val.textContent = text;
       val.className = `source-metric-val source-chip ${stateCls}`;
       if (title) val.title = title;
-    }
+    });
   };
 
   let okCount = 0;
@@ -599,53 +601,60 @@ function updateNetworkTelemetry(live) {
 
   const apiGuard = (live && live.api_schema_guard) || {};
   const apiPaused = Boolean(apiGuard.paused);
-  const connPill = $("conn-pill");
-  const connText = $("conn-text");
-  if (connPill && connText) {
-    if (apiPaused) {
-      connPill.className = "status-pill status-critical";
-      connText.textContent = "接口变更暂停";
-    } else if (isIdle) {
-      connPill.className = "status-pill status-warn";
-      connText.textContent = live && live.status === "idle" ? "等待开盘" : "引擎离线";
-    } else if (badCount > 0) {
-      connPill.className = "status-pill status-critical";
-      connText.textContent = "数据异常";
-    } else if (warnCount > 0) {
-      connPill.className = "status-pill status-warn";
-      connText.textContent = "链路降级";
-    } else {
-      connPill.className = "status-pill status-ready";
-      connText.textContent = "服务在线";
-    }
+  let pillCls = "status-pill status-ready";
+  let pillLabel = "服务在线";
+  if (apiPaused) {
+    pillCls = "status-pill status-critical";
+    pillLabel = "接口变更暂停";
+  } else if (isIdle) {
+    pillCls = "status-pill status-warn";
+    pillLabel = live && live.status === "idle" ? "等待开盘" : "引擎离线";
+  } else if (badCount > 0) {
+    pillCls = "status-pill status-critical";
+    pillLabel = "数据异常";
+  } else if (warnCount > 0) {
+    pillCls = "status-pill status-warn";
+    pillLabel = "链路降级";
   }
+  [
+    [$("conn-pill"), $("conn-text")],
+    [$("modal-conn-pill"), $("modal-conn-text")],
+  ].forEach(([pill, textEl]) => {
+    if (pill) pill.className = pillCls;
+    if (textEl) textEl.textContent = pillLabel;
+  });
 
   const tripped = Boolean(cb.active || cb.tripped);
-  if (netCountEl) {
-    if (apiPaused) {
-      netCountEl.textContent = "接口异常暂停";
-    } else if (isIdle) {
-      netCountEl.textContent = "管道离线";
-      netCountEl.style.color = "var(--caption)";
-      netCountEl.style.background = "var(--surface-2, rgba(148,163,184,0.14))";
-    } else if (tripped) {
-      netCountEl.textContent = "风控熔断";
-      netCountEl.style.color = "var(--down)";
-      netCountEl.style.background = "var(--down-soft)";
-    } else if (badCount > 0) {
-      netCountEl.textContent = `${okCount}/4 异常`;
-      netCountEl.style.color = "var(--down)";
-      netCountEl.style.background = "var(--down-soft)";
-    } else if (warnCount > 0) {
-      netCountEl.textContent = `${okCount}/4 降级`;
-      netCountEl.style.color = "#d97706";
-      netCountEl.style.background = "rgba(245,158,11,0.14)";
-    } else {
-      netCountEl.textContent = "4/4 正常";
-      netCountEl.style.color = "var(--up)";
-      netCountEl.style.background = "var(--up-soft)";
-    }
+  let badgeText = "4/4 正常";
+  let badgeColor = "var(--up)";
+  let badgeBg = "var(--up-soft)";
+  if (apiPaused) {
+    badgeText = "接口异常暂停";
+    badgeColor = "var(--down)";
+    badgeBg = "var(--down-soft)";
+  } else if (isIdle) {
+    badgeText = "管道离线";
+    badgeColor = "var(--caption)";
+    badgeBg = "var(--surface-2, rgba(148,163,184,0.14))";
+  } else if (tripped) {
+    badgeText = "风控熔断";
+    badgeColor = "var(--down)";
+    badgeBg = "var(--down-soft)";
+  } else if (badCount > 0) {
+    badgeText = `${okCount}/4 异常`;
+    badgeColor = "var(--down)";
+    badgeBg = "var(--down-soft)";
+  } else if (warnCount > 0) {
+    badgeText = `${okCount}/4 降级`;
+    badgeColor = "#d97706";
+    badgeBg = "rgba(245,158,11,0.14)";
   }
+  [netCountEl, modalNetCountEl].forEach((el) => {
+    if (!el) return;
+    el.textContent = badgeText;
+    el.style.color = badgeColor;
+    el.style.background = badgeBg;
+  });
 }
 
 // ============================================================================
@@ -809,8 +818,7 @@ function updateOverview(live, hist) {
   const settledBadge = $("hero-settled-count");
   if (settledBadge) settledBadge.textContent = `${totalRounds} 场已结算`;
 
-  const brierEl = $("side-brier-score");
-  const mobBrierEl = $("mob-brier-val");
+  const brierTargets = [$("side-brier-score"), $("modal-brier-score")];
   {
     const bCnt = Number(hist.brier_count || 0);
     const bMod = hist.brier_model;
@@ -820,24 +828,20 @@ function updateOverview(live, hist) {
       const kVal = Number(bMkt);
       const bText = `${mVal.toFixed(3)} / ${kVal.toFixed(3)}`;
       const bCls = mVal < kVal - 0.001 ? "is-ok" : mVal > kVal + 0.002 ? "is-warn" : "";
-      if (brierEl) {
-        brierEl.textContent = bText;
-        brierEl.className = `source-metric-val conn-tile-val ${bCls}`;
-        brierEl.title = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
-      }
-      if (mobBrierEl) {
-        mobBrierEl.textContent = bText;
-        mobBrierEl.className = bCls;
-      }
+      const bTitle = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
+      brierTargets.forEach((el) => {
+        if (!el) return;
+        el.textContent = bText;
+        el.className = `source-metric-val conn-tile-val ${bCls}`;
+        el.title = bTitle;
+      });
     } else {
-      if (brierEl) {
-        brierEl.textContent = "--";
-        brierEl.className = "source-metric-val conn-tile-val";
-      }
-      if (mobBrierEl) {
-        mobBrierEl.textContent = "--";
-        mobBrierEl.className = "";
-      }
+      brierTargets.forEach((el) => {
+        if (!el) return;
+        el.textContent = "--";
+        el.className = "source-metric-val conn-tile-val";
+        el.title = "";
+      });
     }
   }
 
@@ -3939,32 +3943,6 @@ function updateSystemStatusWidgets(sys, live) {
   const st = sys.storage || {};
   const gd = sys.disk_guard || {};
 
-  const ramText = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined
-    ? `${sys.mem_used_pct}%`
-    : "--";
-  const ramCls = Number(sys.mem_used_pct || 0) >= 85 ? "is-bad" : Number(sys.mem_used_pct || 0) >= 70 ? "is-warn" : "";
-  if ($("side-sys-ram")) {
-    $("side-sys-ram").textContent = ramText;
-    $("side-sys-ram").className = `source-metric-val conn-tile-val ${ramCls}`;
-  }
-  if ($("mob-sys-ram")) {
-    $("mob-sys-ram").textContent = ramText;
-    $("mob-sys-ram").className = ramCls;
-  }
-  if ($("side-sys-disk")) {
-    const diskPct = sys.disk_used_pct !== null && sys.disk_used_pct !== undefined ? `${sys.disk_used_pct}%` : "--";
-    const diskCls = Number(sys.disk_used_pct || 0) >= 88 ? "is-bad" : Number(sys.disk_used_pct || 0) >= 75 ? "is-warn" : "";
-    $("side-sys-disk").textContent = diskPct;
-    $("side-sys-disk").className = `source-metric-val conn-tile-val ${diskCls}`;
-    const diskTile = $("side-disk-tile");
-    if (diskTile && sys.disk_free_gb !== null && sys.disk_free_gb !== undefined) {
-      diskTile.title = `磁盘已用 ${diskPct} · 剩余 ${sys.disk_free_gb} GB`;
-    }
-  }
-  if ($("side-sys-data")) {
-    $("side-sys-data").textContent = `${Number(st.total_mb || 0).toFixed(0)}MB`;
-  }
-
   const dot = $("sh-dot");
   const procEl = $("sh-proc");
   const feedsEl = $("sh-feeds");
@@ -4153,6 +4131,8 @@ async function fetchAll(isManual = false) {
   } catch (err) {
     if (connPill) connPill.className = "status-pill status-critical";
     if (connText) connText.textContent = "连接中断";
+    if ($("modal-conn-pill")) $("modal-conn-pill").className = "status-pill status-critical";
+    if ($("modal-conn-text")) $("modal-conn-text").textContent = "连接中断";
     if (isManual) {
       showToast("数据同步失败，请检查本地服务状态", "down");
     }
@@ -4223,7 +4203,7 @@ function initInteractions() {
   }
 
   const connHelpBtn = $("conn-help-btn");
-  const connHelpBtnMobile = $("conn-help-btn-mobile");
+  const modalConnHelpBtn = $("modal-conn-help-btn");
   const connGuideModal = $("conn-guide-modal");
   const connGuideClose = $("conn-guide-close-btn");
   const openConnGuide = (e) => {
@@ -4236,30 +4216,38 @@ function initInteractions() {
   if (connHelpBtn && connGuideModal) {
     connHelpBtn.addEventListener("click", openConnGuide);
   }
-  if (connHelpBtnMobile && connGuideModal) {
-    connHelpBtnMobile.addEventListener("click", openConnGuide);
+  if (modalConnHelpBtn && connGuideModal) {
+    modalConnHelpBtn.addEventListener("click", openConnGuide);
   }
-  const connCard = $("conn-card");
-  const connHead = $("conn-head");
-  const connMobileToggle = $("conn-mobile-toggle");
-  const connMobileToggleLabel = $("conn-mobile-toggle-label");
-  const toggleMobileConn = () => {
-    if (!connCard) return;
-    const isOpen = connCard.classList.toggle("is-mobile-open");
-    if (connMobileToggle) connMobileToggle.setAttribute("aria-expanded", String(isOpen));
-    if (connMobileToggleLabel) connMobileToggleLabel.textContent = isOpen ? "收起" : "详情";
+  const connPillBtn = $("conn-pill");
+  const connStatusModal = $("conn-status-modal");
+  const connStatusClose = $("conn-status-close-btn");
+  const openConnStatusModal = () => {
+    if (connStatusModal) connStatusModal.hidden = false;
   };
-  if (connMobileToggle) {
-    connMobileToggle.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleMobileConn();
+  const closeConnStatusModal = () => {
+    if (connStatusModal) connStatusModal.hidden = true;
+  };
+  if (connPillBtn && connStatusModal) {
+    const maybeOpenConnModal = () => {
+      if (window.matchMedia && window.matchMedia("(max-width: 960px)").matches) {
+        openConnStatusModal();
+      }
+    };
+    connPillBtn.addEventListener("click", maybeOpenConnModal);
+    connPillBtn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        maybeOpenConnModal();
+      }
     });
   }
-  if (connHead) {
-    connHead.addEventListener("click", () => {
-      if (window.matchMedia && window.matchMedia("(max-width: 960px)").matches) {
-        toggleMobileConn();
-      }
+  if (connStatusClose) {
+    connStatusClose.addEventListener("click", closeConnStatusModal);
+  }
+  if (connStatusModal) {
+    connStatusModal.addEventListener("click", (e) => {
+      if (e.target === connStatusModal) closeConnStatusModal();
     });
   }
   if (connGuideClose) {
@@ -4500,21 +4488,28 @@ function initInteractions() {
   }
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && modalBackdrop && !modalBackdrop.hidden) {
+    if (e.key !== "Escape") return;
+    if (connGuideModal && !connGuideModal.hidden) {
+      closeConnGuide();
+      return;
+    }
+    if (connStatusModal && !connStatusModal.hidden) {
+      closeConnStatusModal();
+      return;
+    }
+    if (modalBackdrop && !modalBackdrop.hidden) {
       closeRoundModal();
       return;
     }
-    if (e.key === "Escape" && settingsModal && !settingsModal.hidden) {
+    if (settingsModal && !settingsModal.hidden) {
       closeSettingsModal();
       return;
     }
-    if (e.key === "Escape" && connGuideModal && !connGuideModal.hidden) {
-      closeConnGuide();
-    }
-    if (e.key === "Escape" && regimeGuideModal && !regimeGuideModal.hidden) {
+    if (regimeGuideModal && !regimeGuideModal.hidden) {
       closeRegimeGuide();
+      return;
     }
-    if (e.key === "Escape" && timelineModal && !timelineModal.hidden) {
+    if (timelineModal && !timelineModal.hidden) {
       closeTimelineModal();
     }
   });
