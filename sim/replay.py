@@ -237,7 +237,7 @@ def replay_window(
         poly_ts = None
         if poly_row and (t - float(poly_row.get("t", 0.0))) <= poly_max_age:
             last_poly = float(poly_row.get("price") or 0.0)
-            poly_ts = float(poly_row.get("t", 0.0))
+            poly_ts = float(poly_row.get("ref_t") or poly_row.get("t") or 0.0)
         else:
             last_poly = None
 
@@ -279,6 +279,20 @@ def replay_window(
                 _book_at_time(events_dn, _idn, target_t),
             )
 
+        def _delayed_replay_prints(_t=t, _it=it):
+            target_t = _t + lat_s
+            out_prints = []
+            j = _it
+            while j < len(trades):
+                tr = trades[j]
+                tr_t = float(tr.get("received_at") or tr.get("timestamp") or 0.0)
+                if tr_t > target_t:
+                    break
+                if tr_t > _t:
+                    out_prints.append(tr)
+                j += 1
+            return out_prints
+
         spot = SpotState(
             timestamp=t,
             price=cur_px,
@@ -293,7 +307,8 @@ def replay_window(
         )
         runner.step(t, spot, book_up, book_dn, trade_prints=prints,
                     poly_spot=last_poly, poly_spot_ts=poly_ts, replay_mode=True,
-                    delayed_book_fetcher=_delayed_replay_book)
+                    delayed_book_fetcher=_delayed_replay_book,
+                    delayed_prints_fetcher=_delayed_replay_prints)
 
     if not times:
         # No recorded book data for this window: cannot claim any result.
@@ -397,7 +412,10 @@ def run_replay(
             runner.last_record = rec if rec.get("slug") == runner.current_slug else {}
         runner.close_window = _close_and_capture
 
-        with overridden_params(overrides or {}):
+        eff_overrides = {"REPLAY_REQUIRE_STRIKE_AND_BASIS": True}
+        if overrides:
+            eff_overrides.update(overrides)
+        with overridden_params(eff_overrides):
             for date_dir in _market_date_dirs():
                 batch = _load_date_batch(date_dir, settlements)
                 if not batch:

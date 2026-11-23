@@ -1261,7 +1261,10 @@ class PaperRunner:
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
             BASIS_READY=basis_ready,
-            REQUIRE_STRIKE_AND_BASIS=(not replay_mode and delayed_book_fetcher is not None),
+            REQUIRE_STRIKE_AND_BASIS=(
+                (not replay_mode and delayed_book_fetcher is not None)
+                or (replay_mode and bool(config.PARAMS.get("REPLAY_REQUIRE_STRIKE_AND_BASIS", False)))
+            ),
             PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
             FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0),
             CONSECUTIVE_UP_ROUNDS=getattr(self, "consecutive_up", 0),
