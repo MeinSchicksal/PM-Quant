@@ -752,7 +752,7 @@ function translateDecisionReason(rawReason) {
     .replace(/Defensive\s+salvage\s*:/gi, "尾盘防守回收：")
     .replace(/Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
     .replace(/Taker\s+Absorption\s*:/gi, "主动吃单吸筹：")
-    .replace(/^v2\.\d+:?\s*/i, "");
+    .replace(/^v\d+\.\d+:?\s*/i, "");
 
   if (/[\u4e00-\u9fa5]/.test(s)) return s;
 

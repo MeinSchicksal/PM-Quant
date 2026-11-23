@@ -209,6 +209,19 @@ def validate_params(params=None):
         errors.append("MIN_LOTS exceeds MAX_LOTS")
     if p["ENTRY_MIN_PRICE"] > p["ENTRY_MAX_PRICE"]:
         errors.append("ENTRY_MIN_PRICE exceeds ENTRY_MAX_PRICE")
+    if p.get("ENABLE_DRIFT_MODE_B", False):
+        mb_min = float(p.get("DRIFT_MODE_B_MIN_PRICE", 0.75))
+        mb_max = float(p.get("DRIFT_MODE_B_MAX_PRICE", 0.88))
+        mb_prob = float(p.get("DRIFT_MODE_B_MIN_PROB", 0.80))
+        mb_edge = float(p.get("DRIFT_MODE_B_MIN_EDGE", 0.05))
+        if not (0.0 < mb_min < mb_max <= 0.99):
+            errors.append(f"Invalid Mode B price range ({mb_min:.2f}, {mb_max:.2f}]")
+        if not (0.50 <= mb_prob <= 0.99) or mb_edge < 0.0:
+            errors.append(f"Invalid Mode B prob/edge ({mb_prob:.2f}, {mb_edge:.3f})")
+        if budget + 1e-9 < lot_size * mb_max:
+            errors.append(
+                f"MAX_WINDOW_LOSS_USD={budget:.2f} cannot cover 1 Mode B lot at ${mb_max:.2f}"
+            )
     if errors:
         raise ValueError("Inconsistent risk parameters: " + "; ".join(errors))
     return True
