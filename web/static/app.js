@@ -2928,14 +2928,26 @@ function renderModalDetailContent(winData, rec) {
       <div class="review-kpi-col">
         <span class="review-kpi-label">UP 期末持仓</span>
         <span class="review-kpi-val ${upShares > 0 ? "up" : "muted"}">${fmtShares(upShares)} 股</span>
-        <span class="review-kpi-sub">${upShares > 0 ? `均价 $${upAvg.toFixed(2)} · 成本 $${upFillCost.toFixed(2)}` : "本轮未持仓"}</span>
+        <span class="review-kpi-sub">${
+          upShares > 0
+            ? `均价 $${upAvg.toFixed(2)} · 成本 $${upFillCost.toFixed(2)}`
+            : upFillSh > 0
+              ? `已提前平仓 · 曾买 ${fmtShares(upFillSh)} 股 ($${upAvg.toFixed(2)})`
+              : "本轮未持仓"
+        }</span>
       </div>
 
       <!-- Supporting Metric 2: DN Position -->
       <div class="review-kpi-col">
         <span class="review-kpi-label">DN 期末持仓</span>
         <span class="review-kpi-val ${dnShares > 0 ? "down" : "muted"}">${fmtShares(dnShares)} 股</span>
-        <span class="review-kpi-sub">${dnShares > 0 ? `均价 $${dnAvg.toFixed(2)} · 成本 $${dnFillCost.toFixed(2)}` : "本轮未持仓"}</span>
+        <span class="review-kpi-sub">${
+          dnShares > 0
+            ? `均价 $${dnAvg.toFixed(2)} · 成本 $${dnFillCost.toFixed(2)}`
+            : dnFillSh > 0
+              ? `已提前平仓 · 曾买 ${fmtShares(dnFillSh)} 股 ($${dnAvg.toFixed(2)})`
+              : "本轮未持仓"
+        }</span>
       </div>
 
       <!-- Supporting Metric 3: Settlement Price -->
