@@ -333,10 +333,16 @@ def _plan_inventory_management(
             and (not spot_is_stale)
             and (not adverse_held_shock)
         ) if bool(params.get("DIRECTIONAL_ANTI_TOXICITY", True)) else (not is_toxic_or_stale)
+        # 模式 B 高价仓位（均价 > $0.75）严禁二次加仓，防止赢小亏大下的双倍尾险
+        mode_b_pyramid_blocked = (
+            bool(params.get("DRIFT_MODE_B_DISABLE_PYRAMID", True))
+            and held_basis > float(params.get("DRIFT_MODE_B_MIN_PRICE", 0.75)) - 1e-6
+        )
         if (
             books_ok
             and pyr_taker_ok
             and pyr_cooldown_ok
+            and not mode_b_pyramid_blocked
             and bool(params.get("ENABLE_PYRAMID_ADD", False))
             and opp_shares < 1e-4
             and held_total_shares < max_shares_cap - 1e-4
@@ -725,6 +731,65 @@ def plan_decision(
 
     if is_shock_any:
         return _wait(f"v2.9: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
+
+    # 8b. 模式 B（单边高确定性顺势折价 IOC）：仅在模式 A 空仓观望且无冲击时激活，严禁与模式 A 抢戏
+    if (
+        bool(params.get("ENABLE_DRIFT_MODE_B", False))
+        and u_shares <= 1e-4
+        and d_shares <= 1e-4
+        and entries_count == 0
+    ):
+        mb_min_px = float(params.get("DRIFT_MODE_B_MIN_PRICE", 0.75))
+        mb_max_px = float(params.get("DRIFT_MODE_B_MAX_PRICE", 0.88))
+        mb_min_prob = float(params.get("DRIFT_MODE_B_MIN_PROB", 0.80))
+        mb_min_edge = float(params.get("DRIFT_MODE_B_MIN_EDGE", 0.05))
+        best_mode_b = None
+        for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
+            if p_side < mb_min_prob or tb.spread > max_book_spread + 1e-6:
+                continue
+            adverse_shock = (
+                (side == "Up" and vel_signed <= -anti_toxic_bps)
+                or (side == "Down" and vel_signed >= anti_toxic_bps)
+            )
+            if adverse_shock:
+                continue
+            ask = tb.best_ask
+            if ask is None or not (mb_min_px < ask <= mb_max_px + 1e-9):
+                continue
+            vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
+            if vis_filled < size - 1e-6:
+                continue
+            if not (mb_min_px < vis_vwap <= mb_max_px + 1e-9):
+                continue
+            fee = taker_fee_per_share(vis_vwap, fee_rate)
+            net_edge = p_side - (vis_vwap + fee)
+            if net_edge < mb_min_edge - 1e-9:
+                continue
+            need_cash = size * (vis_vwap + fee)
+            if available_cap + 1e-9 < need_cash:
+                budget_blocked_msg = f"v2.10: 模式B资金不足 (${available_cap:.2f} < ${need_cash:.2f})"
+                continue
+            if committed + need_cash > window_budget + 1e-9:
+                budget_blocked_msg = f"v2.10: 模式B超出单窗预算 (${committed:.2f}/${window_budget:.2f})"
+                continue
+            ioc_lim = _compute_ioc_buy_limit(
+                vis_vwap, p_side, mb_min_edge, tau_s, fee_rate, params,
+                mb_max_px, use_dynamic_edge=False, min_sweep_px=vis_worst,
+            )
+            if best_mode_b is None or net_edge > best_mode_b[0]:
+                best_mode_b = (net_edge, side, vis_vwap, ioc_lim, p_side)
+
+        if best_mode_b is not None:
+            edge, side, ask, ioc_lim, p_side = best_mode_b
+            return Decision(
+                action="taker_buy",
+                side=side,
+                price=round(ask, 4),
+                size=size,
+                utility=round(edge, 4),
+                limit_price=ioc_lim,
+                reason=f"v2.10 模式B·单边顺势折价 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            )
 
     if budget_blocked_msg:
         return _wait(budget_blocked_msg, urgent=True)

@@ -65,7 +65,7 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
         book_up = OrderBook(bids=[(0.78, 20.0)], asks=[(0.80, 20.0)])
         book_dn = OrderBook(bids=[(0.19, 20.0)], asks=[(0.21, 20.0)])
         spot = SpotState(timestamp=1200.0, price=75150.0, open_price=75000.0)
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=100.0, params=self.params)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=100.0, params=dict(self.params, ENABLE_DRIFT_MODE_B=False))
         self.assertEqual(dec.action, "wait")
 
         # Coin-flip P*=0.51 < 0.52 even if ask is cheap ($0.30) must wait

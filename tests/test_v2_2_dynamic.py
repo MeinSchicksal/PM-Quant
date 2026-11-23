@@ -106,7 +106,7 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.19, 20.0)], asks=[(0.22, 20.0)])
         spot = SpotState(timestamp=1250.0, price=75100.0, open_price=75000.0)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=self.params)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=dict(self.params, ENABLE_DRIFT_MODE_B=False))
         self.assertEqual(dec.action, "wait")
 
     def test_defensive_salvage_when_bid_collapses_and_spot_adverse(self):

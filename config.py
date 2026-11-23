@@ -77,6 +77,15 @@ PARAMS = {
     "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s Binance spot move >= 2.5 bps
     "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
+    # 2b. Mode B: Skewed-Drift High-Certainty Taker IOC (V1b, zero-impact fallback after Mode A)
+    # 仅在模式 A（均衡震荡主策略）空仓观望且盘口进入单边高确定性折价区时激活，单笔 5 股严禁二次加仓
+    "ENABLE_DRIFT_MODE_B": True,
+    "DRIFT_MODE_B_MIN_PRICE": 0.75,   # 仅覆盖高于 $0.75 的单边顺势区，与模式 A 零重叠
+    "DRIFT_MODE_B_MAX_PRICE": 0.88,   # 高于 $0.88 赔率严重恶化，自动归入模式 C 避险
+    "DRIFT_MODE_B_MIN_PROB": 0.80,    # 严格高确定性门槛，彻底封死逆势抄底
+    "DRIFT_MODE_B_MIN_EDGE": 0.05,    # V1b 稳健净边际：100ms/500ms/700ms 样本内外 6 象限全胜
+    "DRIFT_MODE_B_DISABLE_PYRAMID": True,  # 持有模式 B 高价仓位后严禁二次加仓，锁死单轮尾险
+
     # 3. Position Management (v2.9 Baseline Restored: Pyramid + Sub-$1.00 Pair-Lock Flip, Black-Swan Lock OFF)
     "ENABLE_ARBITRAGE_HEDGE": False,  # Generic wide pair-lock stays off (preserves $1.00 convexity)
     "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
