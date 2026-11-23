@@ -80,7 +80,7 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
         book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
         book_dn = OrderBook(bids=[(0.37, 50.0)], asks=[(0.40, 50.0)])
         spot = SpotState(timestamp=1260.0, price=75045.0, open_price=75000.0)
-        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=p)
         self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")
@@ -92,7 +92,7 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
         book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.63, 50.0)])
         book_dn = OrderBook(bids=[(0.37, 50.0)], asks=[(0.40, 50.0)])
         spot = SpotState(timestamp=1260.0, price=75045.0, open_price=75000.0)
-        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
 
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=40.0, params=p, quote_attempts=0)
         self.assertEqual(dec.action, "quote")

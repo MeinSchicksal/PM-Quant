@@ -7,9 +7,11 @@ __pycache__/
 # Runtime & Temporary Data
 data/4_runtime/
 data/1_market/
+data/3_reports/
 data/2_ledgers/*/windows/
 data/2_ledgers/*/live.json
 data/2_ledgers/*/summary.jsonl
+data/2_ledgers/*/manifest.json
 *.pid
 *.tmp
 *.log

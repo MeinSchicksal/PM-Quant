@@ -213,7 +213,7 @@ def replay_window(
     last_poly = None
     prev_t = start
     carry_prints: List[Dict[str, Any]] = []
-    lat_s = max(float(config.PARAMS.get("LATENCY_S", 0.30)), 0.50)
+    lat_s = float(config.PARAMS.get("REPLAY_LATENCY_S", max(float(config.PARAMS.get("LATENCY_S", 0.30)), 0.50)))
 
     def _book_at_time(evs: List[Dict[str, Any]], start_idx: int, target_t: float) -> Optional[OrderBook]:
         if not evs:
@@ -450,6 +450,52 @@ def _write_report(results: List[Dict[str, Any]]) -> None:
         print(f"[!] 回放报告写入失败: {e}")
 
 
+def summarize_replay_by_day(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按自然日 (UTC+8) 对回放结果进行 Walk-Forward 分片统计，防单日暴赚掩盖过拟合。"""
+    import datetime as _dt
+
+    tz_bj = _dt.timezone(_dt.timedelta(hours=8))
+    played = [r for r in results if r.get("replayed")]
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for r in played:
+        start_ts = r.get("start") or _slug_start(str(r.get("slug", ""))) or 0
+        day_k = _dt.datetime.fromtimestamp(float(start_ts), tz_bj).strftime("%Y-%m-%d") if start_ts else "unknown"
+        b = buckets.setdefault(day_k, {"date": day_k, "windows": 0, "traded": 0, "wins": 0, "losses": 0, "pnls": []})
+        b["windows"] += 1
+        if r.get("replay_traded"):
+            pnl = float(r.get("replay_pnl", 0.0) or 0.0)
+            b["traded"] += 1
+            b["pnls"].append(pnl)
+            if pnl > 1e-4:
+                b["wins"] += 1
+            elif pnl < -1e-4:
+                b["losses"] += 1
+
+    rows = []
+    for day_k in sorted(buckets.keys()):
+        b = buckets[day_k]
+        run_p = 0.0
+        pk = 0.0
+        dd = 0.0
+        for x in b["pnls"]:
+            run_p += x
+            if run_p > pk:
+                pk = run_p
+            dd = max(dd, pk - run_p)
+        dec = b["wins"] + b["losses"]
+        rows.append({
+            "date": day_k,
+            "windows": b["windows"],
+            "traded": b["traded"],
+            "wins": b["wins"],
+            "losses": b["losses"],
+            "win_rate_pct": round((b["wins"] / dec) * 100.0, 1) if dec > 0 else 0.0,
+            "net_pnl": round(sum(b["pnls"]), 4),
+            "max_drawdown": round(dd, 4),
+        })
+    return rows
+
+
 def _print_report(results: List[Dict[str, Any]]):
     played = [r for r in results if r.get("replayed")]
     if not played:
@@ -459,16 +505,27 @@ def _print_report(results: List[Dict[str, Any]]):
     pnls = [r["replay_pnl"] for r in played]
     fills = [r["fills"] for r in played]
     traded = [r for r in played if r["replay_traded"]]
-    wins = [r["replay_pnl"] for r in traded if r["replay_pnl"] > 1e-4]
-    losses = [r["replay_pnl"] for r in traded if r["replay_pnl"] < -1e-4]
+    traded_pnls = [r["replay_pnl"] for r in traded]
+    wins = [p for p in traded_pnls if p > 1e-4]
+    losses = [p for p in traded_pnls if p < -1e-4]
     mean = _mean(pnls)
     sd = _stdev(pnls)
     t_stat = mean / (sd / math.sqrt(len(pnls))) if sd > 0 and len(pnls) > 1 else 0.0
+
+    run_p = 0.0
+    pk = 0.0
+    max_dd = 0.0
+    for p in traded_pnls:
+        run_p += p
+        if run_p > pk:
+            pk = run_p
+        max_dd = max(max_dd, pk - run_p)
 
     print("---------------- 事件驱动回放统计 ----------------")
     print(f"  具备完整录制数据窗口 : {len(played)} 场")
     print(f"  回放发生交易窗口     : {len(traded)} 场")
     print(f"  回放累计盈亏         : ${sum(pnls):+.3f}")
+    print(f"  累计最大回撤         : -${max_dd:.3f}")
     print(f"  单窗期望             : ${mean:+.4f}  (sd ${sd:.4f}, t={t_stat:+.2f})")
     print(f"  胜/负/平             : {len(wins)} / {len(losses)} / {len(traded) - len(wins) - len(losses)}")
     if wins:
@@ -476,4 +533,15 @@ def _print_report(results: List[Dict[str, Any]]):
     print(f"  成交笔数             : {sum(fills)} 笔")
     print(f"  单窗最大亏损         : ${min(pnls):+.4f}")
     print(f"  同窗口账本实际盈亏   : ${sum(r['recorded_pnl'] for r in played):+.3f}")
+
+    daily_rows = summarize_replay_by_day(played)
+    if daily_rows:
+        print("  --- Walk-Forward 按自然日 (UTC+8) 分片 ---")
+        print(f"  {'日期':<12s} {'窗口':>5s} {'交易':>5s} {'胜/负':>9s} {'胜率':>7s} {'日盈亏':>10s} {'最大回撤':>10s}")
+        for d in daily_rows:
+            print(
+                f"  {d['date']:<12s} {d['windows']:>5d} {d['traded']:>5d} "
+                f"{d['wins']:>4d}/{d['losses']:<4d} {d['win_rate_pct']:>6.1f}% "
+                f"${d['net_pnl']:>+9.3f} -${d['max_drawdown']:>8.3f}"
+            )
     print("--------------------------------------------------")

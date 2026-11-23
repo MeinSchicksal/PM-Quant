@@ -462,6 +462,24 @@ function updateNetworkTelemetry(live) {
   if (latEl) latEl.textContent = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
   if (totalEl) totalEl.textContent = `${Number(net.total_mb || 0).toFixed(2)} MB`;
 
+  const sigDiffEl = $("side-net-sig-diff");
+  if (sigDiffEl) {
+    const rawDiff = net.signal_minus_venue_ms;
+    const sigDiff = (rawDiff !== null && rawDiff !== undefined)
+      ? Number(rawDiff)
+      : (binMs > 0 && polyMs > 0 ? (binMs - polyMs) : null);
+    if (sigDiff !== null && Number.isFinite(sigDiff)) {
+      sigDiffEl.textContent = `${sigDiff >= 0 ? "+" : ""}${Math.round(sigDiff)} ms`;
+      sigDiffEl.className = `source-metric-val ${sigDiff > 100 ? "is-warn" : ""}`;
+      sigDiffEl.title = sigDiff > 100
+        ? `现货源 (${net.spot_provider || "binance"}) 比 Polymarket 慢 ${Math.round(sigDiff)}ms，建议测速换更近现货源`
+        : `现货源 (${net.spot_provider || "binance"}) 与 Polymarket 延迟差正常`;
+    } else {
+      sigDiffEl.textContent = "--";
+      sigDiffEl.className = "source-metric-val";
+    }
+  }
+
   const nowSec = live && live.server_time ? Number(live.server_time) : (Date.now() / 1000);
   const liveAge = (live && live.now) ? Math.abs(nowSec - Number(live.now)) : Infinity;
   const isIdle = !live || live.status === "idle" || liveAge > 10;
@@ -504,13 +522,14 @@ function updateNetworkTelemetry(live) {
     setSourceState("dot-trades", "src-trades-val", "bad", "离线");
     setSourceState("dot-chainlink", "src-chainlink-val", "bad", "离线");
   } else {
-    // 1. Binance Spot Source
+    // 1. BTC Spot Source (supports Binance / Kraken / Coinbase / OKX WS)
     if (spotStale) {
       tally("bad");
-      setSourceState("dot-spot", "src-spot-val", "bad", "断流", "Binance/OKX 现货超时 >3s");
-    } else if (spotWsOk && spotSrc === "binance_ws") {
+      setSourceState("dot-spot", "src-spot-val", "bad", "断流", "现货行情超时 >3s");
+    } else if (spotWsOk && spotSrc.endsWith("_ws")) {
       tally("ok");
-      setSourceState("dot-spot", "src-spot-val", "ok", binMs > 0 ? `WS ${Math.round(binMs)}ms` : "WS 正常", "Binance WebSocket 实时推送");
+      const provTag = String(net.spot_provider || spotSrc.replace("_ws", "")).toUpperCase();
+      setSourceState("dot-spot", "src-spot-val", "ok", binMs > 0 ? `${provTag} ${Math.round(binMs)}ms` : `${provTag} WS`, `${provTag} WebSocket 实时推送`);
     } else {
       tally("warn");
       const fallbackTag = spotSrc === "okx" ? "OKX 降级" : "HTTP 降级";
@@ -760,6 +779,23 @@ function updateOverview(live, hist) {
 
   const settledBadge = $("hero-settled-count");
   if (settledBadge) settledBadge.textContent = `${totalRounds} 场已结算`;
+
+  const brierEl = $("side-brier-score");
+  if (brierEl) {
+    const bCnt = Number(hist.brier_count || 0);
+    const bMod = hist.brier_model;
+    const bMkt = hist.brier_market;
+    if (bCnt > 0 && bMod !== null && bMod !== undefined && bMkt !== null && bMkt !== undefined) {
+      const mVal = Number(bMod);
+      const kVal = Number(bMkt);
+      brierEl.textContent = `${mVal.toFixed(3)} / ${kVal.toFixed(3)}`;
+      brierEl.className = `source-metric-val ${mVal > kVal + 0.002 ? "is-warn" : ""}`;
+      brierEl.title = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
+    } else {
+      brierEl.textContent = "--";
+      brierEl.className = "source-metric-val";
+    }
+  }
 
   const roiSub = $("kpi-avail-sub");
   const roiPill = $("hero-equity-roi-pill");

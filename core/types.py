@@ -110,3 +110,7 @@ class Decision:
     # lockout, risk envelope breach). This replaces substring-matching on
     # `reason`, which silently broke whenever a message was reworded.
     urgent_cancel: bool = False
+    # Pre-submission hard IOC limit price computed BEFORE wire transit.
+    # On real Polymarket CLOB, limit protection is enforced natively by the
+    # matching engine at this price — never via post-arrival look-ahead rejects.
+    limit_price: Optional[float] = None

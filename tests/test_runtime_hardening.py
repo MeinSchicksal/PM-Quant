@@ -309,7 +309,10 @@ class TestLowLatencyWSFeeds(unittest.TestCase):
 
 
 class TestTakerKnifeDropProtection(unittest.TestCase):
-    def test_delayed_taker_rejects_collapsing_knife(self):
+    def test_delayed_taker_honestly_fills_collapsing_knife_without_lookahead_reject(self):
+        """Anti-self-deception invariant (v2.10): once an IOC buy limit ($0.30) arrives at the CLOB
+        and the ask has crashed to $0.10, a real exchange ALWAYS fills it into the knife. The paper
+        simulator must honestly record the fill at $0.10 rather than inventing a post-arrival reject."""
         tmp = tempfile.mkdtemp(prefix="pm_knife_")
         runner = PaperRunner(ledger_dir=tmp)
         t0 = 1800000000.0
@@ -317,6 +320,7 @@ class TestTakerKnifeDropProtection(unittest.TestCase):
         b_up = _book(0.27, 20.0, 0.28, 20.0)
         b_dn = _book(0.72, 20.0, 0.73, 20.0)
         crashed_up = _book(0.09, 20.0, 0.10, 20.0)
+        crashed_dn = _book(0.90, 20.0, 0.91, 20.0)
         spot = SpotState(
             timestamp=t0 + 260.0, price=65005.0, open_price=65000.0,
             return_bps=0.77, realized_vol_bps=14.0, regime="normal",
@@ -325,11 +329,11 @@ class TestTakerKnifeDropProtection(unittest.TestCase):
         with patch("runtime.runner.plan_decision", return_value=take_dec):
             runner.step(
                 t0 + 260.0, spot, b_up, b_dn,
-                delayed_book_fetcher=lambda _side: crashed_up,
+                delayed_book_fetcher=lambda _side: (crashed_up, crashed_dn),
                 replay_mode=True,
             )
-        self.assertEqual(runner.pos_up.shares, 0.0, "collapsing knife fill ($0.28 -> $0.10) must be rejected")
-        self.assertTrue(any(a.get("action") == "taker_reject" and "接飞刀" in (a.get("reason") or "") for a in runner.actions))
+        self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4, msg="Real CLOB fills IOC buy limit into crash at $0.10")
+        self.assertAlmostEqual(runner.fills[-1]["price"], 0.10, places=4)
 
 
 class TestV26PolicyUpgrades(unittest.TestCase):
@@ -348,7 +352,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         self.assertEqual(dec.action, "taker_hedge")
         self.assertEqual(dec.side, "Down")
         self.assertAlmostEqual(dec.price, 0.06, places=4)
-        # In v2.9 default config, fixed black-swan lock is OFF so it does not bleed premium
+        # In default config, fixed black-swan lock is OFF so it does not bleed premium
         dec_default = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=config.PARAMS, entries_count=1)
         self.assertEqual(dec_default.action, "wait")
 
@@ -361,7 +365,8 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.55, 50.0, 0.57, 50.0)
         b_dn = _book(0.43, 50.0, 0.45, 50.0)
         spot = SpotState(timestamp=1150.0, price=65080.0, open_price=65000.0, realized_vol_bps=14.0)
-        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=150.0, params=config.PARAMS, p_fair=0.72, entries_count=1)
+        p_pyr = dict(config.PARAMS, ENABLE_PYRAMID_ADD=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2, PYRAMID_MIN_PROB=0.70)
+        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=150.0, params=p_pyr, p_fair=0.72, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Up")
         self.assertIn("顺势确认加仓", dec.reason)
@@ -375,7 +380,8 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.51, 50.0, 0.53, 50.0)
         b_dn = _book(0.46, 50.0, 0.48, 50.0)  # pair_cost = 0.48 + 0.48 + 0.0175 = 0.9775 <= 0.98 (< $1.00)
         spot = SpotState(timestamp=1180.0, price=64910.0, open_price=65000.0, realized_vol_bps=14.0)
-        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.25, entries_count=1)
+        p_flip = dict(config.PARAMS, ENABLE_REVERSAL_FLIP=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2)
+        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=120.0, params=p_flip, p_fair=0.25, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Down")
         self.assertIn("动态不对劲反买", dec.reason)
@@ -383,7 +389,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         # When opposite ask pushes pair_cost > $1.00 (0.48 + 0.59 + fee = 1.087 > 0.98), pairing is strictly forbidden!
         b_up_low = _book(0.41, 50.0, 0.43, 50.0)
         b_dn_over1 = _book(0.57, 50.0, 0.59, 50.0)
-        dec_over1 = plan_decision(pos_up, pos_dn, b_up_low, b_dn_over1, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.25, entries_count=1)
+        dec_over1 = plan_decision(pos_up, pos_dn, b_up_low, b_dn_over1, spot, tau_s=120.0, params=p_flip, p_fair=0.25, entries_count=1)
         self.assertEqual(dec_over1.action, "wait")
 
     def test_secondary_quote_uses_entry_purpose_and_fresh_quote_attempts(self):
@@ -449,12 +455,13 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         spot = SpotState(timestamp=1150.0, price=64900.0, open_price=65000.0, realized_vol_bps=14.0)
 
         # 0.5s after Leg-1 fill -> must NOT double-tap!
-        p_early = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=0.5)
+        p_base = dict(config.PARAMS, ENABLE_PYRAMID_ADD=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2, PYRAMID_MIN_PROB=0.70)
+        p_early = dict(p_base, SECONDS_SINCE_LAST_ENTRY=0.5)
         dec_early = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=170.0, params=p_early, p_fair=0.20, entries_count=1)
         self.assertEqual(dec_early.action, "wait")
 
         # 16.0s after Leg-1 fill -> cooldown satisfied, pyramid add allowed
-        p_ready = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=16.0)
+        p_ready = dict(p_base, SECONDS_SINCE_LAST_ENTRY=16.0)
         dec_ready = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=154.0, params=p_ready, p_fair=0.20, entries_count=1)
         self.assertIn(dec_ready.action, ("taker_buy", "quote"))
         self.assertEqual(dec_ready.side, "Down")
@@ -574,7 +581,14 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_dn_tight = _book(0.32, 50.0, 0.34, 50.0)
         b_dn_cheap = _book(0.43, 50.0, 0.45, 50.0)
         spot = SpotState(timestamp=1200.0, price=65060.0, open_price=65000.0, realized_vol_bps=18.0)
-        params = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=30.0)
+        params = dict(
+            config.PARAMS,
+            ENABLE_PYRAMID_ADD=True,
+            MAX_LOTS=2,
+            MAX_ENTRIES_PER_WINDOW=2,
+            PYRAMID_MIN_PROB=0.70,
+            SECONDS_SINCE_LAST_ENTRY=30.0,
+        )
 
         # A: Taker edge insufficient (0.72 - 0.68 - fee < 0.065) -> must NOT hang passive Maker pyramid bid
         b_up_tight = _book(0.66, 50.0, 0.68, 50.0)
@@ -606,13 +620,14 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_dn = _book(0.49, 50.0, 0.51, 50.0)
         spot = SpotState(timestamp=1200.0, price=65030.0, open_price=65000.0, realized_vol_bps=16.0)
 
-        # Edge enough for Maker (0.56 - 0.49 = 0.07) but not Taker (0.56 - 0.50 - 0.0156 = 0.044 < 0.065)
-        dec_mk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.56)
+        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
+        # Edge enough for Maker (0.56 - 0.49 = 0.07) but not Taker (0.56 - 0.50 - 0.0175 = 0.0425 < 0.070)
+        dec_mk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=p_mk, p_fair=0.56)
         self.assertEqual(dec_mk.action, "wait")
         self.assertIn("卖墙压盘", dec_mk.reason)
 
-        # Stronger edge (0.60 - 0.50 - 0.0156 = 0.0844 >= 0.065) still sweeps via Taker
-        dec_tk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.60)
+        # Stronger edge (0.60 - 0.50 - 0.0175 = 0.0825 >= 0.070) still sweeps via Taker
+        dec_tk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=p_mk, p_fair=0.60)
         self.assertEqual(dec_tk.action, "taker_buy")
         self.assertEqual(dec_tk.side, "Up")
 

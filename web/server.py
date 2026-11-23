@@ -987,14 +987,19 @@ class QuantHandler(BaseHTTPRequestHandler):
                 pos_up = active.get("pos_up") or {}
                 pos_dn = active.get("pos_down") or {}
                 active_unwind_pnl = _num(active.get("realized_unwind_pnl"))
-                # 与 runner.py 的 committed_cost 保持 100% 一致：已平仓实现的损益也计入本轮在途占用
-                active_cost = round(max(0.0, _num(pos_up.get("cash")) + _num(pos_dn.get("cash")) - active_unwind_pnl), 4)
+                active_reserved = max(0.0, _num(active.get("reserved_orders_cost")))
+                # 与 runner.py 的 live.json 口径保持 100% 一致：持仓净成本 + 挂单/在途冻结资金
+                active_cost = round(
+                    max(0.0, _num(pos_up.get("cash")) + _num(pos_dn.get("cash")) - active_unwind_pnl) + active_reserved,
+                    4,
+                )
                 active_sig = (
                     active.get("slug"),
                     active.get("open_px"),
                     round(_num(pos_up.get("shares")), 4),
                     round(_num(pos_dn.get("shares")), 4),
                     active_cost,
+                    round(active_reserved, 4),
                     round(active_unwind_pnl, 4),
                     int(active.get("fills_count") or 0),
                     len(active.get("actions") or []),
@@ -1041,6 +1046,9 @@ class QuantHandler(BaseHTTPRequestHandler):
                 equity_curve_raw = []
                 regime_stats = {}
                 occurrence = {}
+                brier_model_sum = 0.0
+                brier_market_sum = 0.0
+                brier_count = 0
                 tz = _display_tz()
                 daily_map = {}
 
@@ -1069,6 +1077,18 @@ class QuantHandler(BaseHTTPRequestHandler):
 
                                 raw_reg = w.get("regime") or "unlabeled"
                                 occurrence[raw_reg] = occurrence.get(raw_reg, 0) + 1
+                                bm_v = w.get("brier_model")
+                                bk_v = w.get("brier_market")
+                                if bm_v is not None and bk_v is not None:
+                                    try:
+                                        bm_f = float(bm_v)
+                                        bk_f = float(bk_v)
+                                        if math.isfinite(bm_f) and math.isfinite(bk_f):
+                                            brier_model_sum += bm_f
+                                            brier_market_sum += bk_f
+                                            brier_count += 1
+                                    except (TypeError, ValueError):
+                                        pass
 
                                 if is_traded:
                                     count += 1
@@ -1190,6 +1210,9 @@ class QuantHandler(BaseHTTPRequestHandler):
                     "daily_summary": daily_summary,
                     "today_bucket": today_bucket,
                     "curve_compact": curve_compact,
+                    "brier_count": brier_count,
+                    "brier_model": round(brier_model_sum / brier_count, 5) if brier_count > 0 else None,
+                    "brier_market": round(brier_market_sum / brier_count, 5) if brier_count > 0 else None,
                 }
                 with _SUMMARY_AGG_LOCK:
                     _SUMMARY_AGG_CACHE[agg_cache_key] = agg
@@ -1278,6 +1301,9 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "records": page_records,
                 "rounds": rounds,
                 "regime_stats": regime_stats,
+                "brier_count": agg.get("brier_count", 0),
+                "brier_model": agg.get("brier_model"),
+                "brier_market": agg.get("brier_market"),
             }
             raw_bytes = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
             gz_bytes = gzip.compress(raw_bytes, compresslevel=5) if len(raw_bytes) > 1024 else None

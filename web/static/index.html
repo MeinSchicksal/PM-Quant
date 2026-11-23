@@ -89,10 +89,18 @@
           <strong class="source-metric-val" id="src-chainlink-val">--</strong>
         </div>
 
-        <div class="conn-subhead">网络延迟</div>
+        <div class="conn-subhead">网络延迟与基准</div>
         <div class="conn-row">
           <span class="conn-name">平均 RTT</span>
           <strong class="source-metric-val" id="side-net-latency">-- ms</strong>
+        </div>
+        <div class="conn-row" title="现货信号源延迟减去 Polymarket 交易所延迟；正值过大(&gt;100ms)说明信号落后于盘口">
+          <span class="conn-name">信号-交易所差</span>
+          <strong class="source-metric-val" id="side-net-sig-diff">--</strong>
+        </div>
+        <div class="conn-row" title="窗口中段 Brier Score (越小越准)：模型预测 P* vs 盘口市场价">
+          <span class="conn-name">Brier (模/市)</span>
+          <strong class="source-metric-val" id="side-brier-score">--</strong>
         </div>
 
         <div class="conn-subhead">服务器与存储</div>

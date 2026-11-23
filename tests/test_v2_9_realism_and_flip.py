@@ -20,8 +20,8 @@ def _book(bid_px, bid_sz, ask_px, ask_sz, t=1200.0):
 
 class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
     def test_v29_version_and_calibrated_defaults(self):
-        self.assertEqual(config.VERSION, "v2.9")
-        self.assertEqual(config.BATCH_ID, "v2.9")
+        self.assertEqual(config.VERSION, "v2.10")
+        self.assertEqual(config.BATCH_ID, "v2.10")
         self.assertFalse(config.PARAMS["ENABLE_BLACKSWAN_LOCK"])
         self.assertAlmostEqual(config.PARAMS["LATENCY_S"], 0.18, places=4)
         self.assertAlmostEqual(config.PARAMS["CANCEL_LATENCY_S"], 0.18, places=4)
@@ -67,7 +67,13 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
             timestamp=1210.0, price=64850.0, open_price=65000.0,
             velocity_bps=4.0, realized_vol_bps=85.0,
         )
-        p_fast = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=6.0)
+        p_fast = dict(
+            config.PARAMS,
+            ENABLE_REVERSAL_FLIP=True,
+            MAX_LOTS=2,
+            MAX_ENTRIES_PER_WINDOW=2,
+            SECONDS_SINCE_LAST_ENTRY=6.0,
+        )
         dec_flip = plan_decision(
             pos_up, pos_dn, b_up, b_dn, spot_fast,
             tau_s=90.0, params=p_fast, p_fair=0.28, entries_count=1,
@@ -155,7 +161,7 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
             with patch("runtime.runner.plan_decision", return_value=dec_thin), patch("runtime.runner.time.sleep"):
                 runner.step(1200.0, sp, b_up, b_dn, delayed_book_fetcher=lambda _: (delayed_up, delayed_dn))
             self.assertAlmostEqual(runner.pos_up.shares, 0.0, places=4)
-            self.assertTrue(any("滑点后净边际不足" in str(a.get("reason", "")) for a in runner.actions))
+            self.assertTrue(any("IOC 错失防滑点" in str(a.get("reason", "")) for a in runner.actions))
 
         # Case C: +3c upward move (0.45 -> 0.48 > +2c IOC protection cap) -> missed/rejected
         with tempfile.TemporaryDirectory() as tmp:
@@ -209,9 +215,16 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         pos_empty = Position(0.0, 0.0)
         spot = SpotState(timestamp=1100.0, price=65050.0, open_price=65000.0, realized_vol_bps=15.0)
 
+        p_mk = dict(
+            config.PARAMS,
+            ENABLE_MAKER_ENTRY=True,
+            MIN_MAKER_EDGE=0.05,
+            PRICE_EDGE_SLOPE=0.18,
+            EARLY_TAU_MAX_PREMIUM=0.012,
+        )
         # 1. Golden launch zone (px=0.50 <= 0.54, tau=120s <= 180s): exact 5.0% base Maker edge required
         self.assertAlmostEqual(
-            required_entry_edge(0.50, 120.0, 0.05, config.PARAMS),
+            required_entry_edge(0.50, 120.0, 0.05, p_mk),
             0.05,
             places=5,
         )
@@ -219,26 +232,24 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         b_dn_flat = _book(0.49, 40.0, 0.51, 40.0)
         dec_gold = plan_decision(
             pos_empty, pos_empty, b_up_flat, b_dn_flat, spot,
-            tau_s=120.0, params=config.PARAMS, p_fair=0.555,
+            tau_s=120.0, params=p_mk, p_fair=0.555,
         )
         self.assertEqual(dec_gold.action, "quote")
         self.assertEqual(dec_gold.side, "Up")
         self.assertAlmostEqual(dec_gold.price, 0.50, places=4)
 
-        # 2. High-price early trap (maker_px=0.61 at tau=234s, like top cloud loss Down@0.61 tau=234.5s):
-        #    Required Maker edge = 0.05 + (0.61-0.54)*0.18 + ((234-180)/60)*0.012 = 0.05 + 0.0126 + 0.0108 = 0.0734
-        #    A thin 5.5% edge (P*=0.665 vs 0.61) must be rejected; a strong 8.0% edge (P*=0.69 vs 0.61) is accepted!
+        # 2. High-price early trap (maker_px=0.61 at tau=234s):
         b_up_high = _book(0.60, 40.0, 0.62, 40.0)
         b_dn_low = _book(0.38, 40.0, 0.40, 40.0)
         dec_trap = plan_decision(
             pos_empty, pos_empty, b_up_high, b_dn_low, spot,
-            tau_s=234.0, params=config.PARAMS, p_fair=0.665,
+            tau_s=234.0, params=p_mk, p_fair=0.665,
         )
         self.assertEqual(dec_trap.action, "wait")
 
         dec_strong = plan_decision(
             pos_empty, pos_empty, b_up_high, b_dn_low, spot,
-            tau_s=234.0, params=config.PARAMS, p_fair=0.690,
+            tau_s=234.0, params=p_mk, p_fair=0.690,
         )
         self.assertIn(dec_strong.action, ("quote", "taker_buy"))
         self.assertEqual(dec_strong.side, "Up")
@@ -247,7 +258,7 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         #    so a genuine early lag (P*=0.56 vs 0.50) still fires immediately!
         dec_early_cheap = plan_decision(
             pos_empty, pos_empty, b_up_flat, b_dn_flat, spot,
-            tau_s=210.0, params=config.PARAMS, p_fair=0.560,
+            tau_s=210.0, params=p_mk, p_fair=0.560,
         )
         self.assertEqual(dec_early_cheap.action, "quote")
         self.assertAlmostEqual(dec_early_cheap.price, 0.50, places=4)

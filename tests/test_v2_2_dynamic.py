@@ -32,7 +32,7 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.36, 20.0)], asks=[(0.39, 20.0)])
         spot = SpotState(timestamp=1250.0, price=75045.0, open_price=75000.0)
 
-        p = dict(self.params, MIN_TAKER_EDGE=0.50)
+        p = dict(self.params, MIN_TAKER_EDGE=0.50, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=p)
         self.assertEqual(dec.action, "quote")
         self.assertEqual(dec.side, "Up")

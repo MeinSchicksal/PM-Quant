@@ -50,6 +50,8 @@ PM_WEB_USER=admin
 PM_WEB_PASS=CHANGE_ME_TO_A_STRONG_PASSWORD
 PM_PROXY=
 PM_TZ_OFFSET_HOURS=8
+# Spot WS provider: binance (default) / kraken / coinbase / okx / auto (lowest RTT)
+PM_SPOT_WS_PROVIDER=auto
 
 # Optional external phone/IM alerting (leave blank to disable):
 # Telegram Bot:

@@ -377,6 +377,7 @@ def simulate_window(
             return_bps=(bpx - bin_open) / bin_open * 1e4,
             realized_vol_bps=rv, is_toxic_shock=abs(vel) >= shock_bps, regime=regime,
             poly_price=ppx, binance_open_price=bin_open,
+            velocity_bps=round(vel, 3),
         )
         b_up, b_dn, prints = ms.tick(t, x[max(0, t - mm.lag_s)])
         prints.append(SENTINEL_PRINT)

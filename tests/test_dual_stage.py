@@ -26,6 +26,7 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
             ENTRY_MIN_PROB=0.52,
             MIN_MAKER_EDGE=0.05,
             MIN_TAKER_EDGE=0.09,
+            ENABLE_MAKER_ENTRY=True,
             MAX_QUOTE_ATTEMPTS=3,
             MAX_ORDERBOOK_SPREAD=0.06,
             ENABLE_ARBITRAGE_HEDGE=False,

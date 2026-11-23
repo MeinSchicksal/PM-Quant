@@ -77,7 +77,11 @@ class PipelineDriver:
         ws_proxy = (self.feed.session.proxies or {}).get("https") or (self.feed.session.proxies or {}).get("http")
         self._wake_event = threading.Event()
         self.trade_stream = TradeStreamClient(record_raw=True, proxy=ws_proxy, wake_event=self._wake_event)
-        self.spot_ws = BinanceSpotWSClient(proxy=ws_proxy, wake_event=self._wake_event)
+        self.spot_ws = BinanceSpotWSClient(
+            proxy=ws_proxy,
+            wake_event=self._wake_event,
+            provider=str(config.PARAMS.get("SPOT_WS_PROVIDER", "binance")),
+        )
         self.book_ws = PolymarketBookWSClient(proxy=ws_proxy, wake_event=self._wake_event)
         self.feed.attach_ws_clients(spot_ws=self.spot_ws, book_ws=self.book_ws, trade_ws=self.trade_stream)
         # Split slow I/O background jobs (reconcile/disk cleanup) from latency-sensitive
@@ -701,6 +705,7 @@ class PipelineDriver:
                         delayed_book_fetcher=_delayed_book,
                         delayed_prints_fetcher=lambda: self.trade_stream.drain_trades(slug=slug),
                         api_schema_guard=schema_guard,
+                        async_taker_delay=True,
                     )
 
                     # Formatted terminal status line (TTY: live overwrite; background/systemd: 60s clean heartbeat)
@@ -747,6 +752,9 @@ class PipelineDriver:
                     continue
                 min_interval_s = 0.02
                 max_interval_s = 0.20
+                if getattr(self.runner, "pending_takers", None):
+                    next_due = min(float(pt["arrive_at"]) for pt in self.runner.pending_takers)
+                    max_interval_s = min(max_interval_s, max(0.01, next_due - time.time()))
                 elapsed = time.monotonic() - loop_mono
                 if elapsed < min_interval_s:
                     time.sleep(min_interval_s - elapsed)

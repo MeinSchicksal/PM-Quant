@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v2.9).
+"""PM-Quant Configuration & Single Source of Truth (v2.10).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.9"
+VERSION = "v2.10"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -25,43 +25,45 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Core Physical & Economic Parameters (v2.9: Calibrated Realism + Dynamic Adverse Flip + Unchained Flexibility)
+# Core Physical & Economic Parameters (v2.10: v2.9 Strategy Baseline + Honest Zero-Lookahead Sim & Scientific Diagnostics)
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MIN_ORDER_SHARES": 5.0,          # Hard Polymarket CLOB rule: every placed order must be >= 5.0 shares
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares)
-    "MAX_LOTS": 2,                    # Up to 2 lots (10 shares) max exposure (unchanged risk cap)
+    "MAX_LOTS": 2,                    # Up to 2 lots (10 shares) max exposure (v2.9 baseline)
     "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll
     # Calibrated dynamic wire+engine latency: tracks real measured Polymarket RTT/2 +
     # signing/CLOB matching overhead (110ms) with a conservative 150ms floor and +-15%
     # real-world jitter in live paper mode (deterministic 180ms fallback in offline replay).
+    # LATENCY_MAX_S=2.50 ensures high-RTT environments are modeled honestly, never capped at 600ms.
     "LATENCY_S": _env_float("PM_LATENCY_S", 0.18),
     "CANCEL_LATENCY_S": _env_float("PM_CANCEL_LATENCY_S", 0.18),
     "LATENCY_DYNAMIC_FROM_RTT": True,
     "LATENCY_ENGINE_OVERHEAD_MS": 110.0,
     "LATENCY_MIN_S": 0.15,
-    "LATENCY_MAX_S": 0.60,
+    "LATENCY_MAX_S": 2.50,
     "LATENCY_JITTER_PCT": 0.15,
-    "TAKER_FEE_RATE": 0.07,           # Official Polymarket crypto taker fee coefficient: rate * p * (1-p); makers pay zero
-    "TAKER_IOC_SLIPPAGE_TICKS": 0.02, # Max IOC limit protection above signal ask (+$0.02), re-checked against live net edge
-    "TAKER_MAX_ADVERSE_DROP": 0.05,   # Reject delayed taker IOC if ask collapses >= $0.05 (knife-drop protection)
+    "TAKER_FEE_RATE": 0.07,           # Conservative crypto taker fee coefficient: rate * p * (1-p); makers pay zero
+    "TAKER_IOC_SLIPPAGE_TICKS": 0.02, # Pre-submission IOC limit cap above signal ask (+$0.02), bounded by exact net edge
+    "TAKER_MAX_ADVERSE_DROP": 0.05,   # Legacy compatibility key (post-arrival look-ahead reject is permanently removed)
     "QUEUE_CANCEL_CONSERVATIVE_MULT": 1.03,  # Conservative 3% buffer on physical L2 depth cap (never looser than reality)
     "BOOK_CONSISTENCY_TOLERANCE": 0.015,     # Allow 1-tick async WS frame jitter across Up/Down streams (still blocks arb/cross)
 
-    # 2. Strict Asian TWAP Net-Edge Engine
+    # 2. Strict Asian TWAP Net-Edge Engine (v2.9 Strategy Baseline Restored)
+    "ENABLE_MAKER_ENTRY": True,       # Restored v2.9 baseline: Maker + Taker dual execution
+    "DIRECTIONAL_ANTI_TOXICITY": False,  # Restored v2.9 baseline: symmetric spot-shock guard
     "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)
-    "ENTRY_MAX_TAU_S": 270.0,         # Entry active window: tau in [15s, 270s] (only 30s initial warmup instead of 60s)
+    "ENTRY_MAX_TAU_S": 270.0,         # Entry active window: tau in [15s, 270s]
     "ENTRY_MIN_PROB": 0.52,           # Only bet sides with modelled win probability P* >= 52%
     "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets for fresh Leg-1 entries
     "ENTRY_MAX_PRICE": 0.80,          # Allow high-confidence Leg-1 up to $0.80 when net edge remains strictly positive
     "MIN_MAKER_EDGE": 0.05,           # Minimum base edge for zero-fee Maker bids at flat/cheap prices (px <= $0.54)
+    "MIN_HOLD_MAKER_EDGE": 0.015,     # Pull resting Maker quote if live edge decays below 1.5%
     "MIN_TAKER_EDGE": 0.065,          # Minimum base net edge after fee for Taker IOC at flat/cheap prices (px <= $0.54)
-    # v2.9 Odds-Skew & Early-Window Dynamic Edge Premium:
-    # Higher entry prices (> $0.54) carry asymmetric downside (risk $0.62 to win $0.38),
-    # and early entries (tau > 180s) face 3-4 min of mean-reversion noise.
+    # Odds-Skew & Early-Window Dynamic Edge Premium (v2.9 baseline):
     "PRICE_EDGE_PIVOT": 0.54,         # No extra price premium at or below $0.54 (golden launch zone)
-    "PRICE_EDGE_SLOPE": 0.18,         # +1.8% required edge per +$0.10 above $0.54 (e.g. $0.61 -> +1.26% extra edge)
+    "PRICE_EDGE_SLOPE": 0.18,         # +1.8% required edge per +$0.10 above $0.54
     "EARLY_TAU_PIVOT_S": 180.0,       # No extra time premium once tau <= 180s
     "EARLY_TAU_MAX_PREMIUM": 0.012,   # Smoothly adds up to +1.2% required edge across tau in (180s, 270s]
     "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
@@ -75,10 +77,10 @@ PARAMS = {
     "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s Binance spot move >= 2.5 bps
     "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
-    # 3. Position Management: Sub-$1.00 Dynamic Pair-Lock Flip + Pyramid Confirm Add (Fixed Black-Swan Lock OFF)
+    # 3. Position Management (v2.9 Baseline Restored: Pyramid + Sub-$1.00 Pair-Lock Flip, Black-Swan Lock OFF)
     "ENABLE_ARBITRAGE_HEDGE": False,  # Generic wide pair-lock stays off (preserves $1.00 convexity)
     "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
-    "ENABLE_BLACKSWAN_LOCK": False,   # v2.9: Disabled — 4-batch empirical proof (4/130=3.1% reversal vs ~6% premium, -$19.73 drag)
+    "ENABLE_BLACKSWAN_LOCK": False,   # Disabled — cross-sample proof (local & London both ~-$0.105/lock drag)
     "BLACKSWAN_LOCK_MAX_OPP_ASK": 0.06,
     "BLACKSWAN_LOCK_MAX_PAIR_COST": 0.85,
     "ENABLE_PYRAMID_ADD": True,       # Add 2nd lot on confirmed winner (Taker-only, P* >= 0.70, tau in [35s, 180s])
@@ -88,23 +90,20 @@ PARAMS = {
     "PYRAMID_MIN_TAU_S": 35.0,
     "PYRAMID_MIN_PROB": 0.70,
     "PYRAMID_MIN_PRICE": 0.35,
-    "PYRAMID_MAX_PRICE": 0.82,        # Unchained up to $0.82 when confirmed winner still carries positive net edge
-    "PYRAMID_MAX_SPREAD": 0.09,       # Allow pyramid add when fast breakout widens spread up to $0.09 (if ask edge still holds)
+    "PYRAMID_MAX_PRICE": 0.82,
+    "PYRAMID_MAX_SPREAD": 0.09,
     "PYRAMID_MIN_MAKER_EDGE": 0.06,
     "PYRAMID_MIN_TAKER_EDGE": 0.055,
-    # Dynamic Sub-$1.00 Pair-Lock Flip: reacts when held leg weakens (P*_held <= 0.42, P*_opp >= 0.58),
-    # STRICTLY requiring total paired cost `held_basis + opp_px + fee <= FLIP_MAX_PAIR_COST ($0.98 < $1.00)`.
-    # Pairing > $1.00 is a guaranteed-loss stop-loss (like $0.42 + $0.76 = $1.21 locking -$1.05) and is NEVER mixed with pairing!
-    "ENABLE_REVERSAL_FLIP": True,
-    "FLIP_COOLDOWN_S": 5.0,           # Fast reaction (5s) when thesis weakens after entry
-    "FLIP_MAX_HELD_PROB": 0.42,       # Trigger evaluation when held position win prob drops <= 42%
-    "FLIP_MIN_OPP_PROB": 0.58,        # Opposite side win prob >= 58%
-    "FLIP_MAX_PAIR_COST": 0.98,       # Hard sub-$1.00 rule: held_basis + opp_px + fee <= $0.98 (locks positive profit, never locks loss!)
-    "FLIP_MIN_PRICE": 0.01,           # Any valid price on the CLOB that satisfies sub-$1.00 pair cost
+    "ENABLE_REVERSAL_FLIP": True,     # Sub-$1.00 dynamic pair-lock flip (v2.9 baseline)
+    "FLIP_COOLDOWN_S": 5.0,
+    "FLIP_MAX_HELD_PROB": 0.42,
+    "FLIP_MIN_OPP_PROB": 0.58,
+    "FLIP_MAX_PAIR_COST": 0.98,
+    "FLIP_MIN_PRICE": 0.01,
     "FLIP_MAX_PRICE": 0.96,
-    "FLIP_MAX_SPREAD": 0.12,          # Do not freeze defensive pair locks during mild spread widening
+    "FLIP_MAX_SPREAD": 0.12,
     "FLIP_MIN_MAKER_EDGE": 0.045,
-    "FLIP_MIN_TAKER_EDGE": 0.040,     # Require strictly positive post-fee edge on the pairing leg
+    "FLIP_MIN_TAKER_EDGE": 0.040,
     "ALLOW_TAKER_UNWIND": True,       # Only extreme tail defensive salvage is allowed
     "DEFENSIVE_SALVAGE_ENABLE": True, # Exit collapsed leg near expiry when P* < 0.12
     "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
@@ -114,16 +113,18 @@ PARAMS = {
 
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
     "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
-    "TAKER_REAL_DELAY_CHECK": True,   # Wait LATENCY_S and re-fetch live book before IOC taker fill in live paper
+    "TAKER_REAL_DELAY_CHECK": True,   # Wait wire latency and match natively on live post-delay book (no post-arrival reject)
     "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
     "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
+    # 现货 WebSocket 数据源: binance (默认) / kraken / coinbase / okx / auto (启动时自动测速择优)
+    "SPOT_WS_PROVIDER": os.environ.get("PM_SPOT_WS_PROVIDER", "binance").strip().lower() or "binance",
     "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated empirical 5-min BTC std floor (~14 bps); prevents Phi(d) saturation
 
-    # 5. Lifecycle & Account-Level Watchdog Boundaries (Circuit Breaker & Cooling Disabled)
+    # 5. Lifecycle & Account-Level Watchdog Boundaries (Circuit Breaker Disabled per User Request)
     "ENABLE_CIRCUIT_BREAKER": False,
     "MAX_ENTRIES_PER_WINDOW": 2,
-    "MAX_WINDOW_LOSS_USD": 100.00,    # Unrestricted per-window cost envelope
+    "MAX_WINDOW_LOSS_USD": 100.00,    # Unrestricted per-window cost envelope (v2.9 baseline)
     "MAX_DAILY_DRAWDOWN_USD": 100.00,
     "LOSS_STREAK_COOLING": 999999,
     "COOLING_ROUNDS": 0,

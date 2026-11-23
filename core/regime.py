@@ -10,7 +10,7 @@ Classifies BTC 5-minute prediction market conditions into distinct observable re
    - Counter-trend maker quoting strictly forbidden.
 4. 'toxic': Extreme volatility (> 35 bps) or rapid 3-second spot velocity shock (>= 3.5 bps).
    - Instant quote cancellation & trading pause.
-5. 'tail_freeze': Late window expiration (tau < 180s).
+5. 'tail_freeze': Late window expiration (tau < MIN_ENTRY_TAU_S, default 15s).
    - Leg-1 entry strictly forbidden. Zero new risk.
 6. 'wide_spread': Orderbook spread > 0.06 or empty top-of-book.
    - Excessive crossing costs; wait for liquidity.

@@ -107,7 +107,7 @@ class TestEventDrivenReplay(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        with overridden_params({"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MIN_TAKER_EDGE": 0.99}):
+        with overridden_params({"ENABLE_MAKER_ENTRY": True, "MIN_MAKER_EDGE": 0.05, "ENTRY_MIN_PROB": 0.52, "ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MIN_TAKER_EDGE": 0.99}):
             results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         r = results[0]

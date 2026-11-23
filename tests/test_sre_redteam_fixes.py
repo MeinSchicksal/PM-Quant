@@ -44,7 +44,8 @@ class TestPolicyAndMatcherHardening(unittest.TestCase):
         b_up_wall = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 300.0)], source_t=1200.0, received_at=1200.0)
         b_dn = _book(0.49, 0.51)
         spot = SpotState(timestamp=1200.0, price=65030.0, open_price=65000.0, realized_vol_bps=16.0)
-        dec = plan_decision(Position(0, 0), Position(0, 0), b_up_wall, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.56)
+        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
+        dec = plan_decision(Position(0, 0), Position(0, 0), b_up_wall, b_dn, spot, tau_s=120.0, params=p_mk, p_fair=0.56)
         self.assertEqual(dec.action, "wait")
         self.assertTrue(dec.urgent_cancel, "Heavy ask wall must urgently pull existing resting maker bids")
 
@@ -667,16 +668,16 @@ class TestAudit2026ScientificIntegrityFixes(unittest.TestCase):
             b_up = _book(0.49, 0.51, t=t0)
             b_dn = _book(0.49, 0.51, t=t0)
 
-            # 前 20 秒内持续采样 20 次：跨度不足 45s，_basis_ema 必须仍为 None
-            for i in range(20):
+            # 前 50 秒内持续采样：跨度不足 55s，_basis_ema 必须仍为 None
+            for i in range(50):
                 ti = t0 + i * 1.0
                 sp = SpotState(timestamp=ti, price=65000.0 + i, open_price=65000.0, realized_vol_bps=12.0)
                 with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="w")):
                     runner.step(ti, sp, _book(0.49, 0.51, t=ti), _book(0.49, 0.51, t=ti), poly_spot=64995.0 + i * 0.5, poly_spot_ts=ti, replay_mode=False)
-            self.assertIsNone(runner._basis_ema, "Cold-start basis must not initialize before 45s span")
+            self.assertIsNone(runner._basis_ema, "Cold-start basis must not initialize before 55s span")
 
-            # 跨度满 50 秒后，_basis_ema 才完成冷启动初始化
-            for i in range(20, 52):
+            # 跨度满 58 秒后，_basis_ema 才完成冷启动初始化
+            for i in range(50, 59):
                 ti = t0 + i * 1.0
                 sp = SpotState(timestamp=ti, price=65000.0 + i, open_price=65000.0, realized_vol_bps=12.0)
                 with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="w")):

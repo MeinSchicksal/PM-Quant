@@ -9,7 +9,12 @@ Usage:
                            - 仅启动 Web 投资人监控看板 (默认端口: 8900)
   python main.py test      - 运行所有微观结构与数学不变量单元测试
   python main.py reset     - 重置当前版本账本为干净初始状态 ($100.00)
-  python main.py replay    - 回放历史微观订单流录制数据
+  python main.py replay [--latency=S]
+                           - 回放历史微观订单流录制数据 (可选指定真实延迟覆盖)
+  python main.py audit [path]
+                           - 账本科学体检 (t统计量 / Brier Score / 校准度 / Maker vs Taker / 延迟拓扑)
+  python main.py probe [--direct]
+                           - 一键并发测速 Polymarket 与 Binance/Kraken/Coinbase/OKX 现货 WS 延迟
   python main.py stress [N] [seed] - 合成行情压力测试(15种场景×N条路径+敏感性+连续序列)
   python main.py seal      - 归档封存当前实验批次代码与快照
   python main.py cleanup [--dry-run] [--market-days=3] [--replay-days=7]
@@ -280,9 +285,71 @@ def cmd_reset(auto_stop: bool = True):
     print(f"[*] 账本初始状态已就绪: 可用本金 ${config.PARAMS.get('INITIAL_CAPITAL_USD', 100.0):.2f}，风控状态 NORMAL，连亏归零。")
 
 
-def cmd_replay():
+def cmd_replay(args=None):
+    import math
     from sim.replay import run_replay
-    run_replay()
+
+    latencies = []
+    limit = None
+    write = True
+    for arg in (args or []):
+        low = arg.lower()
+        if low.startswith("--latency="):
+            latencies = [float(low.split("=", 1)[1])]
+        elif low.startswith("--latencies="):
+            latencies = [float(x.strip()) for x in low.split("=", 1)[1].split(",") if x.strip()]
+        elif low.startswith("--limit="):
+            limit = int(low.split("=", 1)[1])
+        elif low == "--no-write":
+            write = False
+        else:
+            print(f"[ERROR] Unknown replay option: {arg}")
+            sys.exit(2)
+
+    if len(latencies) <= 1:
+        overrides = None
+        if len(latencies) == 1:
+            lat = max(0.0, latencies[0])
+            overrides = {"REPLAY_LATENCY_S": lat, "LATENCY_S": lat, "CANCEL_LATENCY_S": lat}
+            print(f"[*] 启用回放延迟覆盖: {lat:.3f}s")
+        run_replay(limit=limit, overrides=overrides, write=write)
+        return
+
+    print("==================================================================")
+    print(f"   PM-Quant 多延迟档位对比回放 ({config.VERSION})")
+    print("==================================================================")
+    print(f"{'延迟档位':<10s} {'交易场':>6s} {'胜率':>8s} {'累计盈亏':>12s} {'最大回撤':>10s} {'t-stat':>8s}")
+    print("-" * 62)
+    for lat in latencies:
+        lat_v = max(0.0, lat)
+        res = run_replay(
+            limit=limit,
+            overrides={"REPLAY_LATENCY_S": lat_v, "LATENCY_S": lat_v, "CANCEL_LATENCY_S": lat_v},
+            quiet=True,
+            write=False,
+        )
+        played = [r for r in res if r.get("replayed")]
+        traded = [r for r in played if r.get("replay_traded")]
+        tpnls = [float(r["replay_pnl"]) for r in traded]
+        wins = sum(1 for p in tpnls if p > 1e-4)
+        losses = sum(1 for p in tpnls if p < -1e-4)
+        dec = wins + losses
+        wr = (wins / dec * 100.0) if dec > 0 else 0.0
+        tot = sum(tpnls)
+        run_p = pk = dd = 0.0
+        for p in tpnls:
+            run_p += p
+            pk = max(pk, run_p)
+            dd = max(dd, pk - run_p)
+        n = len(tpnls)
+        if n > 1:
+            m = tot / n
+            sd = math.sqrt(sum((x - m) ** 2 for x in tpnls) / (n - 1))
+            t_s = m / (sd / math.sqrt(n)) if sd > 1e-12 else 0.0
+        else:
+            t_s = 0.0
+        print(f"{lat_v*1000:6.0f} ms  {n:>6d} {wr:>7.1f}% ${tot:>+11.3f} -${dd:>8.3f} {t_s:>+8.2f}")
+    print("-" * 62)
 
 
 def cmd_stress():
@@ -325,6 +392,72 @@ def cmd_cleanup(args):
     print(f"磁盘占用 : {before['total_mb']:.2f} MB -> {after['total_mb']:.2f} MB (1_market={after['market_mb']:.2f} MB, 2_ledgers={after['ledgers_mb']:.2f} MB)")
     if res["errors"]:
         print(f"警告 ({len(res['errors'])}): {res['errors'][:3]}")
+
+
+def cmd_audit(args=None):
+    """运行账本科学体检（支持本地目录、summary.jsonl 或服务器导出的 .tar.gz）。"""
+    from sim.audit import audit_ledger, format_audit_report
+
+    target = Path(args[0]) if (args and len(args) > 0) else config.CURRENT_LEDGER_DIR
+    if not target.exists():
+        print(f"[ERROR] 找不到目标账本路径: {target}")
+        sys.exit(2)
+    report = audit_ledger(target)
+    print(format_audit_report(report))
+
+
+def cmd_probe(args=None):
+    """并发测速 Polymarket 交易所与多个 BTC 现货 WebSocket 源，辅助选出最低延迟信号源。"""
+    import os
+    from runtime.market_feed import MarketFeed
+    from runtime.ws_feeds import probe_network_latency
+
+    direct = any(a.lower() == "--direct" for a in (args or []))
+    proxy = None
+    if not direct:
+        env_p = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or os.environ.get("HTTP_PROXY")
+        if env_p:
+            proxy = env_p
+        else:
+            try:
+                mf = MarketFeed(record_raw=False)
+                proxy = (mf.session.proxies or {}).get("https") or (mf.session.proxies or {}).get("http")
+                mf.close()
+            except Exception:
+                proxy = None
+
+    route_label = f"代理 {proxy}" if proxy else "直连 (Direct)"
+    print(f"=== PM-Quant 多源低延迟网络测速 ({route_label}) ===")
+    res = probe_network_latency(proxy=proxy, timeout_s=3.5)
+    venue_rtt = res.get("venue_rtt_ms")
+    print(f"{'节点名称':<34s} {'状态':<6s} {'Ping RTT':>10s} {'握手耗时':>10s} {'信号-交易所差':>14s}")
+    print("-" * 80)
+    for key in ("poly_clob", "poly_rtds", "spot_kraken", "spot_coinbase", "spot_okx", "spot_binance"):
+        info = res["endpoints"].get(key)
+        if not info:
+            continue
+        ok_str = "OK" if info.get("ok") else "FAIL"
+        rtt = info.get("rtt_ms")
+        hs = info.get("handshake_ms")
+        rtt_s = f"{rtt:.1f} ms" if rtt is not None else "-"
+        hs_s = f"{hs:.1f} ms" if hs is not None else "-"
+        if key.startswith("spot_") and rtt is not None and venue_rtt is not None:
+            diff = rtt - venue_rtt
+            diff_s = f"{diff:+.1f} ms"
+        else:
+            diff_s = "-"
+        print(f"{info['label']:<34s} {ok_str:<6s} {rtt_s:>10s} {hs_s:>10s} {diff_s:>14s}")
+        if not info.get("ok") and info.get("error"):
+            print(f"   └─ 错误: {info['error']}")
+    print("-" * 80)
+    best = res.get("best_spot_provider", "binance")
+    best_rtt = res.get("best_spot_rtt_ms")
+    diff_best = res.get("best_signal_minus_venue_ms")
+    if best_rtt is not None:
+        print(f"推荐现货信号源 : {best} (RTT={best_rtt:.1f}ms, 相对 Polymarket={diff_best:+.1f}ms)" if diff_best is not None else f"推荐现货信号源 : {best} (RTT={best_rtt:.1f}ms)")
+        print(f"启用方式       : 设置环境变量 PM_SPOT_WS_PROVIDER={best} (或 PM_SPOT_WS_PROVIDER=auto 自动择优)")
+    else:
+        print("警告: 所有候选现货 WebSocket 均未能连通，请检查网络或代理配置。")
 
 
 def cmd_status():
@@ -489,13 +622,17 @@ def main():
     elif cmd == "reset":
         cmd_reset()
     elif cmd == "replay":
-        cmd_replay()
+        cmd_replay(rest)
     elif cmd == "stress":
         cmd_stress()
     elif cmd == "seal":
         cmd_seal()
     elif cmd == "cleanup":
         cmd_cleanup(rest)
+    elif cmd == "audit":
+        cmd_audit(rest)
+    elif cmd == "probe":
+        cmd_probe(rest)
     elif cmd == "status":
         cmd_status()
     else:

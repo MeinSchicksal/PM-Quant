@@ -81,6 +81,7 @@ class MarketFeed:
         # Polymarket official real-time Chainlink price cache & single persistent poller thread
         self._last_poly_btc = None
         self._last_poly_btc_t = 0.0
+        self._last_poly_btc_req_t = 0.0
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
         self._poly_poller_stop = threading.Event()
@@ -141,10 +142,17 @@ class MarketFeed:
         cl_age = round(max(0.0, time.time() - cl_ts), 1) if cl_ts > 0 else None
         valid_lats = [x for x in (poly_lat, binance_lat, cl_lat) if x and x > 0]
         avg_lat = round(sum(valid_lats) / len(valid_lats), 1) if valid_lats else 0.0
+        sig_minus_venue = (
+            round(float(binance_lat) - float(poly_lat), 1)
+            if (binance_lat and binance_lat > 0 and poly_lat and poly_lat > 0)
+            else None
+        )
         return {
             "poly_latency_ms": poly_lat,
             "binance_latency_ms": binance_lat,
             "chainlink_latency_ms": cl_lat,
+            "signal_minus_venue_ms": sig_minus_venue,
+            "spot_provider": getattr(getattr(self, "_spot_ws", None), "active_provider", "binance"),
             "chainlink_age_s": cl_age,
             "avg_latency_ms": avg_lat,
             "downstream_kbps": self.net_stats.get("downstream_kbps", 0.0),
@@ -215,8 +223,31 @@ class MarketFeed:
             pass
 
     def check_clock_offset(self, sess: requests.Session = None) -> Optional[float]:
-        """Measure host clock offset against Polymarket CLOB server time (local - server)."""
+        """Measure host clock offset (local - server) with millisecond precision.
+
+        Prefers millisecond-resolution Binance /api/v3/time to eliminate the
+        +/-0.5s integer-second truncation noise of Polymarket /time, falling back
+        to Polymarket /time when unreachable.
+        """
         http = sess or self.session
+        for url in (
+            "https://data-api.binance.vision/api/v3/time",
+            "https://api.binance.com/api/v3/time",
+        ):
+            try:
+                t0 = time.time()
+                resp = http.get(url, timeout=(1.5, 2.0))
+                t1 = time.time()
+                if resp.status_code == 200:
+                    data = resp.json()
+                    srv_ms = float(data.get("serverTime", 0) or 0) if isinstance(data, dict) else 0.0
+                    srv_t = srv_ms / 1000.0
+                    if math.isfinite(srv_t) and 1_600_000_000.0 < srv_t < 4_000_000_000.0:
+                        self.clock_offset_s = round(0.5 * (t0 + t1) - srv_t, 3)
+                        self._last_clock_check_t = time.monotonic()
+                        return self.clock_offset_s
+            except Exception:
+                continue
         try:
             t0 = time.time()
             resp = http.get("https://clob.polymarket.com/time", timeout=(1.5, 2.0))
@@ -442,23 +473,33 @@ class MarketFeed:
             if prev_settlement and prev_settlement[1] > 0:
                 poly_open = float(prev_settlement[1])
 
-        # 2. Binance Spot 5m Kline Open (prefer data-api.binance.vision to bypass HTTP 451 geo-blocks)
-        start_ms = int(start_t * 1000)
-        for base_url in (
-            "https://data-api.binance.vision/api/v3/klines",
-            "https://api.binance.com/api/v3/klines",
-        ):
-            url = f"{base_url}?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
-            try:
-                resp = self.session.get(url, timeout=(1.2, 1.8))
-                if resp.status_code == 200:
-                    klines = resp.json()
-                    if klines and len(klines) > 0:
-                        binance_open = float(klines[0][1])
-                        if binance_open > 0:
-                            break
-            except Exception:
-                pass
+        # 2. Spot Open Anchor: 若启用了非 Binance 现货源（如 Kraken/Coinbase BTC/USD），
+        # 在开窗 12 秒内优先取同源现货作为开盘锚点，避免把 BTC/USD 现价与 BTC/USDT K 线混算。
+        spot_ws = getattr(self, "_spot_ws", None)
+        active_prov = str(getattr(spot_ws, "active_provider", "binance") or "binance")
+        if spot_ws is not None and active_prov != "binance" and abs(time.time() - start_t) <= 12.0:
+            ws_sample = spot_ws.get_latest(max_age_s=3.0)
+            if ws_sample is not None and ws_sample[0] > 0:
+                binance_open = float(ws_sample[0])
+
+        # 默认/降级：Binance Spot 5m Kline Open (prefer data-api.binance.vision to bypass HTTP 451 geo-blocks)
+        if binance_open <= 0:
+            start_ms = int(start_t * 1000)
+            for base_url in (
+                "https://data-api.binance.vision/api/v3/klines",
+                "https://api.binance.com/api/v3/klines",
+            ):
+                url = f"{base_url}?symbol=BTCUSDT&interval=5m&startTime={start_ms}&limit=1"
+                try:
+                    resp = self.session.get(url, timeout=(1.2, 1.8))
+                    if resp.status_code == 200:
+                        klines = resp.json()
+                        if klines and len(klines) > 0:
+                            binance_open = float(klines[0][1])
+                            if binance_open > 0:
+                                break
+                except Exception:
+                    pass
 
         self.last_open_is_official = poly_is_official
 
@@ -545,11 +586,13 @@ class MarketFeed:
                         try:
                             self._last_poly_btc = px_f
                             self._last_poly_btc_t = time.time()
+                            # 记录发起请求时的 TWAP 参考时刻，避免把 HTTP 往返耗时错算进基差窗口
+                            self._last_poly_btc_req_t = float(req_t)
                         finally:
                             if lock:
                                 lock.release()
                         self.record_raw_event("oracle", {
-                            "t": time.time(), "kind": "poly_twap_live", "price": px_f
+                            "t": time.time(), "ref_t": float(req_t), "kind": "poly_twap_live", "price": px_f
                         })
                 elif resp.status_code in (400, 404, 410, 422):
                     self.record_api_schema_error("poly_twap", f"HTTP {resp.status_code}", threshold=5)
@@ -591,7 +634,8 @@ class MarketFeed:
             lock.acquire()
         try:
             px = getattr(self, "_last_poly_btc", None)
-            ts = getattr(self, "_last_poly_btc_t", 0.0)
+            recv_ts = getattr(self, "_last_poly_btc_t", 0.0)
+            req_ts = getattr(self, "_last_poly_btc_req_t", 0.0)
         finally:
             if lock:
                 lock.release()
@@ -599,10 +643,11 @@ class MarketFeed:
             self.last_poly_btc_ts = 0.0
             return None
         max_age = float(config.PARAMS.get("POLY_PRICE_MAX_AGE_S", 10.0))
-        if (time.time() - ts) > max_age:
+        if (time.time() - recv_ts) > max_age:
             self.last_poly_btc_ts = 0.0
             return None
-        self.last_poly_btc_ts = float(ts)
+        # 对外暴露请求参考时刻用于严格对齐 60s TWAP 窗口（兼容仅注入 _last_poly_btc_t 的旧测试）
+        self.last_poly_btc_ts = float(req_ts if req_ts > 0.0 else recv_ts)
         return px
 
     def _get_worker_session(self) -> requests.Session:
@@ -659,17 +704,29 @@ class MarketFeed:
                 self._worker_sessions.clear()
 
     def _fetch_live_spot_price(self, sess: requests.Session = None) -> Tuple[Optional[float], str, float, int]:
-        """Fetch live BTC/USDT spot price with multi-source failover.
+        """Fetch live BTC spot price with same-provider priority and multi-source failover.
 
         Returns:
             (price, source_name, latency_ms, byte_count) or (None, 'stale', 0.0, 0)
         """
         http = sess or self.session
-        endpoints = (
+        active_prov = str(getattr(getattr(self, "_spot_ws", None), "active_provider", "binance") or "binance")
+        base_endpoints = [
             ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
             ("binance_com", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
             ("okx", "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"),
-        )
+        ]
+        # 若 WS 使用非 Binance 源（如 Kraken/Coinbase BTC-USD），断连回退 REST 时优先同源接口，
+        # 避免瞬时切换至 BTC/USDT 引入虚假 USD/USDT 基差跳变。
+        if active_prov == "kraken":
+            endpoints = [("kraken", "https://api.kraken.com/0/public/Ticker?pair=XBTUSD")] + base_endpoints
+        elif active_prov == "coinbase":
+            endpoints = [("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker")] + base_endpoints
+        elif active_prov == "okx":
+            endpoints = [("okx", "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT")] + base_endpoints[:2]
+        else:
+            endpoints = base_endpoints
+
         for src, url in endpoints:
             t0 = time.perf_counter()
             try:
@@ -685,6 +742,20 @@ class MarketFeed:
                         rows = data.get("data") or []
                         if rows:
                             px = float(rows[0].get("last", 0.0) or 0.0)
+                    elif src == "coinbase":
+                        bid = float(data.get("bid", 0.0) or 0.0)
+                        ask = float(data.get("ask", 0.0) or 0.0)
+                        px = (bid + ask) * 0.5 if (bid > 0 and ask > 0) else float(data.get("price", 0.0) or 0.0)
+                    elif src == "kraken":
+                        result = data.get("result") or {}
+                        pair_data = next(iter(result.values()), None) if isinstance(result, dict) else None
+                        if isinstance(pair_data, dict):
+                            b_arr = pair_data.get("b") or []
+                            a_arr = pair_data.get("a") or []
+                            c_arr = pair_data.get("c") or []
+                            bid = float(b_arr[0]) if b_arr else 0.0
+                            ask = float(a_arr[0]) if a_arr else 0.0
+                            px = (bid + ask) * 0.5 if (bid > 0 and ask > 0) else (float(c_arr[0]) if c_arr else 0.0)
                     if px and self._is_valid_btc_price(px, prev_px=float(getattr(self, "_last_binance_px", 0.0) or 0.0)):
                         return px, src, lat_ms, byte_count
             except Exception:
