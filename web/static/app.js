@@ -1172,6 +1172,18 @@ function initEquityCurveInteractions() {
     if (cachedHistory) drawEquityCurve(cachedHistory);
   });
 
+  canvas.addEventListener("touchstart", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
+
+  canvas.addEventListener("touchmove", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
+
   canvas.addEventListener("click", () => {
     if (equityHoverIdx !== null && equityChartGeom?.pts?.[equityHoverIdx]?.slug) {
       window.openRoundModal(equityChartGeom.pts[equityHoverIdx].slug);
@@ -1904,8 +1916,10 @@ function drawLivePriceChart(live) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  const w = Math.max(320, rect.width || 800);
-  const h = Math.max(360, rect.height || 500);
+  const w = Math.max(280, rect.width || 800);
+  const isMobile = w < 520;
+  const minH = isMobile ? (chartViewMode === "dual" ? 260 : 200) : 360;
+  const h = Math.max(minH, rect.height || (isMobile ? 270 : 500));
 
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -1927,10 +1941,10 @@ function drawLivePriceChart(live) {
     return;
   }
 
-  const padL = 68;
-  const padR = 54;
-  const padT = 18;
-  const padB = 26;
+  const padL = isMobile ? 62 : 68;
+  const padR = isMobile ? 42 : 54;
+  const padT = 24;
+  const padB = isMobile ? 22 : 26;
   const plotW = w - padL - padR;
   const totalPlotH = h - padT - padB;
 
@@ -2086,12 +2100,12 @@ function drawLivePriceChart(live) {
     ctx.lineJoin = "round";
     ctx.stroke();
 
-    // Subtle pane label
+    // Subtle pane label (offset 7px above top gridline so it never collides with top Y-axis tick label)
     ctx.fillStyle = pal.axis;
-    ctx.font = "600 11px Inter, sans-serif";
+    ctx.font = isMobile ? "600 10.5px Inter, sans-serif" : "600 11px Inter, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    ctx.fillText("BTC 价格 (Chainlink 60s TWAP)", padL + 4, priceTop - 4);
+    ctx.fillText("BTC 价格 (Chainlink 60s TWAP)", padL + 4, priceTop - 7);
   }
 
   // -------------------- LOWER PANE: IMPLIED PROBABILITY --------------------
@@ -2438,6 +2452,18 @@ function initLiveChartInteractions() {
     tooltip.hidden = true;
     if (cachedLive) drawLivePriceChart(cachedLive);
   });
+
+  canvas.addEventListener("touchstart", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
+
+  canvas.addEventListener("touchmove", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
 
   const toggleGroup = $("chart-mode-toggle");
   if (toggleGroup) {
@@ -3575,6 +3601,18 @@ function bindModalChartHover() {
     }
     tooltip.hidden = true;
   });
+
+  canvas.addEventListener("touchstart", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
+
+  canvas.addEventListener("touchmove", (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: true });
 }
 
 const DECISION_LOG_STORAGE_KEY = "pmquant_decision_audit_log_v1";
@@ -3894,13 +3932,48 @@ async function fetchSystemStatus(force = false) {
 }
 
 // ============================================================================
-// DATA POLLING & EVENT BINDINGS
+// DATA POLLING & EVENT BINDINGS (Fast 300ms Live Channel + Non-blocking History Channel)
 // ============================================================================
 let _fetchInFlight = false;
+let _historyInFlight = false;
 let _lastHistoryFetchMs = 0;
 let _lastHistorySlug = null;
 let _lastHistoryFillsCount = -1;
 let _pollTimerId = null;
+const LIVE_POLL_ACTIVE_MS = 300;
+const LIVE_POLL_HIDDEN_MS = 3000;
+
+async function refreshHistoryInBackground(isManual = false, curSlug = null, curFills = 0) {
+  if (!isManual && _historyInFlight) {
+    return;
+  }
+  _historyInFlight = true;
+  try {
+    const histRes = await fetchWithTimeout("/api/history?limit=300", { cache: "no-store" }, 8000);
+    if (!histRes.ok) {
+      throw new Error(`HTTP history=${histRes.status}`);
+    }
+    const hist = await histRes.json();
+    cachedHistory = hist;
+    _lastHistoryFetchMs = Date.now();
+    if (curSlug !== null) _lastHistorySlug = curSlug;
+    _lastHistoryFillsCount = curFills;
+
+    const versionEl = $("page-version");
+    const activeVer = (hist && (hist.current_batch || hist.batch_id)) || (cachedLive && cachedLive.batch_id);
+    if (versionEl && activeVer) {
+      versionEl.textContent = activeVer;
+    }
+    if (cachedLive) {
+      updateOverview(cachedLive, hist);
+    }
+    renderHistoryTable(hist);
+  } catch (_) {
+    // Non-fatal in background channel; next tick will retry
+  } finally {
+    _historyInFlight = false;
+  }
+}
 
 async function fetchAll(isManual = false) {
   if (!isManual && _fetchInFlight) {
@@ -3917,7 +3990,7 @@ async function fetchAll(isManual = false) {
   }
 
   try {
-    const liveRes = await fetchWithTimeout("/api/live", { cache: "no-store" }, 6000);
+    const liveRes = await fetchWithTimeout("/api/live", { cache: "no-store" }, 4000);
     if (!liveRes.ok) {
       throw new Error(`HTTP live=${liveRes.status}`);
     }
@@ -3927,6 +4000,21 @@ async function fetchAll(isManual = false) {
       syncServerClockOffset(live.server_time);
     }
 
+    const versionEl = $("page-version");
+    const activeVer =
+      (live && live.batch_id) ||
+      (cachedHistory && (cachedHistory.current_batch || cachedHistory.batch_id));
+    if (versionEl && activeVer) {
+      versionEl.textContent = activeVer;
+    }
+
+    // 1. Render live market data immediately (0ms wait — never blocked by /api/history!)
+    updateNetworkTelemetry(live);
+    updateOverview(live, cachedHistory);
+    updateMarket(live);
+    updateSmoothCountdowns();
+
+    // 2. Check if history ledger needs refresh, and trigger it asynchronously
     const nowMs = Date.now();
     const nowSec = live && live.server_time ? Number(live.server_time) : (nowMs / 1000);
     const curSlug = (live && live.slug) || null;
@@ -3937,7 +4025,7 @@ async function fetchAll(isManual = false) {
       const endTs = Number(r?.end || (Number(r?.start || 0) ? Number(r.start) + 300 : 0));
       return endTs <= 0 || (nowSec - endTs) <= 300;
     });
-    const histIntervalMs = document.hidden ? 60000 : (hasFreshProvisional ? 5000 : 30000);
+    const histIntervalMs = document.hidden ? 60000 : (hasFreshProvisional ? 4000 : 20000);
     const needHistory =
       isManual ||
       !cachedHistory ||
@@ -3945,34 +4033,14 @@ async function fetchAll(isManual = false) {
       curSlug !== _lastHistorySlug ||
       curFills !== _lastHistoryFillsCount;
 
-    let hist = cachedHistory;
-    let histUpdated = false;
     if (needHistory) {
-      const histRes = await fetchWithTimeout("/api/history?limit=300", { cache: "no-store" }, 8000);
-      if (!histRes.ok) {
-        throw new Error(`HTTP history=${histRes.status}`);
+      if (isManual || !cachedHistory) {
+        await refreshHistoryInBackground(isManual, curSlug, curFills);
+      } else {
+        refreshHistoryInBackground(false, curSlug, curFills);
       }
-      hist = await histRes.json();
-      cachedHistory = hist;
-      _lastHistoryFetchMs = nowMs;
-      _lastHistorySlug = curSlug;
-      _lastHistoryFillsCount = curFills;
-      histUpdated = true;
     }
 
-    const versionEl = $("page-version");
-    const activeVer = (hist && (hist.current_batch || hist.batch_id)) || (live && live.batch_id);
-    if (versionEl && activeVer) {
-      versionEl.textContent = activeVer;
-    }
-
-    updateNetworkTelemetry(live);
-    updateOverview(live, hist);
-    updateMarket(live);
-    updateSmoothCountdowns();
-    if (histUpdated && hist) {
-      renderHistoryTable(hist);
-    }
     fetchSystemStatus(isManual);
 
     if (isManual) {
@@ -3992,15 +4060,20 @@ async function fetchAll(isManual = false) {
   }
 }
 
-function scheduleNextPoll() {
+function scheduleNextPoll(lastElapsedMs = 0) {
   if (_pollTimerId !== null) {
     clearTimeout(_pollTimerId);
     _pollTimerId = null;
   }
-  const delayMs = document.hidden ? 5000 : 1000;
+  const targetMs = document.hidden ? LIVE_POLL_HIDDEN_MS : LIVE_POLL_ACTIVE_MS;
+  const delayMs = document.hidden
+    ? targetMs
+    : Math.max(120, targetMs - Math.max(0, Number(lastElapsedMs) || 0));
   _pollTimerId = setTimeout(async () => {
+    const t0 = performance.now();
     await fetchAll(false);
-    scheduleNextPoll();
+    const elapsed = performance.now() - t0;
+    scheduleNextPoll(elapsed);
   }, delayMs);
 }
 
@@ -4340,6 +4413,12 @@ document.addEventListener("DOMContentLoaded", () => {
       fetchAll(false).finally(() => scheduleNextPoll());
     } else {
       scheduleNextPoll();
+    }
+  });
+
+  window.addEventListener("focus", () => {
+    if (!document.hidden) {
+      fetchAll(false).finally(() => scheduleNextPoll());
     }
   });
 

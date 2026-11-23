@@ -592,7 +592,7 @@ class PipelineDriver:
                         self._open_calib_future = None
 
                 if getattr(self.runner, "poly_open_is_provisional", False) and self._open_calib_future is None:
-                    if loop_mono - getattr(self, "_last_open_check_mono", 0.0) >= 3.0:
+                    if loop_mono - getattr(self, "_last_open_check_mono", 0.0) >= 1.0:
                         self._last_open_check_mono = loop_mono
                         def _bg_calib(target_slug=slug, target_start=start_t):
                             iso_start = datetime.datetime.fromtimestamp(target_start, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -740,13 +740,13 @@ class PipelineDriver:
                         last_status_log_mono = loop_mono
                         print(f"[{time.strftime('%H:%M:%S')}] Waiting for contract deployment for {slug}...", flush=True)
 
-                # Event-driven cadence: react within ~100ms on WS spot/book/trade push,
-                # while keeping a 0.5s heartbeat ceiling (or 5s low-power sleep when API schema paused).
+                # Event-driven cadence: react within ~20ms on WS spot/book/trade push,
+                # while keeping a 0.20s heartbeat ceiling (or 5s low-power sleep when API schema paused).
                 if self.feed.get_api_schema_guard().get("paused"):
                     self._wake_event.wait(timeout=5.0)
                     continue
-                min_interval_s = 0.10
-                max_interval_s = 0.50
+                min_interval_s = 0.02
+                max_interval_s = 0.20
                 elapsed = time.monotonic() - loop_mono
                 if elapsed < min_interval_s:
                     time.sleep(min_interval_s - elapsed)

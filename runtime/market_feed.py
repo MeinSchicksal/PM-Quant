@@ -204,6 +204,10 @@ class MarketFeed:
             srv_t = float(raw)
             if srv_t > 1e12:
                 srv_t /= 1000.0
+            elif "." not in raw:
+                # Polymarket /time returns a floored integer second; add +0.5s expected
+                # sub-second midpoint so integer truncation doesn't fake a -0.5s..-1.0s lag.
+                srv_t += 0.5
             if math.isfinite(srv_t) and 1_600_000_000.0 < srv_t < 4_000_000_000.0:
                 self.clock_offset_s = round(t_local_mid - srv_t, 3)
                 self._last_clock_check_t = time.monotonic()
@@ -576,7 +580,7 @@ class MarketFeed:
         """
         current_t = now or time.time()
         mono_now = time.monotonic()
-        if not getattr(self, "_poly_btc_poller_active", False) and (mono_now - getattr(self, "_last_poly_poll_t", 0.0) >= 0.8):
+        if not getattr(self, "_poly_btc_poller_active", False) and (mono_now - getattr(self, "_last_poly_poll_t", 0.0) >= 0.30):
             self._poly_btc_poller_active = True
             self._poly_poll_req_t = current_t
             self._ensure_poly_poller()
@@ -761,7 +765,7 @@ class MarketFeed:
         if not is_stale and current_px > 0:
             prev_rec_t = getattr(self, "_last_spot_rec_t", 0.0)
             prev_rec_px = getattr(self, "_last_spot_rec_px", 0.0)
-            if (t - prev_rec_t) >= 0.45 or abs(current_px - prev_rec_px) >= 0.5:
+            if (t - prev_rec_t) >= 0.15 or abs(current_px - prev_rec_px) >= 0.10:
                 self._last_spot_rec_t = t
                 self._last_spot_rec_px = current_px
                 self.record_raw_event("oracle", {
@@ -969,14 +973,14 @@ class MarketFeed:
             live_px, src, spot_lat, spot_bytes = f_spot.result()
 
         def _book_to_raw_ev(book: OrderBook, tok: str) -> Optional[dict]:
-            # Deduplicate identical quiet WS snapshots while keeping at least 1 Hz alignment
+            # Record every top-5 L2 change immediately (0ms delay), with 2 Hz heartbeat on quiet ticks
             rec_cache = getattr(self, "_last_ws_book_rec", None)
             if rec_cache is None:
                 rec_cache = {}
                 self._last_ws_book_rec = rec_cache
-            fp = (tuple(book.bids[:3]), tuple(book.asks[:3]), book.last_trade_price)
+            fp = (tuple(book.bids[:5]), tuple(book.asks[:5]), book.last_trade_price)
             prev_fp, prev_rec_t = rec_cache.get(tok, (None, 0.0))
-            if fp == prev_fp and (t - prev_rec_t) < 1.0:
+            if fp == prev_fp and (t - prev_rec_t) < 0.5:
                 return None
             rec_cache[tok] = (fp, t)
             if len(rec_cache) > 32:

@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import math
+import random
 import time
 import gzip
 from collections import deque
@@ -19,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from core.types import Position, OrderBook, SpotState, Order, Decision
-from core.policy import plan_decision, determine_objective_side
+from core.policy import plan_decision, determine_objective_side, required_entry_edge
 from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
@@ -41,6 +42,37 @@ class PaperRunner:
                 os.close(dfd)
         except OSError:
             pass
+
+    def _effective_wire_latency(self, is_cancel: bool = False, replay_mode: bool = False) -> float:
+        """Compute realistic order/cancel wire + CLOB engine latency in seconds.
+
+        - In live paper mode with real measured Polymarket RTT (`poly_latency_ms`),
+          computes `max(LATENCY_MIN_S, poly_rtt_ms / 2 + LATENCY_ENGINE_OVERHEAD_MS)`
+          and applies bounded +/- `LATENCY_JITTER_PCT` real-world jitter.
+        - In offline replay mode (or when no RTT measurement is available), uses the
+          deterministic configured `LATENCY_S` / `CANCEL_LATENCY_S` fallback.
+        """
+        key = "CANCEL_LATENCY_S" if is_cancel else "LATENCY_S"
+        base = float(config.PARAMS.get(key, config.PARAMS.get("LATENCY_S", 0.18)))
+        if base <= 1e-9:
+            return 0.0
+        min_s = max(0.0, float(config.PARAMS.get("LATENCY_MIN_S", 0.15)))
+        max_s = max(min_s, float(config.PARAMS.get("LATENCY_MAX_S", 0.60)))
+        if not replay_mode and bool(config.PARAMS.get("LATENCY_DYNAMIC_FROM_RTT", True)):
+            ns = getattr(self, "net_stats", None) or {}
+            poly_rtt_ms = float(ns.get("poly_latency_ms", 0.0) or 0.0)
+            if poly_rtt_ms > 0.5:
+                overhead_ms = float(config.PARAMS.get("LATENCY_ENGINE_OVERHEAD_MS", 110.0))
+                base = max(min_s, (poly_rtt_ms * 0.5 + overhead_ms) / 1000.0)
+            else:
+                base = max(min_s, base)
+            jitter = max(0.0, min(0.5, float(config.PARAMS.get("LATENCY_JITTER_PCT", 0.15))))
+            if jitter > 0.0:
+                base = base * random.uniform(1.0 - jitter, 1.0 + jitter)
+            floor_after_jitter = min_s * (1.0 - jitter)
+            base = max(floor_after_jitter, min(max_s, base))
+        self.last_effective_latency_ms = round(base * 1000.0, 1)
+        return base
 
     @staticmethod
     def _atomic_replace(tmp_path: Path, target_path: Path, retries: int = 5):
@@ -521,7 +553,17 @@ class PaperRunner:
                 if pt.get("poly_price"):
                     pt["poly_return_bps"] = round(((pt["poly_price"] - poly_open) / poly_open) * 10000.0, 2)
 
-    def _record_fill(self, now: float, side: str, price: float, size: float, kind: str, purpose: str, order_id: Optional[int] = None):
+    def _record_fill(
+        self,
+        now: float,
+        side: str,
+        price: float,
+        size: float,
+        kind: str,
+        purpose: str,
+        order_id: Optional[int] = None,
+        reason: str = "",
+    ):
         """Record one executed fill and its investor-readable action event."""
         if purpose == "entry":
             if order_id is None or order_id not in self.entry_order_ids:
@@ -545,6 +587,8 @@ class PaperRunner:
         }
         if order_id is not None:
             fill["order_id"] = order_id
+        if reason:
+            fill["reason"] = str(reason)
         self.fills.append(fill)
         self.actions.append(dict(fill, action="fill"))
 
@@ -556,7 +600,10 @@ class PaperRunner:
         else:
             self.pos_down.shares += fill_sz
             self.pos_down.cash += (fill_sz * order.price)
-        self._record_fill(ts, order.side, order.price, fill_sz, "maker", order.purpose, order_id=order.id)
+        self._record_fill(
+            ts, order.side, order.price, fill_sz, "maker", order.purpose,
+            order_id=order.id, reason=str(getattr(order, "entry_reason", "") or ""),
+        )
 
     @staticmethod
     def _resolve_print_timestamp(tp: dict, fallback_now: float) -> float:
@@ -770,7 +817,19 @@ class PaperRunner:
                 self.first_60s_high = max(getattr(self, "first_60s_high", ref_px), ref_px)
                 self.first_60s_low = min(getattr(self, "first_60s_low", ref_px), ref_px)
                 self.first_60s_range = round(self.first_60s_high - self.first_60s_low, 2)
-            if replay_mode or len(self.price_history) <= 1 or (now - getattr(self, "_last_hist_t", 0.0)) >= 0.45:
+            last_hist_t = getattr(self, "_last_hist_t", 0.0)
+            dt_hist = now - last_hist_t
+            prev_pt = self.price_history[-1] if self.price_history else None
+            fast_change = (
+                prev_pt is not None
+                and dt_hist >= 0.10
+                and (
+                    abs(poly_up - float(prev_pt.get("poly_up") or poly_up)) >= 0.008
+                    or abs(bin_px - float(prev_pt.get("price") or bin_px)) >= 1.0
+                    or (poly_px is not None and abs(poly_px - float(prev_pt.get("poly_price") or poly_px)) >= 0.5)
+                )
+            )
+            if replay_mode or len(self.price_history) <= 1 or dt_hist >= 0.20 or fast_change:
                 self.price_history.append({
                     "t": round(now, 1),
                     "price": round(bin_px, 2),                                   # Binance spot, USD
@@ -783,8 +842,8 @@ class PaperRunner:
                     "poly_down": round(poly_down, 4)
                 })
                 self._last_hist_t = now
-                if len(self.price_history) > 720:
-                    self.price_history = self.price_history[-720:]
+                if len(self.price_history) > 1500:
+                    self.price_history = self.price_history[-1500:]
 
         if net_stats:
             self.net_stats = net_stats
@@ -825,7 +884,7 @@ class PaperRunner:
 
         # 0. Process real trade prints that occurred in (prev_t, now] against resting orders
         # AND in-flight cancelling orders (cancel latency simulation) BEFORE evaluating new decisions.
-        cancel_lat = float(config.PARAMS.get("CANCEL_LATENCY_S", config.PARAMS.get("LATENCY_S", 0.30)))
+        cancel_lat = self._effective_wire_latency(is_cancel=True, replay_mode=replay_mode)
         if not hasattr(self, "pending_cancels"):
             self.pending_cancels = []
         print_touched_ids = set()
@@ -854,6 +913,7 @@ class PaperRunner:
         # 0b. Crossed-book matching for already-resting orders BEFORE evaluating new decisions,
         # so an existing Maker bid that was crossed by the new book fills first instead of
         # triggering a duplicate Taker buy on the same tick.
+        queue_mult = float(config.PARAMS.get("QUEUE_CANCEL_CONSERVATIVE_MULT", 1.03))
         if self.pending_cancels:
             still_pending = []
             for o in self.pending_cancels:
@@ -864,6 +924,7 @@ class PaperRunner:
                     if not o.activated and now >= float(o.live_at or 0.0) - 1e-9:
                         if not self.matcher.activate_order(o, target_book, now, post_only=True):
                             continue
+                    self.matcher.sync_queue_depth(o, target_book, now, conservative_mult=queue_mult)
                     fill_sz = self.matcher.match_order(o, target_book, now)
                     if fill_sz > 0:
                         self._apply_maker_fill(now, o, fill_sz)
@@ -905,6 +966,7 @@ class PaperRunner:
                                 "reason": o.cancel_reason, "order_id": o.id
                             })
                             continue
+                    self.matcher.sync_queue_depth(o, target_book, now, conservative_mult=queue_mult)
                     fill_sz = self.matcher.match_order(o, target_book, now)
                     if fill_sz > 0:
                         self._apply_maker_fill(now, o, fill_sz)
@@ -1058,6 +1120,8 @@ class PaperRunner:
             min_order_shares=min_order_sh,
             p_up=p_fair,
             min_hold_maker_edge=float(config.PARAMS.get("MIN_HOLD_MAKER_EDGE", 0.015)),
+            queue_ahead_map=getattr(self.matcher, "queue_ahead", None),
+            queue_head_protect_shares=float(config.PARAMS.get("QUEUE_HEAD_PROTECT_SHARES", 25.0)),
         )
         for o in to_cancel:
             o.cancel_at = now
@@ -1086,7 +1150,7 @@ class PaperRunner:
             elif (bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
                     and delayed_book_fetcher is not None
                     and action.price is not None):
-                wire_lat = float(config.PARAMS.get("LATENCY_S", 0.30))
+                wire_lat = self._effective_wire_latency(is_cancel=False, replay_mode=replay_mode)
                 if not replay_mode:
                     time.sleep(wire_lat)
                 fill_ts = now + wire_lat
@@ -1156,6 +1220,14 @@ class PaperRunner:
                                     f"撤单在途300ms内原挂单已成交({already_filled:.1f}股)，取消重复Taker追单"
                                 )
 
+                book_tol = max(0.0, float(config.PARAMS.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
+                ioc_slip = max(0.0, float(config.PARAMS.get("TAKER_IOC_SLIPPAGE_TICKS", 0.02)))
+                ioc_limit_px = (
+                    min(0.99, float(action.price) + ioc_slip)
+                    if is_buy
+                    else max(0.01, float(action.price) - ioc_slip)
+                )
+                lat_ms = int(round(wire_lat * 1000))
                 if reject_reason is not None:
                     filled, vwap = 0.0, 0.0
                 elif post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
@@ -1164,11 +1236,11 @@ class PaperRunner:
                 elif bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True)):
                     inconsistent = False
                     if action.action == "taker_buy":
-                        # 新开仓严格要求四价全齐且双边盘口一致
-                        if post_up is not None and post_dn is not None and not is_books_consistent(post_up, post_dn):
+                        # 新开仓/反买要求双边盘口未自交叉且满足容差一致性
+                        if post_up is not None and post_dn is not None and not is_books_consistent(post_up, post_dn, tolerance=book_tol):
                             inconsistent = True
                     elif action.action == "taker_hedge":
-                        # 黑天鹅锁利/对冲处于极端单边盘口（一方可能无买或无卖），仅拦截自交叉或明确双边倒挂
+                        # 极端单边盘口仅拦截自交叉或明确双边倒挂
                         if post_book.best_bid is not None and post_book.best_ask is not None and post_book.best_bid >= post_book.best_ask:
                             inconsistent = True
                         elif post_up is not None and post_dn is not None:
@@ -1176,7 +1248,7 @@ class PaperRunner:
                             bu, bd = post_up.best_bid, post_dn.best_bid
                             if (bu is not None and au is not None and bu >= au) or (bd is not None and ad is not None and bd >= ad):
                                 inconsistent = True
-                            elif au is not None and ad is not None and (au + ad) < 0.995:
+                            elif au is not None and ad is not None and (au + ad) < 1.0 - book_tol - 1e-9:
                                 inconsistent = True
                     else:
                         # taker_unwind 仅减仓卖出己侧 bid，只检查己侧未自交叉，绝不被对侧空盘阻断止损
@@ -1185,23 +1257,23 @@ class PaperRunner:
 
                     if inconsistent:
                         filled, vwap = 0.0, 0.0
-                        reject_reason = "300ms 延迟后双边盘口不一致，IOC 放弃成交"
+                        reject_reason = f"{lat_ms}ms 延迟后双边盘口不一致，IOC 放弃成交"
                     else:
                         filled, vwap = self.matcher.taker_ioc_fill(
-                            post_book, want, limit_price=float(action.price), is_buy=is_buy
+                            post_book, want, limit_price=ioc_limit_px, is_buy=is_buy
                         )
                         if filled <= 1e-6:
                             reject_reason = (
-                                f"300ms 延迟后盘口已移动 (原信号限价 {action.price:.2f}, "
+                                f"{lat_ms}ms 延迟后盘口已移动 (原信号价 {action.price:.2f}, 保护限价 {ioc_limit_px:.2f}, "
                                 f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
                             )
                 else:
                     filled, vwap = self.matcher.taker_ioc_fill(
-                        post_book, want, limit_price=float(action.price), is_buy=is_buy
+                        post_book, want, limit_price=ioc_limit_px, is_buy=is_buy
                     )
                     if filled <= 1e-6:
                         reject_reason = (
-                            f"300ms 延迟后盘口已移动 (原信号限价 {action.price:.2f}, "
+                            f"{lat_ms}ms 延迟后盘口已移动 (原信号价 {action.price:.2f}, 保护限价 {ioc_limit_px:.2f}, "
                             f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
                         )
             else:
@@ -1232,18 +1304,57 @@ class PaperRunner:
             if action.action == "taker_buy" and filled > 1e-6:
                 sig_px = float(action.price if action.price is not None else vwap)
                 slip = vwap - sig_px
-                min_entry_px = float(config.PARAMS.get("ENTRY_MIN_PRICE", 0.20))
+                act_reason = action.reason or ""
+                is_flip_order = ("反买" in act_reason) or ("反手" in act_reason)
+                is_pyramid_order = ("加仓" in act_reason)
+                min_entry_px = (
+                    float(config.PARAMS.get("FLIP_MIN_PRICE", 0.01))
+                    if is_flip_order
+                    else float(config.PARAMS.get("ENTRY_MIN_PRICE", 0.20))
+                )
                 max_adverse_drop = float(config.PARAMS.get("TAKER_MAX_ADVERSE_DROP", 0.05))
-                if slip > 0.02:
+                max_slip_cap = max(0.0, float(config.PARAMS.get("TAKER_IOC_SLIPPAGE_TICKS", 0.02)))
+                fee_r = float(config.PARAMS.get("TAKER_FEE_RATE", 0.07))
+                if is_flip_order:
+                    held_pos_flip = self.pos_down if action.side == "Up" else self.pos_up
+                    held_basis_flip = held_pos_flip.avg_price
+                    est_flip_pair = held_basis_flip + vwap + taker_fee_per_share(vwap, fee_r)
+                    max_flip_pair = float(config.PARAMS.get("FLIP_MAX_PAIR_COST", 0.98))
+                else:
+                    est_flip_pair = 0.0
+                    max_flip_pair = 1.0
+                if is_flip_order and est_flip_pair > max_flip_pair + 1e-6:
+                    reject_reason = (
+                        f"动态配对反买 VWAP 滑点使配对总成本 {est_flip_pair:.4f} > ${max_flip_pair:.2f} (< $1.00 铁律)，"
+                        f"拒绝越界变成锁亏单"
+                    )
+                elif slip > max_slip_cap + 1e-6:
                     reject_reason = (
                         f"VWAP 滑点过大 (决策价 {sig_px:.2f} -> "
                         f"逐档 VWAP {vwap:.4f}, 滑点 {slip:+.4f})，拒绝吃单"
                     )
                 elif vwap < min_entry_px - 1e-6 or (sig_px - vwap) >= max_adverse_drop - 1e-6:
                     reject_reason = (
-                        f"300ms 延迟内盘口闪崩接飞刀拦截 (决策价 {sig_px:.2f} -> "
+                        f"延迟内盘口闪崩接飞刀拦截 (决策价 {sig_px:.2f} -> "
                         f"现成交 VWAP {vwap:.4f})，拒绝吃单"
                     )
+                elif slip > 1e-6 and action.utility is not None:
+                    # Verify that even after paying real upward VWAP slippage + fee delta,
+                    # the trade still clears the required post-fee net edge floor.
+                    extra_cost = (vwap + taker_fee_per_share(vwap, fee_r)) - (sig_px + taker_fee_per_share(sig_px, fee_r))
+                    post_slip_edge = float(action.utility) - extra_cost
+                    if is_flip_order:
+                        req_edge = float(config.PARAMS.get("FLIP_MIN_TAKER_EDGE", 0.040))
+                    elif is_pyramid_order:
+                        req_edge = float(config.PARAMS.get("PYRAMID_MIN_TAKER_EDGE", 0.055))
+                    else:
+                        base_tk = float(config.PARAMS.get("MIN_TAKER_EDGE", 0.065))
+                        req_edge = required_entry_edge(vwap, tau, base_tk, config.PARAMS)
+                    if post_slip_edge < req_edge - 1e-6:
+                        reject_reason = (
+                            f"滑点后净边际不足 (决策价 {sig_px:.2f} -> VWAP {vwap:.4f}, "
+                            f"剩余净边际 {post_slip_edge:+.3f} < {req_edge:.3f})，拒绝吃单"
+                        )
             if filled > 1e-6 and reject_reason is None:
                 px = round(vwap, 6)
                 fee = round(filled * taker_fee_per_share(px, config.PARAMS["TAKER_FEE_RATE"]), 4)
@@ -1286,7 +1397,7 @@ class PaperRunner:
                     purpose = "entry"
                 else:
                     purpose = "hedge"
-                self._record_fill(fill_ts, action.side, px, filled, "taker", purpose)
+                self._record_fill(fill_ts, action.side, px, filled, "taker", purpose, reason=str(action.reason or ""))
                 if filled + 1e-6 < want:
                     self.actions.append({
                         "t": round(fill_ts, 2), "action": "taker_partial", "side": action.side,
@@ -1310,6 +1421,7 @@ class PaperRunner:
             self._next_order_id += 1
             oid = self._next_order_id
             placed_oid = oid
+            quote_lat = self._effective_wire_latency(is_cancel=False, replay_mode=replay_mode)
             new_order = Order(
                 id=oid,
                 client_order_id=f"pm_{self.current_slug}_{oid}",
@@ -1320,10 +1432,11 @@ class PaperRunner:
                 filled_size=0.0,
                 purpose=purpose,
                 placed_at=now,
-                live_at=now + config.PARAMS["LATENCY_S"]
+                live_at=now + quote_lat
             )
+            new_order.entry_reason = str(action.reason or "")
             target_book = book_up if action.side == "Up" else book_down
-            self.matcher.register_order(new_order, target_book)
+            self.matcher.register_order(new_order, target_book, latency_s=quote_lat)
             self.working_orders.append(new_order)
             if purpose == "entry":
                 self.quote_attempts = getattr(self, "quote_attempts", 0) + 1
@@ -1331,7 +1444,8 @@ class PaperRunner:
             self.actions.append({
                 "t": round(now, 2), "action": "quote", "side": action.side,
                 "price": action.price, "size": action.size, "purpose": purpose,
-                "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1)
+                "order_id": new_order.id, "queue_ahead": round(ahead_sz, 1),
+                "reason": str(action.reason or ""),
             })
 
         # 3. 仅针对零延迟模式本 tick 新挂且已到达 live_at 的挂单执行 Post-Only 激活校验（老单已在 0b 处理）
@@ -1356,14 +1470,30 @@ class PaperRunner:
             self.working_orders = remaining_working
 
         # Update atomic live.json (skipped in offline replay for ~15x speedup;
-        # throttled to 4 Hz on quiet ticks at 10 Hz event-driven cadence, instant on actions)
+        # ~6.7 Hz baseline cadence, plus 0ms instant flush whenever actions, fills,
+        # top-of-book prices, or resting queue depth change).
         if not replay_mode:
             last_w = getattr(self, "_last_live_write_t", 0.0)
-            last_ac = getattr(self, "_last_live_action_cnt", -1)
-            if last_w <= 0.0 or (now - last_w) >= 0.25 or len(self.actions) != last_ac:
+            q_total = round(
+                sum(float(self.matcher.queue_ahead.get(o.id, 0.0)) for o in self.working_orders),
+                1,
+            )
+            live_sig = (
+                len(self.actions),
+                len(self.fills),
+                len(self.working_orders),
+                book_up.best_bid,
+                book_up.best_ask,
+                book_down.best_bid,
+                book_down.best_ask,
+                q_total,
+            )
+            last_sig = getattr(self, "_last_live_sig", None)
+            if last_w <= 0.0 or (now - last_w) >= 0.15 or live_sig != last_sig:
                 self._write_live(now, spot, book_up, book_down)
                 self._last_live_write_t = now
                 self._last_live_action_cnt = len(self.actions)
+                self._last_live_sig = live_sig
 
     def estimate_twap_close_price(self, now: float) -> float:
         """Estimate Chainlink-chain 60s TWAP close price when official TWAP is not yet published.

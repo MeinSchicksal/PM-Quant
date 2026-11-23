@@ -253,13 +253,13 @@ class TestInvestorDashboard(unittest.TestCase):
                     html = resp.read().decode("utf-8")
                     self.assertEqual(resp.status, 200)
                     self.assertIn("PM-Quant", html)
-                    self.assertIn("server-health-strip", html)
+                    self.assertIn("side-storage-row", html)
                     self.assertIn("settings-modal", html)
                 # /m seamlessly redirects to the single unified responsive dashboard /
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/m", timeout=3) as resp:
                     html = resp.read().decode("utf-8")
                     self.assertEqual(resp.status, 200)
-                    self.assertIn("server-health-strip", html)
+                    self.assertIn("side-storage-row", html)
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/system", timeout=3) as resp:
                     sys_data = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp.status, 200)
@@ -280,72 +280,79 @@ class TestInvestorDashboard(unittest.TestCase):
         import shutil
         import datetime
         from collections import namedtuple
+        from unittest.mock import patch
+        import config
+        from runtime import retention
         from runtime.retention import cleanup_old_data, is_raw_recording_allowed
 
         Usage = namedtuple("Usage", ["total", "used", "free"])
         tmp = Path(tempfile.mkdtemp(prefix="pm_cap_"))
         try:
-            now_dt = datetime.datetime(2026, 11, 22, 12, 0, 0, tzinfo=datetime.timezone.utc)
-            now_ts = now_dt.timestamp()
-            m_dir = tmp / "1_market"
-            l_dir = tmp / "2_ledgers"
-            g_dir = tmp / "4_runtime" / "logs"
+            rt_dir = tmp / "4_runtime"
+            rt_dir.mkdir(parents=True, exist_ok=True)
+            with patch.object(config, "RUNTIME_DIR", rt_dir), \
+                 patch.object(retention, "_DISK_GUARD_FILE", rt_dir / "disk_guard.json"):
+                now_dt = datetime.datetime(2026, 11, 22, 12, 0, 0, tzinfo=datetime.timezone.utc)
+                now_ts = now_dt.timestamp()
+                m_dir = tmp / "1_market"
+                l_dir = tmp / "2_ledgers"
+                g_dir = rt_dir / "logs"
 
-            # All within 3-day normal retention (1-2 days old), plus today
-            for d_str in ("2026-11-20", "2026-11-21", "2026-11-22"):
-                d_path = m_dir / "events" / d_str
-                d_path.mkdir(parents=True)
-                (d_path / "ev.jsonl").write_bytes(b"a" * 20000)
+                # All within 3-day normal retention (1-2 days old), plus today
+                for d_str in ("2026-11-20", "2026-11-21", "2026-11-22"):
+                    d_path = m_dir / "events" / d_str
+                    d_path.mkdir(parents=True)
+                    (d_path / "ev.jsonl").write_bytes(b"a" * 20000)
 
-            win_dir = l_dir / "v2.8" / "windows"
-            win_dir.mkdir(parents=True)
-            summary_f = l_dir / "v2.8" / "summary.jsonl"
-            summary_f.write_text('{"slug":"keep","net_pnl":1.0,"traded":true}\n', encoding="utf-8")
-            # 35 recent replay gz files (all within 7 days)
-            for i in range(35):
-                ep = int(now_ts - (35 - i) * 300)
-                (win_dir / f"btc-updown-5m-{ep}.json.gz").write_bytes(b"g" * 5000)
-            g_dir.mkdir(parents=True)
+                win_dir = l_dir / "v2.8" / "windows"
+                win_dir.mkdir(parents=True)
+                summary_f = l_dir / "v2.8" / "summary.jsonl"
+                summary_f.write_text('{"slug":"keep","net_pnl":1.0,"traded":true}\n', encoding="utf-8")
+                # 35 recent replay gz files (all within 7 days)
+                for i in range(35):
+                    ep = int(now_ts - (35 - i) * 300)
+                    (win_dir / f"btc-updown-5m-{ep}.json.gz").write_bytes(b"g" * 5000)
+                g_dir.mkdir(parents=True)
 
-            # 1. Simulate high (non-critical) disk pressure (88.3% used, 3.5 GB free on 30 GB disk -> >= 85% hard limit, < 93% critical)
-            gb = 1024 ** 3
-            high_usage = lambda _: Usage(total=30 * gb, used=int(26.5 * gb), free=int(3.5 * gb))
-            res = cleanup_old_data(
-                market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
-                market_days=3, replay_days=7, log_days=7, now=now_ts,
-                disk_usage_fn=high_usage, update_guard_state=False,
-            )
-            self.assertTrue(res["pressure_triggered"])
-            # Non-today market dirs evicted, today preserved
-            self.assertFalse((m_dir / "events" / "2026-11-20").exists())
-            self.assertFalse((m_dir / "events" / "2026-11-21").exists())
-            self.assertTrue((m_dir / "events" / "2026-11-22").exists(), "Today's UTC folder must never be deleted")
-            # At least 30 newest replays preserved under non-critical pressure, summary untouched
-            remaining_gz = list(win_dir.glob("*.json.gz"))
-            self.assertEqual(len(remaining_gz), 30)
-            self.assertTrue(summary_f.exists())
-            self.assertFalse(res["disk_guard_paused"])
+                # 1. Simulate high (non-critical) disk pressure (88.3% used, 3.5 GB free on 30 GB disk -> >= 85% hard limit, < 93% critical)
+                gb = 1024 ** 3
+                high_usage = lambda _: Usage(total=30 * gb, used=int(26.5 * gb), free=int(3.5 * gb))
+                res = cleanup_old_data(
+                    market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
+                    market_days=3, replay_days=7, log_days=7, now=now_ts,
+                    disk_usage_fn=high_usage, update_guard_state=False,
+                )
+                self.assertTrue(res["pressure_triggered"])
+                # Non-today market dirs evicted, today preserved
+                self.assertFalse((m_dir / "events" / "2026-11-20").exists())
+                self.assertFalse((m_dir / "events" / "2026-11-21").exists())
+                self.assertTrue((m_dir / "events" / "2026-11-22").exists(), "Today's UTC folder must never be deleted")
+                # At least 30 newest replays preserved under non-critical pressure, summary untouched
+                remaining_gz = list(win_dir.glob("*.json.gz"))
+                self.assertEqual(len(remaining_gz), 30)
+                self.assertTrue(summary_f.exists())
+                self.assertFalse(res["disk_guard_paused"])
 
-            # 2. Simulate critical disk full (96% used, 0.3 GB free) -> auto-pauses raw recording
-            crit_usage = lambda _: Usage(total=30 * gb, used=int(29.7 * gb), free=int(0.3 * gb))
-            res_crit = cleanup_old_data(
-                market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
-                market_days=3, replay_days=7, log_days=7, now=now_ts,
-                disk_usage_fn=crit_usage, update_guard_state=True,
-            )
-            self.assertTrue(res_crit["disk_guard_paused"])
-            self.assertFalse(is_raw_recording_allowed())
-            self.assertTrue(summary_f.exists(), "summary.jsonl must survive even critical disk-full cleanup")
+                # 2. Simulate critical disk full (96% used, 0.3 GB free) -> auto-pauses raw recording
+                crit_usage = lambda _: Usage(total=30 * gb, used=int(29.7 * gb), free=int(0.3 * gb))
+                res_crit = cleanup_old_data(
+                    market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
+                    market_days=3, replay_days=7, log_days=7, now=now_ts,
+                    disk_usage_fn=crit_usage, update_guard_state=True,
+                )
+                self.assertTrue(res_crit["disk_guard_paused"])
+                self.assertFalse(is_raw_recording_allowed())
+                self.assertTrue(summary_f.exists(), "summary.jsonl must survive even critical disk-full cleanup")
 
-            # 3. Restore healthy disk -> raw recording resumes automatically
-            ok_usage = lambda _: Usage(total=30 * gb, used=10 * gb, free=20 * gb)
-            res_ok = cleanup_old_data(
-                market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
-                market_days=3, replay_days=7, log_days=7, now=now_ts,
-                disk_usage_fn=ok_usage, update_guard_state=True,
-            )
-            self.assertFalse(res_ok["disk_guard_paused"])
-            self.assertTrue(is_raw_recording_allowed())
+                # 3. Restore healthy disk -> raw recording resumes automatically
+                ok_usage = lambda _: Usage(total=30 * gb, used=10 * gb, free=20 * gb)
+                res_ok = cleanup_old_data(
+                    market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
+                    market_days=3, replay_days=7, log_days=7, now=now_ts,
+                    disk_usage_fn=ok_usage, update_guard_state=True,
+                )
+                self.assertFalse(res_ok["disk_guard_paused"])
+                self.assertTrue(is_raw_recording_allowed())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

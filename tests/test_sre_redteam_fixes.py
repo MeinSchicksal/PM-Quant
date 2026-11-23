@@ -75,10 +75,10 @@ class TestPolicyAndMatcherHardening(unittest.TestCase):
         self.assertEqual(dec_flat.action, "wait")
         self.assertIn("Circuit breaker", dec_flat.reason)
 
-        # Existing winning position -> still allowed to execute Black-Swan Lock under breaker
+        # Existing winning position -> still allowed to execute explicit Black-Swan Lock under breaker
         dec_lock = plan_decision(
             Position(5.0, 2.80), Position(0, 0), _book(0.94, 0.96), _book(0.04, 0.05),
-            spot, tau_s=120.0, params=params, circuit_breaker_active=True,
+            spot, tau_s=120.0, params=dict(params, ENABLE_BLACKSWAN_LOCK=True), circuit_breaker_active=True,
             circuit_breaker_reason="Daily limit", p_fair=0.92, entries_count=1,
         )
         self.assertEqual(dec_lock.action, "taker_hedge")

@@ -369,11 +369,20 @@ def _read_detail(ledger_dir, slug):
     return detail
 
 
+_LIVE_CACHE = {"key": None, "data": None}
+_LIVE_CACHE_LOCK = threading.Lock()
+
+
 def _read_live():
     live_file = config.CURRENT_LEDGER_DIR / "live.json"
     if not live_file.exists():
         return None
     try:
+        st = live_file.stat()
+        cache_key = (str(live_file), st.st_mtime_ns, st.st_size)
+        with _LIVE_CACHE_LOCK:
+            if _LIVE_CACHE["key"] == cache_key and _LIVE_CACHE["data"] is not None:
+                return dict(_LIVE_CACHE["data"])
         raw = json.loads(live_file.read_text(encoding="utf-8"))
         if not raw.get("slug"):
             return None
@@ -382,7 +391,10 @@ def _read_live():
         raw["net_pnl"] = None
         actions = raw.get("actions", [])
         raw["average_prices"] = _average_prices(actions)
-        return raw
+        with _LIVE_CACHE_LOCK:
+            _LIVE_CACHE["key"] = cache_key
+            _LIVE_CACHE["data"] = raw
+        return dict(raw)
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 

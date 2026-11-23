@@ -22,6 +22,35 @@ def _wait(reason: str, urgent: bool = False) -> Decision:
     return Decision(action="wait", reason=reason, urgent_cancel=urgent)
 
 
+def required_entry_edge(
+    price: float,
+    tau_s: float,
+    base_edge: float,
+    params: Dict[str, float],
+) -> float:
+    """Compute dynamic required net edge accounting for high-price negative convexity and early-tau noise.
+
+    - In the golden launch zone (`price <= $0.54` and `tau_s <= 180s`), returns `base_edge` unchanged.
+    - Above `PRICE_EDGE_PIVOT` ($0.54), adds `(price - 0.54) * PRICE_EDGE_SLOPE` to compensate for
+      worsening payoff odds (risking $0.62 to win $0.38 requires higher conviction than $0.50).
+    - Above `EARLY_TAU_PIVOT_S` (180s), smoothly adds up to `EARLY_TAU_MAX_PREMIUM` (+1.2% at 240s)
+      so early entries only fire when orderbook pricing genuinely lags spot.
+    """
+    px_pivot = float(params.get("PRICE_EDGE_PIVOT", 0.54))
+    px_slope = max(0.0, float(params.get("PRICE_EDGE_SLOPE", 0.18)))
+    px_prem = max(0.0, float(price) - px_pivot) * px_slope
+
+    tau_pivot = float(params.get("EARLY_TAU_PIVOT_S", 180.0))
+    tau_max_prem = max(0.0, float(params.get("EARLY_TAU_MAX_PREMIUM", 0.012)))
+    if tau_s > tau_pivot and tau_max_prem > 0.0:
+        span = max(1.0, float(params.get("ENTRY_MAX_TAU_S", 240.0)) - tau_pivot)
+        tau_prem = min(1.0, (float(tau_s) - tau_pivot) / span) * tau_max_prem
+    else:
+        tau_prem = 0.0
+
+    return float(base_edge) + px_prem + tau_prem
+
+
 def _has_heavy_ask_wall(book: OrderBook, params: Dict[str, float]) -> bool:
     """Detect overwhelming ask-side selling pressure on top-5 book depth.
 
@@ -89,6 +118,7 @@ def _plan_inventory_management(
 
     au, ad = held_book.best_ask, opp_book.best_ask
     bu, bd = held_book.best_bid, opp_book.best_bid
+    book_tol = max(0.0, float(params.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
     opp_book_valid = (
         opp_book.best_ask is not None
         and (opp_book.best_bid is None or opp_book.best_bid < opp_book.best_ask)
@@ -96,7 +126,12 @@ def _plan_inventory_management(
     dual_books_consistent = opp_book_valid
     if bool(params.get("STRICT_BOOK_CONSISTENCY", True)):
         if au is not None and ad is not None and bu is not None and bd is not None:
-            dual_books_consistent = (au + ad >= 0.995) and (bu + bd <= 1.005) and (bu < au) and (bd < ad)
+            dual_books_consistent = (
+                (au + ad >= 1.0 - book_tol - 1e-9)
+                and (bu + bd <= 1.0 + book_tol + 1e-9)
+                and (bu < au)
+                and (bd < ad)
+            )
     spot_is_stale = bool(getattr(spot, "is_stale", False))
 
     if (
@@ -195,129 +230,169 @@ def _plan_inventory_management(
         or bool(getattr(spot, "is_stale", False))
     )
 
-    # v2.6 Secondary Entry: Confirmed Pyramid Add or Collapsed Reversal Flip
-    # Only evaluate secondary entries once Leg-1 has filled at least one complete lot
-    # AND at least SECONDARY_ENTRY_COOLDOWN_S seconds have passed since the prior entry fill
-    # (prevents 0.5s double-tap into an unconfirmed 2x position).
+    # v2.9 Secondary Entry:
+    #   (A) Confirmed Pyramid Add on winning unhedged Leg-1 (requires calm spot + full cooldown)
+    #   (B) Dynamic Adverse-Move Flip at ANY valid opposite price [$0.01, $0.96] when held thesis
+    #       looks genuinely wrong (not blocked by mild spot velocity/storm guards, shorter cooldown,
+    #       strictly positive post-fee edge, max window exposure still capped at MAX_LOTS).
     max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 240.0)))
     sec_cooldown = float(params.get("SECONDARY_ENTRY_COOLDOWN_S", 15.0))
+    flip_cooldown = float(params.get("FLIP_COOLDOWN_S", 5.0))
     elapsed_since_entry = params.get("SECONDS_SINCE_LAST_ENTRY")
-    cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= sec_cooldown - 1e-6)
+    pyr_cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= sec_cooldown - 1e-6)
+    flip_cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= flip_cooldown - 1e-6)
+
+    committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
+    window_budget = float(params.get("MAX_WINDOW_LOSS_USD", 10.0))
+    max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
+    max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
+
     if (
         held_shares >= lot_size - 1e-4
         and entries_count < max_entries
         and tau_s <= max_tau
-        and not is_toxic_or_stale
-        and cooldown_ok
+        and not spot_is_stale
     ):
-        au, ad = held_book.best_ask, opp_book.best_ask
-        bu, bd = held_book.best_bid, opp_book.best_bid
         books_ok = (au is not None and ad is not None and bu is not None and bd is not None)
         if books_ok and bool(params.get("STRICT_BOOK_CONSISTENCY", True)):
-            books_ok = (au + ad >= 0.995) and (bu + bd <= 1.005) and (bu < au) and (bd < ad)
+            books_ok = (
+                (au + ad >= 1.0 - book_tol - 1e-9)
+                and (bu + bd <= 1.0 + book_tol + 1e-9)
+                and (bu < au)
+                and (bd < ad)
+            )
 
-        available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
-        committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
-        window_budget = float(params.get("MAX_WINDOW_LOSS_USD", 10.0))
-        max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
-        max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
-
-        if books_ok:
-            # 1) Confirmed Pyramid Add on winning unhedged Leg-1 (Taker-only by default in v2.8)
-            pyr_min_tau = float(params.get("PYRAMID_MIN_TAU_S", 45.0))
-            pyr_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
+        # 1) Confirmed Pyramid Add on winning unhedged Leg-1 (Taker-only by default)
+        pyr_min_tau = float(params.get("PYRAMID_MIN_TAU_S", 35.0))
+        pyr_max_spread = float(params.get("PYRAMID_MAX_SPREAD", max_book_spread))
+        pyr_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
+        if (
+            books_ok
+            and not is_toxic_or_stale
+            and pyr_cooldown_ok
+            and bool(params.get("ENABLE_PYRAMID_ADD", False))
+            and opp_shares < 1e-4
+            and held_total_shares < max_shares_cap - 1e-4
+            and pyr_min_tau <= tau_s <= float(params.get("PYRAMID_MAX_TAU_S", 180.0))
+            and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.70))
+            and held_book.spread <= pyr_max_spread + 1e-6
+        ):
+            p_min_px = float(params.get("PYRAMID_MIN_PRICE", 0.35))
+            p_max_px = float(params.get("PYRAMID_MAX_PRICE", 0.82))
+            p_tk_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", 0.055))
+            p_mk_edge = float(params.get("PYRAMID_MIN_MAKER_EDGE", 0.06))
+            ask = held_book.best_ask
+            if ask is not None and p_min_px <= ask <= p_max_px:
+                fee = taker_fee_per_share(ask, fee_rate)
+                need_cash = lot_size * (ask + fee)
+                tk_edge = p_fair_held - (ask + fee)
+                if (
+                    tk_edge >= p_tk_edge
+                    and available_cap + 1e-9 >= need_cash
+                    and committed + need_cash <= window_budget + 1e-9
+                ):
+                    return Decision(
+                        action="taker_buy",
+                        side=held_side,
+                        price=ask,
+                        size=lot_size,
+                        utility=round(tk_edge, 4),
+                        reason=f"v2.9 顺势确认加仓 IOC: {held_side} ask=${ask:.2f} (P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
+                    )
+            bid = held_book.best_bid
+            mk_cap = min(p_max_px, 0.78)
             if (
-                bool(params.get("ENABLE_PYRAMID_ADD", False))
-                and opp_shares < 1e-4
-                and held_total_shares < max_shares_cap - 1e-4
-                and pyr_min_tau <= tau_s <= float(params.get("PYRAMID_MAX_TAU_S", 180.0))
-                and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.70))
-                and held_book.spread <= max_book_spread + 1e-6
+                pyr_allow_maker
+                and not _has_heavy_ask_wall(held_book, params)
+                and quote_attempts < max_quote_attempts
+                and bid is not None
+                and p_min_px <= bid <= mk_cap
             ):
-                p_min_px = float(params.get("PYRAMID_MIN_PRICE", 0.35))
-                p_max_px = float(params.get("PYRAMID_MAX_PRICE", 0.72))
-                p_tk_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", 0.065))
-                p_mk_edge = float(params.get("PYRAMID_MIN_MAKER_EDGE", 0.06))
-                if available_cap >= lot_size * p_max_px and committed + lot_size * p_max_px <= window_budget + 1e-9:
-                    ask = held_book.best_ask
-                    if ask is not None and p_min_px <= ask <= p_max_px:
-                        fee = taker_fee_per_share(ask, fee_rate)
-                        tk_edge = p_fair_held - (ask + fee)
-                        if tk_edge >= p_tk_edge:
-                            return Decision(
-                                action="taker_buy",
-                                side=held_side,
-                                price=ask,
-                                size=lot_size,
-                                utility=round(tk_edge, 4),
-                                reason=f"v2.8 顺势确认加仓 IOC: {held_side} ask=${ask:.2f} (P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
-                            )
-                    bid = held_book.best_bid
-                    mk_cap = min(p_max_px, 0.70)
-                    if (
-                        pyr_allow_maker
-                        and not _has_heavy_ask_wall(held_book, params)
-                        and quote_attempts < max_quote_attempts
-                        and bid is not None
-                        and p_min_px <= bid <= mk_cap
-                    ):
-                        mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= mk_cap) else round(bid, 2)
-                        mk_edge = p_fair_held - mk_px
-                        if mk_px <= mk_cap and mk_edge >= p_mk_edge:
-                            return Decision(
-                                action="quote",
-                                side=held_side,
-                                price=mk_px,
-                                size=lot_size,
-                                utility=round(mk_edge, 4),
-                                reason=f"v2.8 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
-                            )
+                mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= mk_cap) else round(bid, 2)
+                need_cash = lot_size * mk_px
+                mk_edge = p_fair_held - mk_px
+                if (
+                    mk_px <= mk_cap
+                    and mk_edge >= p_mk_edge
+                    and available_cap + 1e-9 >= need_cash
+                    and committed + need_cash <= window_budget + 1e-9
+                ):
+                    return Decision(
+                        action="quote",
+                        side=held_side,
+                        price=mk_px,
+                        size=lot_size,
+                        utility=round(mk_edge, 4),
+                        reason=f"v2.9 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
+                    )
 
-            # 2) Independent Opposite-Side Flip when Leg-1 collapsed
-            p_opp = 1.0 - p_fair_held
+        # 2) Dynamic Sub-$1.00 Pair-Lock Flip:
+        #    Acts when held leg weakens (P*_held <= FLIP_MAX_HELD_PROB), opposite leg has
+        #    positive net edge, AND total paired cost `held_basis + opp_px + fee <= FLIP_MAX_PAIR_COST`
+        #    (default $0.98 < $1.00). Never executes >$1.00 guaranteed-loss stop-loss pairs!
+        p_opp = 1.0 - p_fair_held
+        flip_max_spread = float(params.get("FLIP_MAX_SPREAD", 0.12))
+        flip_max_pair = float(params.get("FLIP_MAX_PAIR_COST", 0.98))
+        if (
+            bool(params.get("ENABLE_REVERSAL_FLIP", False))
+            and flip_cooldown_ok
+            and opp_shares < 1e-4
+            and opp_book_valid
+            and dual_books_consistent
+            and p_fair_held <= float(params.get("FLIP_MAX_HELD_PROB", 0.42))
+            and p_opp >= float(params.get("FLIP_MIN_OPP_PROB", 0.58))
+            and opp_book.spread <= flip_max_spread + 1e-6
+        ):
+            f_min_px = float(params.get("FLIP_MIN_PRICE", 0.01))
+            f_max_px = float(params.get("FLIP_MAX_PRICE", 0.96))
+            f_tk_edge = float(params.get("FLIP_MIN_TAKER_EDGE", 0.040))
+            f_mk_edge = float(params.get("FLIP_MIN_MAKER_EDGE", 0.045))
+            ask = opp_book.best_ask
+            if ask is not None and f_min_px - 1e-6 <= ask <= f_max_px + 1e-6:
+                fee = taker_fee_per_share(ask, fee_rate)
+                pair_cost = held_basis + ask + fee
+                need_cash = lot_size * (ask + fee)
+                tk_edge = p_opp - (ask + fee)
+                if (
+                    pair_cost <= flip_max_pair + 1e-6
+                    and tk_edge >= f_tk_edge
+                    and available_cap + 1e-9 >= need_cash
+                    and committed + need_cash <= window_budget + 1e-9
+                ):
+                    return Decision(
+                        action="taker_buy",
+                        side=opp_side,
+                        price=ask,
+                        size=lot_size,
+                        utility=round(tk_edge, 4),
+                        reason=f"v2.9 动态不对劲反买 IOC: {opp_side} ask=${ask:.2f} (配对成本=${pair_cost:.3f}<=${flip_max_pair:.2f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
+                    )
+            bid = opp_book.best_bid
             if (
-                bool(params.get("ENABLE_REVERSAL_FLIP", False))
-                and opp_shares < 1e-4
-                and p_fair_held <= float(params.get("FLIP_MAX_HELD_PROB", 0.30))
-                and p_opp >= float(params.get("FLIP_MIN_OPP_PROB", 0.65))
-                and opp_book.spread <= max_book_spread + 1e-6
+                not is_toxic_or_stale
+                and not _has_heavy_ask_wall(opp_book, params)
+                and quote_attempts < max_quote_attempts
+                and bid is not None
+                and f_min_px - 1e-6 <= bid <= f_max_px + 1e-6
             ):
-                f_min_px = float(params.get("ENTRY_MIN_PRICE", 0.20))
-                f_max_px = float(params.get("ENTRY_MAX_PRICE", 0.75))
-                f_tk_edge = float(params.get("FLIP_MIN_TAKER_EDGE", 0.065))
-                f_mk_edge = float(params.get("FLIP_MIN_MAKER_EDGE", 0.06))
-                if available_cap >= lot_size * f_max_px and committed + lot_size * f_max_px <= window_budget + 1e-9:
-                    ask = opp_book.best_ask
-                    if ask is not None and f_min_px <= ask <= f_max_px:
-                        fee = taker_fee_per_share(ask, fee_rate)
-                        tk_edge = p_opp - (ask + fee)
-                        if tk_edge >= f_tk_edge:
-                            return Decision(
-                                action="taker_buy",
-                                side=opp_side,
-                                price=ask,
-                                size=lot_size,
-                                utility=round(tk_edge, 4),
-                                reason=f"v2.8 坍塌反手吃单 IOC: {opp_side} ask=${ask:.2f} (P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
-                            )
-                    bid = opp_book.best_bid
-                    if (
-                        not _has_heavy_ask_wall(opp_book, params)
-                        and quote_attempts < max_quote_attempts
-                        and bid is not None
-                        and f_min_px <= bid <= f_max_px
-                    ):
-                        mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= f_max_px) else round(bid, 2)
-                        mk_edge = p_opp - mk_px
-                        if mk_edge >= f_mk_edge:
-                            return Decision(
-                                action="quote",
-                                side=opp_side,
-                                price=mk_px,
-                                size=lot_size,
-                                utility=round(mk_edge, 4),
-                                reason=f"v2.8 坍塌反手挂单 Maker: {opp_side} bid=${mk_px:.2f} (P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
-                            )
+                mk_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= f_max_px) else round(bid, 2)
+                pair_cost_mk = held_basis + mk_px
+                need_cash = lot_size * mk_px
+                mk_edge = p_opp - mk_px
+                if (
+                    pair_cost_mk <= flip_max_pair + 1e-6
+                    and mk_edge >= f_mk_edge
+                    and available_cap + 1e-9 >= need_cash
+                    and committed + need_cash <= window_budget + 1e-9
+                ):
+                    return Decision(
+                        action="quote",
+                        side=opp_side,
+                        price=mk_px,
+                        size=lot_size,
+                        utility=round(mk_edge, 4),
+                        reason=f"v2.9 动态不对劲反买 Maker: {opp_side} bid=${mk_px:.2f} (配对成本=${pair_cost_mk:.3f}<=${flip_max_pair:.2f}, 对侧P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
+                    )
 
     should_pull = (
         (held_shares >= lot_size - 1e-4)
@@ -411,18 +486,18 @@ def plan_decision(
     if u_shares >= max_shares - 1e-4 or d_shares >= max_shares - 1e-4:
         return _wait(f"Max position reached ({max(u_shares, d_shares):.0f} shares), holding to settlement", urgent=True)
 
-    max_entry_px = float(params.get("ENTRY_MAX_PRICE", params.get("LWAA_MAX_ENTRY_PRICE", 0.75)))
+    max_entry_px = float(params.get("ENTRY_MAX_PRICE", params.get("LWAA_MAX_ENTRY_PRICE", 0.80)))
     min_entry_px = float(params.get("ENTRY_MIN_PRICE", 0.20))
 
     available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
-    if available_cap < size * max_entry_px:
-        return _wait(f"v2.3: Insufficient capital (${available_cap:.2f}) for entry (${size * max_entry_px:.2f})", urgent=True)
+    if available_cap + 1e-9 < size * min_entry_px:
+        return _wait(f"v2.9: Insufficient capital (${available_cap:.2f}) for entry", urgent=True)
 
     committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
     window_budget = float(params.get("MAX_WINDOW_LOSS_USD", 5.0))
-    if committed + size * max_entry_px > window_budget + 1e-9:
+    if committed + size * min_entry_px > window_budget + 1e-9:
         return _wait(
-            f"v2.3: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓",
+            f"v2.9: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓",
             urgent=True,
         )
 
@@ -430,11 +505,11 @@ def plan_decision(
     anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
     vel_bps = abs(float(getattr(spot, "velocity_bps", 0.0) or 0.0))
     if getattr(spot, "is_toxic_shock", False) or vel_bps >= anti_toxic_bps:
-        return _wait(f"v2.8: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
+        return _wait(f"v2.9: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
     max_entry_vol = float(params.get("MAX_ENTRY_VOL_BPS", 75.0))
     live_vol = float(getattr(spot, "realized_vol_bps", 15.0) or 15.0)
     if max_entry_vol > 0 and live_vol > max_entry_vol:
-        return _wait(f"v2.8: 极端巨震风暴避险 (5m波动率 {live_vol:.1f} > {max_entry_vol:.0f} bps)", urgent=True)
+        return _wait(f"v2.9: 极端巨震风暴避险 (5m波动率 {live_vol:.1f} > {max_entry_vol:.0f} bps)", urgent=True)
 
     # 7. Active Time Window & Readiness Guards
     max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 240.0)))
@@ -448,15 +523,21 @@ def plan_decision(
     if getattr(spot, "is_stale", False):
         return _wait("v2.3: Spot price stale, holding off entry", urgent=True)
 
-    # Strict book consistency check (no fake shifting)
+    # Book consistency check (no fake shifting; tolerates 1-tick async WS jitter)
     au, ad = book_up.best_ask, book_down.best_ask
     bu, bd = book_up.best_bid, book_down.best_bid
     if au is None or ad is None or bu is None or bd is None:
         return _wait("v2.3: Incomplete orderbook snapshot, waiting", urgent=True)
+    book_tol = max(0.0, float(params.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
     if bool(params.get("STRICT_BOOK_CONSISTENCY", True)):
-        if (au + ad < 0.995) or (bu + bd > 1.005) or (bu >= au) or (bd >= ad):
+        if (
+            (au + ad < 1.0 - book_tol - 1e-9)
+            or (bu + bd > 1.0 + book_tol + 1e-9)
+            or (bu >= au)
+            or (bd >= ad)
+        ):
             return _wait(
-                f"v2.3: Inconsistent book snapshot (ask_sum={au+ad:.3f}, bid_sum={bu+bd:.3f}), skipping",
+                f"v2.9: Inconsistent book snapshot (ask_sum={au+ad:.3f}, bid_sum={bu+bd:.3f}), skipping",
                 urgent=True,
             )
 
@@ -471,6 +552,7 @@ def plan_decision(
     best_taker = None
     best_maker = None
     wall_blocked_msg = None
+    budget_blocked_msg = None
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
         if p_side < min_prob or tb.spread > max_book_spread + 1e-6:
@@ -479,9 +561,16 @@ def plan_decision(
         ask = tb.best_ask
         if ask is not None and min_entry_px <= ask <= max_entry_px:
             fee = taker_fee_per_share(ask, fee_rate)
+            need_cash = size * (ask + fee)
             taker_edge = p_side - (ask + fee)
-            if taker_edge >= min_taker_edge and (best_taker is None or taker_edge > best_taker[0]):
-                best_taker = (taker_edge, side, ask, fee)
+            req_tk_edge = required_entry_edge(ask, tau_s, min_taker_edge, params)
+            if taker_edge >= req_tk_edge - 1e-9:
+                if available_cap + 1e-9 < need_cash:
+                    budget_blocked_msg = f"v2.9: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
+                elif committed + need_cash > window_budget + 1e-9:
+                    budget_blocked_msg = f"v2.9: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓"
+                elif best_taker is None or taker_edge > best_taker[0]:
+                    best_taker = (taker_edge, side, ask, fee)
 
         bid = tb.best_bid
         if (
@@ -491,10 +580,16 @@ def plan_decision(
         ):
             maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
             maker_px = min(max_entry_px, max(min_entry_px, maker_px))
+            need_cash = size * maker_px
             maker_edge = p_side - maker_px
-            if maker_edge >= min_maker_edge:
-                if _has_heavy_ask_wall(tb, params):
-                    wall_blocked_msg = f"v2.8: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
+            req_mk_edge = required_entry_edge(maker_px, tau_s, min_maker_edge, params)
+            if maker_edge >= req_mk_edge - 1e-9:
+                if available_cap + 1e-9 < need_cash:
+                    budget_blocked_msg = f"v2.9: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
+                elif committed + need_cash > window_budget + 1e-9:
+                    budget_blocked_msg = f"v2.9: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓"
+                elif _has_heavy_ask_wall(tb, params):
+                    wall_blocked_msg = f"v2.9: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
                 elif best_maker is None or maker_edge > best_maker[0]:
                     best_maker = (maker_edge, side, maker_px, p_side)
 
@@ -507,7 +602,7 @@ def plan_decision(
             price=ask,
             size=size,
             utility=round(edge, 4),
-            reason=f"v2.8 净边际吃单 IOC: {side} ask=${ask:.2f} (P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            reason=f"v2.9 净边际吃单 IOC: {side} ask=${ask:.2f} (P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
         )
 
     if best_maker is not None:
@@ -518,8 +613,11 @@ def plan_decision(
             price=maker_px,
             size=size,
             utility=round(edge, 4),
-            reason=f"v2.8 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
+            reason=f"v2.9 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
         )
+
+    if budget_blocked_msg:
+        return _wait(budget_blocked_msg, urgent=True)
 
     if wall_blocked_msg:
         # Urgent cancel so any already-resting passive bid directly in front of
@@ -527,6 +625,6 @@ def plan_decision(
         return _wait(wall_blocked_msg, urgent=True)
 
     return _wait(
-        f"v2.8: 盘口无足够净边际 (P*(Up)={p_up:.2f}, Up={bu}/{au}, Dn={bd}/{ad})",
+        f"v2.9: 盘口无足够净边际 (P*(Up)={p_up:.2f}, Up={bu}/{au}, Dn={bd}/{ad})",
         urgent=False,
     )

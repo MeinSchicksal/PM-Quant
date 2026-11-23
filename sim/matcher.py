@@ -21,12 +21,16 @@ def _clamp_px(px: float) -> float:
     return min(0.99, max(0.01, px))
 
 
-def is_books_consistent(book_up: OrderBook, book_down: OrderBook) -> bool:
-    """Strictly verify dual-token orderbook consistency without fabricating prices.
+def is_books_consistent(
+    book_up: OrderBook,
+    book_down: OrderBook,
+    tolerance: float = 0.015,
+) -> bool:
+    """Verify dual-token orderbook consistency without fabricating prices.
 
-    In v2.3 (STRICT_BOOK_CONSISTENCY=True), inconsistent or crossed snapshots
-    are rejected rather than artificially shifted to prevent trading at prices
-    that never existed on the venue.
+    Rejects self-crossed books and severe arbitrage inversions while tolerating
+    1-tick (~1.5c) async millisecond frame skew between independent Up/Down WS
+    feeds so valid single-side trades are not spuriously dropped.
     """
     au, ad = book_up.best_ask, book_down.best_ask
     bu, bd = book_up.best_bid, book_down.best_bid
@@ -34,7 +38,8 @@ def is_books_consistent(book_up: OrderBook, book_down: OrderBook) -> bool:
         return False
     if bu >= au or bd >= ad:
         return False
-    if au + ad < 0.995 or bu + bd > 1.005:
+    tol = max(0.0, float(tolerance))
+    if au + ad < 1.0 - tol - 1e-9 or bu + bd > 1.0 + tol + 1e-9:
         return False
     return True
 
@@ -106,9 +111,10 @@ class QueueMatcher:
                 return float(sz)
         return 0.0
 
-    def register_order(self, order: Order, book: OrderBook):
+    def register_order(self, order: Order, book: OrderBook, latency_s: float = None):
         """Register newly placed maker order and record provisional queue ahead."""
-        order.live_at = (order.placed_at or 0.0) + self.latency_s
+        lat = self.latency_s if latency_s is None else max(0.0, float(latency_s))
+        order.live_at = (order.placed_at or 0.0) + lat
         order.activated = False
         self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
         self._crossed_snapshot.pop(order.id, None)
@@ -149,6 +155,50 @@ class QueueMatcher:
         self._crossed_snapshot.pop(order.id, None)
         self._crossed_avail.pop(order.id, None)
         return True
+
+    def sync_queue_depth(
+        self,
+        order: Order,
+        book: OrderBook,
+        now: float,
+        conservative_mult: float = 1.03,
+    ) -> float:
+        """Conservatively cap queue_ahead using live visible L2 depth at our bid price.
+
+        Physical conservation guarantee (never looser than real CLOB):
+        Since our simulated order is NOT actually resting on the venue book,
+        `vis_depth` is 100% composed of *other* real participants at `order.price`.
+        Therefore, the true queue ahead of us can NEVER exceed `vis_depth` (some
+        of `vis_depth` may even have joined *behind* us). Multiplying by a small
+        `conservative_mult` (default 1.03, ~3% stricter) fixes the pathological
+        phantom-queue bug where makers ahead cancel 95% of a 600-share level while
+        the simulator stayed frozen at 600, without ever inventing optimistic fills.
+
+        Never increases `queue_ahead` when new joiners arrive behind us, and never
+        zeros out queue_ahead purely because a momentary empty snapshot arrived
+        while best_bid is still above our price.
+        """
+        if order.remaining <= 1e-6 or not order.activated or book is None:
+            return self.queue_ahead.get(order.id, 0.0)
+        if order.live_at is None or now < order.live_at - 1e-9:
+            return self.queue_ahead.get(order.id, 0.0)
+        if not book.bids:
+            return self.queue_ahead.get(order.id, 0.0)
+        # Only cap against visible depth if our price lies within the published
+        # bid ladder; if the feed truncated deeper levels, vis_depth==0 is NOT
+        # evidence that the queue ahead cleared.
+        lowest_vis_bid = min(float(px) for px, _ in book.bids)
+        if order.price < lowest_vis_bid - 1e-6:
+            return self.queue_ahead.get(order.id, 0.0)
+        ahead = self.queue_ahead.get(order.id, 0.0)
+        if ahead <= 1e-9:
+            return 0.0
+        vis_depth = self._bid_depth_at_price(book, order.price)
+        mult = max(1.0, float(conservative_mult))
+        capped = min(ahead, vis_depth * mult)
+        if capped < ahead:
+            self.queue_ahead[order.id] = capped
+        return self.queue_ahead.get(order.id, 0.0)
 
     def on_trade_print(
         self,

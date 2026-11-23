@@ -342,10 +342,15 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.94, 50.0, 0.95, 50.0)
         b_dn = _book(0.05, 50.0, 0.06, 50.0)
         spot = SpotState(timestamp=1250.0, price=65050.0, open_price=65000.0, realized_vol_bps=14.0)
-        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=config.PARAMS, entries_count=1)
+        # Opt-in behavior still works when explicitly enabled
+        p_on = dict(config.PARAMS, ENABLE_BLACKSWAN_LOCK=True)
+        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=p_on, entries_count=1)
         self.assertEqual(dec.action, "taker_hedge")
         self.assertEqual(dec.side, "Down")
         self.assertAlmostEqual(dec.price, 0.06, places=4)
+        # In v2.9 default config, fixed black-swan lock is OFF so it does not bleed premium
+        dec_default = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=config.PARAMS, entries_count=1)
+        self.assertEqual(dec_default.action, "wait")
 
     def test_pyramid_confirm_add_triggers_on_strong_winner(self):
         import config
@@ -367,13 +372,19 @@ class TestV26PolicyUpgrades(unittest.TestCase):
 
         pos_up = Position(shares=5.0, cash=2.40)  # @ 0.48
         pos_dn = Position(0.0, 0.0)
-        b_up = _book(0.41, 50.0, 0.43, 50.0)
-        b_dn = _book(0.57, 50.0, 0.59, 50.0)
+        b_up = _book(0.51, 50.0, 0.53, 50.0)
+        b_dn = _book(0.46, 50.0, 0.48, 50.0)  # pair_cost = 0.48 + 0.48 + 0.0175 = 0.9775 <= 0.98 (< $1.00)
         spot = SpotState(timestamp=1180.0, price=64910.0, open_price=65000.0, realized_vol_bps=14.0)
         dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.25, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Down")
-        self.assertIn("坍塌反手", dec.reason)
+        self.assertIn("动态不对劲反买", dec.reason)
+
+        # When opposite ask pushes pair_cost > $1.00 (0.48 + 0.59 + fee = 1.087 > 0.98), pairing is strictly forbidden!
+        b_up_low = _book(0.41, 50.0, 0.43, 50.0)
+        b_dn_over1 = _book(0.57, 50.0, 0.59, 50.0)
+        dec_over1 = plan_decision(pos_up, pos_dn, b_up_low, b_dn_over1, spot, tau_s=120.0, params=config.PARAMS, p_fair=0.25, entries_count=1)
+        self.assertEqual(dec_over1.action, "wait")
 
     def test_secondary_quote_uses_entry_purpose_and_fresh_quote_attempts(self):
         tmp = tempfile.mkdtemp(prefix="pm_sec_entry_")
@@ -493,18 +504,18 @@ class TestV26PolicyUpgrades(unittest.TestCase):
             runner.step(t0 + 70.0, spot, b_up, b_dn, replay_mode=True)
         self.assertEqual(len(runner.working_orders), 1)
 
-        # 2. At t0+75.0, urgent cancel is requested -> order enters pending_cancels for 300ms [75.0, 75.30)
+        # 2. At t0+75.0, urgent cancel is requested -> order enters pending_cancels for CANCEL_LATENCY_S [75.0, 75.12)
         cancel_dec = Decision(action="wait", reason="toxic shock", urgent_cancel=True)
         with patch("runtime.runner.plan_decision", return_value=cancel_dec):
             runner.step(t0 + 75.0, spot, b_up, b_dn, replay_mode=True)
         self.assertEqual(len(runner.working_orders), 0)
         self.assertEqual(len(runner.pending_cancels), 1)
 
-        # 3. Trade print arrives at t0+75.15 (150ms after cancel request, still in flight!) -> must fill!
+        # 3. Trade print arrives at t0+75.06 (60ms after cancel request, still in flight!) -> must fill!
         with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="hold")):
             runner.step(
-                t0 + 75.15, spot, b_up, b_dn,
-                trade_prints=[{"outcome": "Up", "price": 0.50, "size": 5.0, "timestamp": t0 + 75.15}],
+                t0 + 75.06, spot, b_up, b_dn,
+                trade_prints=[{"outcome": "Up", "price": 0.50, "size": 5.0, "timestamp": t0 + 75.06}],
                 replay_mode=True,
             )
         self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
@@ -575,8 +586,8 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         dec_b = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=80.0, params=params, p_fair=0.68, entries_count=1)
         self.assertEqual(dec_b.action, "wait")
 
-        # C: tau < 45s -> blocked from pyramiding near expiry
-        dec_c = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=35.0, params=params, p_fair=0.74, entries_count=1)
+        # C: tau < PYRAMID_MIN_TAU_S (35s) -> blocked from pyramiding near expiry
+        dec_c = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=25.0, params=params, p_fair=0.74, entries_count=1)
         self.assertEqual(dec_c.action, "wait")
 
         # D: p_fair >= 0.70, tau >= 45s, Taker edge >= 0.065 -> executes Taker pyramid add
@@ -621,12 +632,12 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         self.assertEqual(dec_new.action, "wait")
         self.assertIn("极端巨震风暴避险", dec_new.reason)
 
-        # Existing inventory still gets Black-Swan Lock protection during storm
+        # Existing inventory still gets explicit Black-Swan Lock protection during storm when opted in
         b_dn_cheap = _book(0.04, 50.0, 0.05, 50.0)
         b_up_high = _book(0.94, 50.0, 0.96, 50.0)
         dec_lock = plan_decision(
             Position(shares=5.0, cash=2.90), Position(0.0, 0.0), b_up_high, b_dn_cheap, spot_storm,
-            tau_s=120.0, params=config.PARAMS, p_fair=0.90, entries_count=1,
+            tau_s=120.0, params=dict(config.PARAMS, ENABLE_BLACKSWAN_LOCK=True), p_fair=0.90, entries_count=1,
         )
         self.assertEqual(dec_lock.action, "taker_hedge")
         self.assertEqual(dec_lock.side, "Down")

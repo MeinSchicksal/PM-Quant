@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.48">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.52">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -21,7 +21,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v2.8</span>
+      <span class="brand-version" id="page-version">v2.9</span>
     </div>
 
     <div class="sidebar-top">
@@ -211,22 +211,6 @@
         </div>
       </section>
 
-      <!-- Row 1b: Compact Server & Storage Health Strip (all resolutions; click to open settings) -->
-      <section class="panel server-health-strip" id="server-health-strip" role="button" tabindex="0" aria-label="服务器运行与存储状态，点击查看设置">
-        <div class="sh-left">
-          <span class="sh-dot" id="sh-dot"></span>
-          <strong id="sh-proc">服务器状态检测中</strong>
-          <span class="sh-sep">·</span>
-          <span id="sh-feeds">数据源 --</span>
-        </div>
-        <div class="sh-metrics">
-          <span class="sh-chip" id="sh-ram">内存 --</span>
-          <span class="sh-chip" id="sh-disk">磁盘 --</span>
-          <span class="sh-chip" id="sh-data">数据 --</span>
-          <span class="sh-action">存储设置 ›</span>
-        </div>
-      </section>
-
       <!-- Row 2: Golden-Ratio 2-Column Hero Grid (Left: Net PnL & Capital Scorecard | Right: Wide Equity Curve) -->
       <div class="overview-hero-grid">
         <!-- Card 1: Net PnL & Capital Structure -->
@@ -316,36 +300,6 @@
           <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
           <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
         </div>
-      </section>
-
-      <!-- Row 4: Market Regime Attribution Matrix Panel (Flush Edge-to-Edge Table) -->
-      <section class="panel section-panel table-panel" aria-label="微观行情形态盈亏归因">
-        <div class="section-head">
-          <div class="section-title-group">
-            <h2>行情形态策略归因矩阵</h2>
-            <p class="section-subtitle">按开仓时刻的微观行情形态归因 · 仅统计产生实际成交的窗口 · 样本量 n &lt; 30 标记为样本偏少</p>
-          </div>
-          <span class="badge-pill" id="regime-sample-badge">可归因 0 场</span>
-        </div>
-
-        <div class="table-wrap">
-          <table class="data-table regime-table">
-            <thead>
-              <tr>
-                <th>微观行情形态 (Regime)</th>
-                <th class="num" title="已成交窗口数（只有成交窗口才产生盈亏）">样本量 n</th>
-                <th class="num" title="剔除平局后的胜率；下方为胜/负场数">有效胜率</th>
-                <th class="num">累计净盈亏</th>
-                <th class="num" title="每场平均净盈亏 = 累计净盈亏 ÷ 样本 n">单窗期望均值</th>
-                <th class="num" title="单窗均值的 95% 置信区间；区间跨过零则无法区分 edge 与噪音">95% 置信区间 (CI)</th>
-              </tr>
-            </thead>
-            <tbody id="regime-attribution-tbody">
-              <tr><td colspan="6" class="action-empty">统计归因数据中...</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="regime-coverage" id="regime-coverage" hidden></div>
       </section>
     </section>
 
@@ -930,6 +884,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.50"></script>
+  <script src="/static/app.js?v=3.2.52"></script>
 </body>
 </html>

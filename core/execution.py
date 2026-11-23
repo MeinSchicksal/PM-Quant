@@ -63,6 +63,8 @@ def plan_order_actions(
     min_order_shares: float = 5.0,
     p_up: Optional[float] = None,
     min_hold_maker_edge: Optional[float] = None,
+    queue_ahead_map: Optional[dict] = None,
+    queue_head_protect_shares: float = 25.0,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
@@ -110,6 +112,19 @@ def plan_order_actions(
                     to_cancel.append(o)
                     continue
                 if order_age >= max_queue_wait_s:
+                    rem_ahead = (
+                        float(queue_ahead_map.get(o.id, 999999.0))
+                        if isinstance(queue_ahead_map, dict)
+                        else 999999.0
+                    )
+                    at_best_bid = (tb_bid is not None and o.price >= float(tb_bid) - 1e-4)
+                    if (
+                        at_best_bid
+                        and rem_ahead <= float(queue_head_protect_shares) + 1e-6
+                        and order_age < max_queue_wait_s * 2.0
+                    ):
+                        # Protect near-head resting order at best bid from suicidal 15s timeout
+                        continue
                     o.cancel_reason = f"排队超时撤单(已排队{order_age:.1f}s)"
                     to_cancel.append(o)
         return to_cancel, None
