@@ -457,6 +457,9 @@ class PolymarketBookWSClient:
         self._books: Dict[str, Dict[str, Any]] = {}
         self._last_ws_msg_t: float = 0.0
         self._last_pong_t: float = 0.0
+        self._min_srv_delta_s: Optional[float] = None
+        self.last_msg_lag_s: float = 0.0
+        self.max_msg_lag_s: float = 3.5
         self.rtt_ms: float = 0.0
         self.msg_count: int = 0
         self.reconnect_count: int = 0
@@ -473,6 +476,52 @@ class PolymarketBookWSClient:
                 st["ready"] = False
             self._last_pong_t = 0.0
             self._last_ws_msg_t = 0.0
+            self._min_srv_delta_s = None
+            self.last_msg_lag_s = 0.0
+
+    def _is_server_msg_lagged_locked(self, msg: Dict[str, Any], recv_ts: float) -> bool:
+        """基于服务端时间戳相对基线漂移检测 TCP/代理积压旧帧（免疫本机固定时钟偏移）。"""
+        raw_ts = msg.get("timestamp")
+        if raw_ts is None:
+            return False
+        srv_t = _safe_float(raw_ts, 0.0)
+        if srv_t > 1e11:
+            srv_t /= 1000.0
+        if not (1_600_000_000.0 < srv_t < 4_000_000_000.0):
+            return False
+        delta = recv_ts - srv_t
+        if self._min_srv_delta_s is None or delta < self._min_srv_delta_s:
+            self._min_srv_delta_s = delta
+        lag = max(0.0, delta - self._min_srv_delta_s)
+        self.last_msg_lag_s = round(lag, 2)
+        if lag > self.max_msg_lag_s:
+            for st in self._books.values():
+                st["ready"] = False
+            self._token_gen += 1
+            return True
+        return False
+
+    def invalidate_on_trade_divergence(
+        self,
+        token_id: str,
+        trade_price: float,
+        max_gap: float = 0.05,
+    ) -> bool:
+        """若独立逐笔成交流的实时成交价已甩开盘口 WS >= max_gap，判定 WS 积压滞后并强制重连。"""
+        if not (0.0 < trade_price < 1.0):
+            return False
+        with self._lock:
+            st = self._books.get(str(token_id))
+            if not st or not st.get("ready") or not st.get("bids") or not st.get("asks"):
+                return False
+            best_bid = max(st["bids"])
+            best_ask = min(st["asks"])
+            if trade_price > best_ask + max_gap or trade_price < best_bid - max_gap:
+                for b_st in self._books.values():
+                    b_st["ready"] = False
+                self._token_gen += 1
+                return True
+        return False
 
     def force_reconnect(self):
         """Force immediate resubscribe/reconnect (e.g. after proxy failover)."""
@@ -610,6 +659,8 @@ class PolymarketBookWSClient:
             ltp = msg.get("last_trade_price")
             ltp_f = _safe_float(ltp, -1.0) if ltp is not None else -1.0
             with self._lock:
+                if self._is_server_msg_lagged_locked(msg, ts):
+                    return False
                 self._books[aid] = {
                     "bids": bids,
                     "asks": asks,
@@ -637,6 +688,8 @@ class PolymarketBookWSClient:
                 return (b_px, b_sz, a_px, a_sz)
 
             with self._lock:
+                if self._is_server_msg_lagged_locked(msg, ts):
+                    return False
                 prev_tops: Dict[str, Tuple[Optional[float], float, Optional[float], float]] = {}
                 touched_aids = set()
                 for ch in changes:

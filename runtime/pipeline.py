@@ -670,16 +670,36 @@ class PipelineDriver:
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)
 
+                    # 盘口 WS 积压滞后防呆护栏：用独立逐笔成交流实时成交价交叉校验 WS 盘口，
+                    # 一旦真实成交价已甩开 WS 盘口 >= $0.05，立刻作废积压缓存并拉取实时 HTTP 盘口。
+                    book_diverged = False
+                    for tok_key, bk_obj in (("token_up", b_up), ("token_down", b_dn)):
+                        tok_id = active_tokens.get(tok_key)
+                        if not tok_id or bk_obj.best_bid is None or bk_obj.best_ask is None:
+                            continue
+                        tp_live = self.trade_stream.get_latest_price(tok_id, max_age_s=3.0, now=loop_start)
+                        if tp_live is not None and (tp_live > bk_obj.best_ask + 0.05 or tp_live < bk_obj.best_bid - 0.05):
+                            self.book_ws.invalidate_on_trade_divergence(tok_id, tp_live, max_gap=0.05)
+                            book_diverged = True
+                    if book_diverged:
+                        f_u = self.feed._executor.submit(self.feed.fetch_order_book, active_tokens["token_up"], "Up")
+                        f_d = self.feed._executor.submit(self.feed.fetch_order_book, active_tokens["token_down"], "Down")
+                        b_up = f_u.result()
+                        b_dn = f_d.result()
+
                     def _delayed_book(_side_name: str):
+                        # Taker IOC 延迟到站核验优先直连实时 HTTP REST 盘口，彻底杜绝读到代理/TCP 积压旧 WS 帧
                         def _one(tok_key: str, label: str):
                             tok = active_tokens.get(tok_key)
                             if not tok:
                                 return None
-                            ws_bk = self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
-                            if ws_bk is not None:
-                                return ws_bk
-                            return self.feed.fetch_order_book(tok, label)
-                        return (_one("token_up", "Up"), _one("token_down", "Down"))
+                            rest_bk = self.feed.fetch_order_book(tok, label)
+                            if rest_bk is not None and (rest_bk.best_bid is not None or rest_bk.best_ask is not None):
+                                return rest_bk
+                            return self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
+                        f_du = self.feed._executor.submit(_one, "token_up", "Up")
+                        f_dd = self.feed._executor.submit(_one, "token_down", "Down")
+                        return (f_du.result(), f_dd.result())
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)

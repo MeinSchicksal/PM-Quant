@@ -67,8 +67,8 @@ class TestSingleTickFills(unittest.TestCase):
         self.t0 = 1000.0
         self.runner.start_window("btc-updown-5m-1800000000", self.t0, self.t0 + 300.0, 75000.0)
 
-    def _step(self, now, trade_prints=None):
-        book_up = _book(0.44, 5.0, 0.46, 10.0)
+    def _step(self, now, trade_prints=None, up_ask=0.46):
+        book_up = _book(0.44, 5.0, up_ask, 10.0)
         book_down = _book(0.54, 10.0, 0.56, 10.0)
         spot = SpotState(
             timestamp=now, price=75010.0, open_price=75000.0,
@@ -79,9 +79,12 @@ class TestSingleTickFills(unittest.TestCase):
             self.runner.step(now, spot, book_up, book_down, trade_prints=trade_prints)
 
     def test_print_fill_not_duplicated_by_stale_crossed_book(self):
-        # Tick 1 places the resting Up bid @0.46 (queue ahead is 0: book bid is 0.44).
-        self._step(self.t0 + 10.0)
+        # Tick 1 places the resting Up bid @0.46 while ask is 0.48 (queue ahead is 0: book bid is 0.44).
+        self._step(self.t0 + 10.0, up_ask=0.48)
         self.assertEqual(len(self.runner.working_orders), 1)
+        # Tick 1b activates the resting Post-Only order cleanly once wire latency elapses.
+        self._step(self.t0 + 10.5, up_ask=0.48)
+        self.assertTrue(self.runner.working_orders[0].activated)
 
         # Tick 2: a print for 3 shares fills 3 of the 5 shares, leaving 2. The
         # book snapshot in the same tick shows 10 shares at 0.46 (already
@@ -90,6 +93,7 @@ class TestSingleTickFills(unittest.TestCase):
         self._step(
             self.t0 + 11.0,
             trade_prints=[{"outcome": "Up", "price": 0.46, "size": 3.0, "timestamp": self.t0 + 11.0}],
+            up_ask=0.46,
         )
         self.assertAlmostEqual(self.runner.pos_up.shares, 3.0, places=6)
         self.assertEqual(len(self.runner.fills), 1)

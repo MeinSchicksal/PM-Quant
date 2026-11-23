@@ -150,7 +150,7 @@ class QueueMatcher:
             order.cancel_reason = f"Post-Only 到达穿盘拒单(挂买=${order.price:.2f}, 现卖一=${book.best_ask:.2f})"
             return False
         order.activated = True
-        if book is not None:
+        if book is not None and book.bids:
             self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
         self._crossed_snapshot.pop(order.id, None)
         self._crossed_avail.pop(order.id, None)

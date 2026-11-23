@@ -79,6 +79,19 @@ class TradeStreamClient:
         self.last_error = ""
         self._last_err_log_t = 0.0
         self._dropped_unattributed = 0
+        self._latest_price_by_token: Dict[str, tuple] = {}
+
+    def get_latest_price(self, token_id: str, max_age_s: float = 3.0, now: Optional[float] = None) -> Optional[float]:
+        """返回指定 Token 最近 max_age_s 秒内的真实逐笔成交价，供盘口 WS 滞后交叉校验。"""
+        t = time.time() if now is None else float(now)
+        with self._lock:
+            rec = self._latest_price_by_token.get(str(token_id))
+            if not rec:
+                return None
+            px, recv_t = rec
+            if (t - recv_t) > max_age_s or px <= 0.0:
+                return None
+            return float(px)
 
     def set_active_targets(self, slugs: List[str], token_ids: List[str] = None):
         """Update active slugs and token IDs to filter incoming trades."""
@@ -329,6 +342,14 @@ class TradeStreamClient:
             self._seen_order.append(dedupe_key)
             self._seen_keys.add(dedupe_key)
             self._pending_trades.append(trade_record)
+            if trade_record["token_id"] and trade_record["price"] > 0.0:
+                self._latest_price_by_token[str(trade_record["token_id"])] = (
+                    float(trade_record["price"]),
+                    float(trade_record["received_at"]),
+                )
+                if len(self._latest_price_by_token) > 64:
+                    oldest_k = min(self._latest_price_by_token, key=lambda k: self._latest_price_by_token[k][1])
+                    self._latest_price_by_token.pop(oldest_k, None)
             self.last_trade_t = trade_record["received_at"]
             self.trade_count += 1
 

@@ -13,6 +13,7 @@ from core.policy import _compute_ioc_buy_limit, _walk_ask_vwap
 from core.types import Decision, OrderBook, SpotState
 from runtime.market_feed import MarketFeed
 from runtime.runner import PaperRunner
+from runtime.trade_stream import TradeStreamClient
 from runtime.ws_feeds import BinanceSpotWSClient, PolymarketBookWSClient
 from sim.audit import audit_ledger, format_audit_report
 from sim.replay import summarize_replay_by_day
@@ -287,6 +288,101 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
             rec = json.loads(runner.summary_file.read_text(encoding="utf-8").splitlines()[-1])
             self.assertAlmostEqual(rec["brier_model"], (0.70 - 1.0) ** 2, places=5)
             self.assertAlmostEqual(rec["brier_market"], (0.55 - 1.0) ** 2, places=5)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_book_ws_detects_server_timestamp_buffering_and_trade_divergence(self):
+        """盘口 WS 应免疫固定本机时钟偏移，但对相对基线 >3.5s 的积压旧帧或 >=$0.05 成交价背离立刻失效重连。"""
+        ws = PolymarketBookWSClient()
+        ws.connected = True
+        ws._active_tokens = ("tok_up",)
+
+        # 模拟本机时钟比交易所慢 1.7s（delta = -1.7s 固定基线）：正常推送必须被接受
+        srv_t0 = 1795436100.0
+        ok0 = ws.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_up",
+            "timestamp": str(int(srv_t0 * 1000)),
+            "bids": [{"price": "0.55", "size": "100"}],
+            "asks": [{"price": "0.56", "size": "100"}],
+        }, now=srv_t0 - 1.7)
+        self.assertTrue(ok0)
+        self.assertIsNotNone(ws.get_order_book("tok_up", now=srv_t0 - 1.5))
+
+        # 1. 独立逐笔成交流已在 $0.72 成交，而 WS 盘口仍报卖一 $0.56 -> 必须判定积压失效并重连
+        gen_before = ws._token_gen
+        ts_client = TradeStreamClient(record_raw=False)
+        ts_client.set_active_targets(["btc-updown-5m-1795436100"], ["tok_up"])
+        ts_client._ingest({
+            "slug": "btc-updown-5m-1795436100",
+            "asset": "tok_up",
+            "outcome": "Up",
+            "price": 0.72,
+            "size": 10.0,
+            "side": "BUY",
+            "timestamp": srv_t0 + 5.0,
+        })
+        live_px = ts_client.get_latest_price("tok_up", max_age_s=5.0)
+        self.assertAlmostEqual(live_px, 0.72, places=4)
+        self.assertTrue(ws.invalidate_on_trade_divergence("tok_up", live_px, max_gap=0.05))
+        self.assertGreater(ws._token_gen, gen_before)
+        self.assertIsNone(ws.get_order_book("tok_up", now=srv_t0 - 1.0))
+
+        # 2. 重新收到正常帧后，若下一帧相对基线滞后 6 秒（代理缓冲旧帧）-> 必须丢弃并触发重连
+        ws.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_up",
+            "timestamp": str(int((srv_t0 + 10.0) * 1000)),
+            "bids": [{"price": "0.70", "size": "100"}],
+            "asks": [{"price": "0.71", "size": "100"}],
+        }, now=srv_t0 + 10.0 - 1.7)
+        gen_before_lag = ws._token_gen
+        ok_lag = ws.apply_message({
+            "event_type": "price_change",
+            "timestamp": str(int((srv_t0 + 11.0) * 1000)),
+            "price_changes": [{"asset_id": "tok_up", "price": "0.70", "size": "50", "side": "BUY"}],
+        }, now=srv_t0 + 17.0 - 1.7)
+        self.assertFalse(ok_lag)
+        self.assertGreater(ws._token_gen, gen_before_lag)
+
+    def test_post_only_arrival_reject_runs_before_trade_prints_and_clock_offset_aligns(self):
+        """刚到站且已穿盘的 Post-Only Maker 挂单不得被逐笔成交打印绕过拒单白捡免费成交。"""
+        tmp = tempfile.mkdtemp(prefix="pm_po_guard_")
+        try:
+            runner = PaperRunner(ledger_dir=tmp)
+            t0 = 1800000000.0
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0)
+            sp = SpotState(timestamp=t0 + 60.0, price=65060.0, open_price=65000.0, realized_vol_bps=14.0)
+
+            # Tick 1 (t=60.0): 挂出 Maker 买单 Up @ 0.55，假设网络延迟 0.20s -> live_at = 60.20
+            dec_quote = Decision(action="quote", side="Up", price=0.55, size=5.0, reason="Maker首仓")
+            with patch.object(runner, "_effective_wire_latency", return_value=0.20), \
+                 patch("runtime.runner.plan_decision", return_value=dec_quote):
+                runner.step(t0 + 60.0, sp, _book(0.55, 0.56, t=t0 + 60.0), _book(0.44, 0.45, t=t0 + 60.0))
+            self.assertEqual(len(runner.working_orders), 1)
+            self.assertFalse(runner.working_orders[0].activated)
+
+            # Tick 2 (t=60.25 刚到达): 此时卖一已跌至 0.54（穿盘），且同时收到一笔 0.54 卖单成交打印
+            # 真实交易所必须 Post-Only 穿盘拒单，绝不能在 on_trade_print 里白捡 0.55 免费成交！
+            prints = [{"outcome": "Up", "price": 0.54, "size": 20.0, "side": "SELL", "timestamp": t0 + 60.24, "received_at": t0 + 60.25}]
+            with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="w")):
+                runner.step(
+                    t0 + 60.25, sp,
+                    _book(0.53, 0.54, t=t0 + 60.25),
+                    _book(0.46, 0.47, t=t0 + 60.25),
+                    trade_prints=prints,
+                )
+            self.assertEqual(runner.pos_up.shares, 0.0)
+            self.assertEqual(len(runner.fills), 0)
+            self.assertTrue(any("Post-Only" in (a.get("reason") or "") for a in runner.actions))
+
+            # 验证本机时钟偏快 +2.0s 时，亚秒级 exch_t 正确投影到本机坐标系
+            adj = PaperRunner._resolve_print_timestamp(
+                {"timestamp": 1800000100.25, "received_at": 1800000102.45},
+                fallback_now=1800000102.50,
+                clock_offset_s=2.0,
+            )
+            self.assertAlmostEqual(adj, 1800000102.25, places=3)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

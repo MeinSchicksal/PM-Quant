@@ -617,7 +617,7 @@ class PaperRunner:
         )
 
     @staticmethod
-    def _resolve_print_timestamp(tp: dict, fallback_now: float) -> float:
+    def _resolve_print_timestamp(tp: dict, fallback_now: float, clock_offset_s: float = 0.0) -> float:
         """Align trade-print timestamp with local sub-second order timestamps.
 
         Polymarket RTDS `activity/trades` truncates `timestamp` to whole seconds
@@ -625,13 +625,17 @@ class PaperRunner:
         have millisecond resolution. Comparing a floored integer second against
         a sub-second deadline causes false drops after activation and false
         zombie fills after cancellation. When `exch_t` is whole-second and
-        `recv_t` is within normal transit bounds, use `recv_t` instead.
+        `recv_t` is within normal transit bounds, use `recv_t` instead; when host
+        clock offset is non-trivial (>0.25s), project sub-second `exch_t` into
+        the local clock coordinate frame.
         """
         exch_t = float(tp.get("timestamp") or 0.0)
         recv_t = float(tp.get("received_at") or 0.0)
         if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
             if recv_t > 0.0 and abs(exch_t - round(exch_t)) < 1e-6:
                 return recv_t
+            if recv_t > 0.0 and abs(float(clock_offset_s or 0.0)) > 0.25:
+                return min(recv_t, exch_t + float(clock_offset_s))
             return exch_t
         return recv_t or exch_t or fallback_now
 
@@ -1040,11 +1044,38 @@ class PaperRunner:
         )
         self._last_step_time = now
 
-        # 0. Process real trade prints that occurred in (prev_t, now] against resting orders
-        # AND in-flight cancelling orders (cancel latency simulation) BEFORE evaluating new decisions.
+        # 0. 先对所有刚抵达交易所（now >= live_at）的未激活挂单执行 Post-Only 到达校验与排队锚定，
+        # 防止盘口已穿盘时被逐笔成交打印绕过 Post-Only 拒单规则白捡免费 Maker 成交。
         cancel_lat = self._effective_wire_latency(is_cancel=True, replay_mode=replay_mode)
         if not hasattr(self, "pending_cancels"):
             self.pending_cancels = []
+        if self.working_orders:
+            kept_act = []
+            for o in self.working_orders:
+                if not o.activated and now >= float(o.live_at or 0.0) - 1e-9:
+                    target_book = book_up if o.side == "Up" else book_down
+                    if not self.matcher.activate_order(o, target_book, now, post_only=True):
+                        self.actions.append({
+                            "t": round(now, 2), "action": "cancel", "side": o.side,
+                            "price": o.price, "size": o.remaining, "purpose": o.purpose,
+                            "reason": o.cancel_reason, "order_id": o.id
+                        })
+                        continue
+                kept_act.append(o)
+            self.working_orders = kept_act
+        if self.pending_cancels:
+            kept_pc = []
+            for o in self.pending_cancels:
+                if not o.activated and now >= float(o.live_at or 0.0) - 1e-9:
+                    target_book = book_up if o.side == "Up" else book_down
+                    if not self.matcher.activate_order(o, target_book, now, post_only=True):
+                        continue
+                kept_pc.append(o)
+            self.pending_cancels = kept_pc
+
+        # Process real trade prints that occurred in (prev_t, now] against resting orders
+        # AND in-flight cancelling orders (cancel latency simulation) BEFORE evaluating new decisions.
+        clk_off = float((getattr(self, "net_stats", None) or {}).get("clock_offset_s", 0.0) or 0.0)
         print_touched_ids = set()
         pending_cancel_filled_sides = set()
         pending_cancel_ids = {o.id for o in self.pending_cancels}
@@ -1053,7 +1084,7 @@ class PaperRunner:
             for tp in trade_prints:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
                 tp_dir = str(tp.get("side") or "")
-                tp_t = self._resolve_print_timestamp(tp, now)
+                tp_t = self._resolve_print_timestamp(tp, now, clock_offset_s=clk_off)
                 for o in active_for_prints:
                     if tp_side and o.side != tp_side:
                         continue
@@ -1462,7 +1493,7 @@ class PaperRunner:
                         for tp in (delayed_prints_fetcher() or []):
                             tp_side = tp.get("outcome")
                             tp_dir = str(tp.get("side") or "")
-                            tp_t = self._resolve_print_timestamp(tp, delayed_now)
+                            tp_t = self._resolve_print_timestamp(tp, delayed_now, clock_offset_s=clk_off)
                             for o in list(self.pending_cancels):
                                 if tp_side and o.side != tp_side:
                                     continue
