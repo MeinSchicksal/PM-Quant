@@ -767,10 +767,10 @@ def plan_decision(
                 continue
             need_cash = size * (vis_vwap + fee)
             if available_cap + 1e-9 < need_cash:
-                budget_blocked_msg = f"v2.10: 模式B资金不足 (${available_cap:.2f} < ${need_cash:.2f})"
+                budget_blocked_msg = f"v3.0: 模式B资金不足 (${available_cap:.2f} < ${need_cash:.2f})"
                 continue
             if committed + need_cash > window_budget + 1e-9:
-                budget_blocked_msg = f"v2.10: 模式B超出单窗预算 (${committed:.2f}/${window_budget:.2f})"
+                budget_blocked_msg = f"v3.0: 模式B超出单窗预算 (${committed:.2f}/${window_budget:.2f})"
                 continue
             ioc_lim = _compute_ioc_buy_limit(
                 vis_vwap, p_side, mb_min_edge, tau_s, fee_rate, params,
@@ -788,7 +788,7 @@ def plan_decision(
                 size=size,
                 utility=round(edge, 4),
                 limit_price=ioc_lim,
-                reason=f"v2.10 模式B·单边顺势折价 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+                reason=f"v3.0 模式B·单边顺势折价 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
             )
 
     if budget_blocked_msg:

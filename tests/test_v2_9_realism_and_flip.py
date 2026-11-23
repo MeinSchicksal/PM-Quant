@@ -20,8 +20,8 @@ def _book(bid_px, bid_sz, ask_px, ask_sz, t=1200.0):
 
 class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
     def test_v29_version_and_calibrated_defaults(self):
-        self.assertEqual(config.VERSION, "v2.10")
-        self.assertEqual(config.BATCH_ID, "v2.10")
+        self.assertEqual(config.VERSION, "v3.0")
+        self.assertEqual(config.BATCH_ID, "v3.0")
         self.assertFalse(config.PARAMS["ENABLE_BLACKSWAN_LOCK"])
         self.assertAlmostEqual(config.PARAMS["LATENCY_S"], 0.18, places=4)
         self.assertAlmostEqual(config.PARAMS["CANCEL_LATENCY_S"], 0.18, places=4)

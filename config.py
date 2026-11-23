@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v2.10).
+"""PM-Quant Configuration & Single Source of Truth (v3.0).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v2.10"
+VERSION = "v3.0"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -25,7 +25,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Core Physical & Economic Parameters (v2.10: v2.9 Strategy Baseline + Honest Zero-Lookahead Sim & Scientific Diagnostics)
+# Core Physical & Economic Parameters (v3.0: Mode A Balanced + Mode B Skewed-Drift V1b + Hold-to-Settlement + Honest Sim)
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
