@@ -2027,13 +2027,6 @@ function updateMarket(live) {
 
   renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
 
-  // Live Tug-of-War probability bar width
-  const tugUpEl = $("arena-tug-up");
-  if (tugUpEl) {
-    const upPct = Number.isFinite(upMid) ? Math.min(98, Math.max(2, upMid * 100)) : 50;
-    tugUpEl.style.width = `${upPct.toFixed(1)}%`;
-  }
-
   renderWorkingOrders(live.working_orders || []);
   renderActionFeed(live.actions || [], live.start);
 

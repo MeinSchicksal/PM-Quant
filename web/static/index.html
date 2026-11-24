@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.63">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.64">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -504,121 +504,77 @@
             </div>
           </section>
 
-          <!-- Unified UP vs DOWN Live Battle Arena (Probability Tug-of-War + Dual Orderbook & Positions) -->
-          <section class="panel arena-panel" aria-label="UP 与 DOWN 多空博弈与持仓盘口">
-            <!-- Top Tug-of-War Probability Bar -->
-            <div class="arena-tug-head">
-              <div class="arena-tug-side up">
-                <span class="arena-dir-tag up">
-                  <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
-                  UP 看涨
-                </span>
-                <strong class="arena-prob-num up" id="up-meta-implied">--%</strong>
-              </div>
+          <!-- Clean Institutional Position & Orderbook Table (UP & DOWN) -->
+          <section class="panel book-table-panel" aria-label="本轮持仓与盘口报价">
+            <div class="bt-head" role="row">
+              <span>方向</span>
+              <span class="num">隐含概率</span>
+              <span>最优买一 / 卖一</span>
+              <span class="num">5档深度</span>
+              <span class="num">持仓与成本</span>
+              <span class="num">交割预估</span>
+            </div>
 
-              <div class="arena-tug-track-wrap" title="实时盘口隐含胜率多空博弈条（中线为 50%）">
-                <div class="arena-tug-track">
-                  <div class="arena-tug-fill up" id="arena-tug-up" style="width: 50%"></div>
-                  <span class="arena-tug-midline" aria-hidden="true"></span>
+            <div class="bt-row side-up" id="card-up" role="row">
+              <div class="bt-side-cell">
+                <span class="bt-side-tag up">▲ UP</span>
+                <span class="bt-side-sub">看涨</span>
+              </div>
+              <div class="bt-prob-cell num">
+                <strong class="up" id="up-meta-implied">--%</strong>
+              </div>
+              <div class="bt-quote-cell">
+                <span class="bt-ba-pair">
+                  <strong class="up" id="up-bid-px">--</strong>
+                  <small id="up-bid-sz">--</small>
+                  <span class="bt-slash">/</span>
+                  <strong id="up-ask-px">--</strong>
+                  <small id="up-ask-sz">--</small>
+                </span>
+                <span class="bt-spread-note">价差 <b id="up-meta-spread">--</b></span>
+              </div>
+              <div class="bt-depth-cell num">
+                <span id="up-meta-depth">--</span>
+              </div>
+              <div class="bt-pos-cell num">
+                <strong class="bt-pos-sh" id="up-pos-shares">0.0 股</strong>
+                <small class="bt-pos-sub">均 <span id="up-pos-avg">--</span> · <span id="up-pos-cost">$0.00</span></small>
+              </div>
+              <div class="bt-pnl-cell num">
+                <div class="side-settle-pnl" id="pnl-forecast-up">
+                  <span class="pnl-hint">空仓</span>
                 </div>
-              </div>
-
-              <div class="arena-tug-side down">
-                <strong class="arena-prob-num down" id="down-meta-implied">--%</strong>
-                <span class="arena-dir-tag down">
-                  DOWN 看跌
-                  <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
-                </span>
               </div>
             </div>
 
-            <!-- Compact Dual Wings: UP Wing | DOWN Wing -->
-            <div class="arena-wings">
-              <!-- UP Wing -->
-              <div class="arena-wing side-up" id="card-up">
-                <div class="arena-wing-top">
-                  <span class="arena-wing-title"><span class="wing-dot up" aria-hidden="true"></span>UP 持仓与盘口</span>
-                  <div class="side-settle-pnl" id="pnl-forecast-up">
-                    <span class="pnl-hint">空仓观望</span>
-                  </div>
-                </div>
-
-                <div class="arena-pos-strip">
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">持仓</span>
-                    <strong class="arena-pos-v" id="up-pos-shares">0.0 股</strong>
-                  </div>
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">均价</span>
-                    <strong class="arena-pos-v" id="up-pos-avg">--</strong>
-                  </div>
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">投入</span>
-                    <strong class="arena-pos-v" id="up-pos-cost">$0.00</strong>
-                  </div>
-                </div>
-
-                <div class="arena-book-compact">
-                  <div class="arena-ba-row">
-                    <span class="arena-ba-item">
-                      <span class="arena-ba-k">买一</span>
-                      <strong class="arena-ba-px up" id="up-bid-px">--</strong>
-                      <small class="arena-ba-sz" id="up-bid-sz">--</small>
-                    </span>
-                    <span class="arena-ba-item right">
-                      <span class="arena-ba-k">卖一</span>
-                      <strong class="arena-ba-px" id="up-ask-px">--</strong>
-                      <small class="arena-ba-sz" id="up-ask-sz">--</small>
-                    </span>
-                  </div>
-                  <div class="arena-depth-foot">
-                    <span>价差 <strong id="up-meta-spread">--</strong></span>
-                    <span>5档量 <strong id="up-meta-depth">--</strong></span>
-                  </div>
-                </div>
+            <div class="bt-row side-down" id="card-down" role="row">
+              <div class="bt-side-cell">
+                <span class="bt-side-tag down">▼ DOWN</span>
+                <span class="bt-side-sub">看跌</span>
               </div>
-
-              <!-- DOWN Wing -->
-              <div class="arena-wing side-down" id="card-down">
-                <div class="arena-wing-top">
-                  <span class="arena-wing-title"><span class="wing-dot down" aria-hidden="true"></span>DOWN 持仓与盘口</span>
-                  <div class="side-settle-pnl" id="pnl-forecast-down">
-                    <span class="pnl-hint">空仓观望</span>
-                  </div>
-                </div>
-
-                <div class="arena-pos-strip">
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">持仓</span>
-                    <strong class="arena-pos-v" id="down-pos-shares">0.0 股</strong>
-                  </div>
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">均价</span>
-                    <strong class="arena-pos-v" id="down-pos-avg">--</strong>
-                  </div>
-                  <div class="arena-pos-cell">
-                    <span class="arena-pos-k">投入</span>
-                    <strong class="arena-pos-v" id="down-pos-cost">$0.00</strong>
-                  </div>
-                </div>
-
-                <div class="arena-book-compact">
-                  <div class="arena-ba-row">
-                    <span class="arena-ba-item">
-                      <span class="arena-ba-k">买一</span>
-                      <strong class="arena-ba-px down" id="down-bid-px">--</strong>
-                      <small class="arena-ba-sz" id="down-bid-sz">--</small>
-                    </span>
-                    <span class="arena-ba-item right">
-                      <span class="arena-ba-k">卖一</span>
-                      <strong class="arena-ba-px" id="down-ask-px">--</strong>
-                      <small class="arena-ba-sz" id="down-ask-sz">--</small>
-                    </span>
-                  </div>
-                  <div class="arena-depth-foot">
-                    <span>价差 <strong id="down-meta-spread">--</strong></span>
-                    <span>5档量 <strong id="down-meta-depth">--</strong></span>
-                  </div>
+              <div class="bt-prob-cell num">
+                <strong class="down" id="down-meta-implied">--%</strong>
+              </div>
+              <div class="bt-quote-cell">
+                <span class="bt-ba-pair">
+                  <strong class="down" id="down-bid-px">--</strong>
+                  <small id="down-bid-sz">--</small>
+                  <span class="bt-slash">/</span>
+                  <strong id="down-ask-px">--</strong>
+                  <small id="down-ask-sz">--</small>
+                </span>
+                <span class="bt-spread-note">价差 <b id="down-meta-spread">--</b></span>
+              </div>
+              <div class="bt-depth-cell num">
+                <span id="down-meta-depth">--</span>
+              </div>
+              <div class="bt-pos-cell num">
+                <strong class="bt-pos-sh" id="down-pos-shares">0.0 股</strong>
+                <small class="bt-pos-sub">均 <span id="down-pos-avg">--</span> · <span id="down-pos-cost">$0.00</span></small>
+              </div>
+              <div class="bt-pnl-cell num">
+                <div class="side-settle-pnl" id="pnl-forecast-down">
+                  <span class="pnl-hint">空仓</span>
                 </div>
               </div>
             </div>
@@ -1017,6 +973,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.63"></script></script>
+  <script src="/static/app.js?v=3.2.64"></script></script></script>
 </body>
 </html>
