@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.61">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.62">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -504,130 +504,137 @@
             </div>
           </section>
 
-          <!-- Dual-Sided Position & Orderbook Panels (Side-by-Side UP | DOWN) -->
-          <div class="dual-grid">
-            <!-- UP Panel -->
-            <section class="panel quote-card side-up" id="card-up">
-              <div class="quote-card-head">
-                <div class="side-badge up">
-                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
-                  <span>UP 看涨头寸与盘口</span>
-                </div>
-                <div class="side-settle-pnl" id="pnl-forecast-up">
-                  <span class="pnl-hint">空仓观望</span>
+          <!-- Unified UP vs DOWN Live Battle Arena (Probability Tug-of-War + Dual Orderbook & Positions) -->
+          <section class="panel arena-panel" aria-label="UP 与 DOWN 多空博弈与持仓盘口">
+            <!-- Top Tug-of-War Probability Bar -->
+            <div class="arena-tug-head">
+              <div class="arena-tug-side up">
+                <span class="arena-dir-tag up">
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5 13 11H3L8 3.5Z"/></svg>
+                  UP 看涨
+                </span>
+                <strong class="arena-prob-num up" id="up-meta-implied">--%</strong>
+              </div>
+
+              <div class="arena-tug-track-wrap" title="实时盘口隐含胜率多空博弈条（中线为 50%）">
+                <div class="arena-tug-track">
+                  <div class="arena-tug-fill up" id="arena-tug-up" style="width: 50%"></div>
+                  <span class="arena-tug-midline" aria-hidden="true"></span>
                 </div>
               </div>
 
-              <div class="position-box">
-                <div class="pos-item">
-                  <span class="pos-label">已成交持仓</span>
-                  <strong class="pos-val" id="up-pos-shares">0.0 股</strong>
+              <div class="arena-tug-side down">
+                <strong class="arena-prob-num down" id="down-meta-implied">--%</strong>
+                <span class="arena-dir-tag down">
+                  DOWN 看跌
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
+                </span>
+              </div>
+            </div>
+
+            <!-- Symmetric Dual Wings: UP Wing | DOWN Wing -->
+            <div class="arena-wings">
+              <!-- UP Wing -->
+              <div class="arena-wing side-up" id="card-up">
+                <div class="arena-wing-top">
+                  <span class="arena-wing-title">UP 盘口与持仓</span>
+                  <div class="side-settle-pnl" id="pnl-forecast-up">
+                    <span class="pnl-hint">空仓观望</span>
+                  </div>
                 </div>
-                <div class="pos-item">
-                  <span class="pos-label">持仓成交均价</span>
-                  <strong class="pos-val" id="up-pos-avg">--</strong>
+
+                <!-- Exchange-Grade Top of Book -->
+                <div class="arena-book-strip">
+                  <div class="arena-quote-col">
+                    <span class="arena-q-lbl">买一 Bid</span>
+                    <strong class="arena-q-px up" id="up-bid-px">--</strong>
+                    <span class="arena-q-sz" id="up-bid-sz">-- 股</span>
+                  </div>
+                  <div class="arena-spread-mid">
+                    <span class="arena-spread-lbl">价差</span>
+                    <strong class="arena-spread-val" id="up-meta-spread">--</strong>
+                  </div>
+                  <div class="arena-quote-col right">
+                    <span class="arena-q-lbl">卖一 Ask</span>
+                    <strong class="arena-q-px" id="up-ask-px">--</strong>
+                    <span class="arena-q-sz" id="up-ask-sz">-- 股</span>
+                  </div>
                 </div>
-                <div class="pos-item">
-                  <span class="pos-label">累计投入成本</span>
-                  <strong class="pos-val" id="up-pos-cost">$0.00</strong>
+
+                <!-- Clean 3-Column Position Strip -->
+                <div class="arena-pos-strip">
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">持仓</span>
+                    <strong class="arena-pos-v" id="up-pos-shares">0.0 股</strong>
+                  </div>
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">均价</span>
+                    <strong class="arena-pos-v" id="up-pos-avg">--</strong>
+                  </div>
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">投入</span>
+                    <strong class="arena-pos-v" id="up-pos-cost">$0.00</strong>
+                  </div>
+                </div>
+
+                <!-- Minimal Depth Footer -->
+                <div class="arena-depth-foot">
+                  <span>5档买卖量</span>
+                  <strong id="up-meta-depth">--</strong>
                 </div>
               </div>
 
-              <div class="quote-book-block">
-                <div class="quote-levels-grid">
-                  <div class="level-box bid-box">
-                    <span class="level-label">买一 (Bid)</span>
-                    <span class="level-val-pair">
-                      <strong class="level-price-sm up" id="up-bid-px">--</strong>
-                      <small class="level-size-tag" id="up-bid-sz">-- 股</small>
-                    </span>
-                  </div>
-                  <div class="level-box ask-box">
-                    <span class="level-label">卖一 (Ask)</span>
-                    <span class="level-val-pair">
-                      <strong class="level-price-sm" id="up-ask-px">--</strong>
-                      <small class="level-size-tag" id="up-ask-sz">-- 股</small>
-                    </span>
+              <!-- DOWN Wing -->
+              <div class="arena-wing side-down" id="card-down">
+                <div class="arena-wing-top">
+                  <span class="arena-wing-title">DOWN 盘口与持仓</span>
+                  <div class="side-settle-pnl" id="pnl-forecast-down">
+                    <span class="pnl-hint">空仓观望</span>
                   </div>
                 </div>
-                <div class="quote-meta-strip">
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">5档买卖量</span>
-                    <span class="q-meta-v" id="up-meta-depth">--</span>
-                  </div>
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">盘口隐含</span>
-                    <span class="q-meta-v" id="up-meta-implied">--</span>
-                  </div>
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">买卖价差</span>
-                    <span class="q-meta-v" id="up-meta-spread">--</span>
-                  </div>
-                </div>
-              </div>
-            </section>
 
-            <!-- DOWN Panel -->
-            <section class="panel quote-card side-down" id="card-down">
-              <div class="quote-card-head">
-                <div class="side-badge down">
-                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12.5 3 5h10l-5 7.5Z"/></svg>
-                  <span>DOWN 看跌头寸与盘口</span>
+                <!-- Exchange-Grade Top of Book -->
+                <div class="arena-book-strip">
+                  <div class="arena-quote-col">
+                    <span class="arena-q-lbl">买一 Bid</span>
+                    <strong class="arena-q-px down" id="down-bid-px">--</strong>
+                    <span class="arena-q-sz" id="down-bid-sz">-- 股</span>
+                  </div>
+                  <div class="arena-spread-mid">
+                    <span class="arena-spread-lbl">价差</span>
+                    <strong class="arena-spread-val" id="down-meta-spread">--</strong>
+                  </div>
+                  <div class="arena-quote-col right">
+                    <span class="arena-q-lbl">卖一 Ask</span>
+                    <strong class="arena-q-px" id="down-ask-px">--</strong>
+                    <span class="arena-q-sz" id="down-ask-sz">-- 股</span>
+                  </div>
                 </div>
-                <div class="side-settle-pnl" id="pnl-forecast-down">
-                  <span class="pnl-hint">空仓观望</span>
-                </div>
-              </div>
 
-              <div class="position-box">
-                <div class="pos-item">
-                  <span class="pos-label">已成交持仓</span>
-                  <strong class="pos-val" id="down-pos-shares">0.0 股</strong>
+                <!-- Clean 3-Column Position Strip -->
+                <div class="arena-pos-strip">
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">持仓</span>
+                    <strong class="arena-pos-v" id="down-pos-shares">0.0 股</strong>
+                  </div>
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">均价</span>
+                    <strong class="arena-pos-v" id="down-pos-avg">--</strong>
+                  </div>
+                  <div class="arena-pos-cell">
+                    <span class="arena-pos-k">投入</span>
+                    <strong class="arena-pos-v" id="down-pos-cost">$0.00</strong>
+                  </div>
                 </div>
-                <div class="pos-item">
-                  <span class="pos-label">持仓成交均价</span>
-                  <strong class="pos-val" id="down-pos-avg">--</strong>
-                </div>
-                <div class="pos-item">
-                  <span class="pos-label">累计投入成本</span>
-                  <strong class="pos-val" id="down-pos-cost">$0.00</strong>
-                </div>
-              </div>
 
-              <div class="quote-book-block">
-                <div class="quote-levels-grid">
-                  <div class="level-box bid-box">
-                    <span class="level-label">买一 (Bid)</span>
-                    <span class="level-val-pair">
-                      <strong class="level-price-sm down" id="down-bid-px">--</strong>
-                      <small class="level-size-tag" id="down-bid-sz">-- 股</small>
-                    </span>
-                  </div>
-                  <div class="level-box ask-box">
-                    <span class="level-label">卖一 (Ask)</span>
-                    <span class="level-val-pair">
-                      <strong class="level-price-sm" id="down-ask-px">--</strong>
-                      <small class="level-size-tag" id="down-ask-sz">-- 股</small>
-                    </span>
-                  </div>
-                </div>
-                <div class="quote-meta-strip">
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">5档买卖量</span>
-                    <span class="q-meta-v" id="down-meta-depth">--</span>
-                  </div>
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">盘口隐含</span>
-                    <span class="q-meta-v" id="down-meta-implied">--</span>
-                  </div>
-                  <div class="q-meta-cell">
-                    <span class="q-meta-k">买卖价差</span>
-                    <span class="q-meta-v" id="down-meta-spread">--</span>
-                  </div>
+                <!-- Minimal Depth Footer -->
+                <div class="arena-depth-foot">
+                  <span>5档买卖量</span>
+                  <strong id="down-meta-depth">--</strong>
                 </div>
               </div>
-            </section>
-          </div>
+            </div>
+          </section>
         </div>
 
         <div class="cockpit-feed-col">
@@ -1022,6 +1029,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.61"></script>
+  <script src="/static/app.js?v=3.2.62"></script>
 </body>
 </html>

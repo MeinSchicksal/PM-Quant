@@ -5563,3 +5563,286 @@ html, body {
     font-size: 16.5px;
   }
 }
+
+/* ==========================================================================
+   LIVE WORKSPACE: UNIFIED UP vs DOWN BATTLE ARENA (TUG-OF-WAR + DUAL WINGS)
+   ========================================================================== */
+.panel.arena-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.arena-tug-head {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 20px;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.arena-tug-side {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.arena-dir-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.arena-dir-tag.up { color: var(--up); }
+.arena-dir-tag.down { color: var(--down); }
+
+.arena-prob-num {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.arena-prob-num.up { color: var(--up); }
+.arena-prob-num.down { color: var(--down); }
+
+.arena-tug-track-wrap {
+  width: 100%;
+  min-width: 80px;
+}
+
+.arena-tug-track {
+  position: relative;
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  background: rgba(244, 63, 94, 0.28);
+  overflow: hidden;
+}
+
+.arena-tug-fill.up {
+  height: 100%;
+  border-radius: 999px 0 0 999px;
+  background: linear-gradient(90deg, #059669, #10b981);
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.arena-tug-midline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--surface);
+  opacity: 0.9;
+}
+
+.arena-wings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.arena-wing {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 14px;
+  min-width: 0;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.arena-wing.side-up {
+  border-right: 1px solid var(--border-soft);
+}
+
+.arena-wing.side-up.is-holding {
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.055) 0%, transparent 55%);
+  box-shadow: inset 0 2px 0 var(--up);
+}
+
+.arena-wing.side-down.is-holding {
+  background: linear-gradient(180deg, rgba(244, 63, 94, 0.055) 0%, transparent 55%);
+  box-shadow: inset 0 2px 0 var(--down);
+}
+
+.arena-wing-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.arena-wing-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label);
+}
+
+/* Exchange-Grade Top of Book */
+.arena-book-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.arena-quote-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.arena-quote-col.right {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.arena-q-lbl {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--caption);
+}
+
+.arena-q-px {
+  font-family: var(--font-mono);
+  font-size: 21px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.arena-q-px.up { color: var(--up); }
+.arena-q-px.down { color: var(--down); }
+
+.arena-q-sz {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.arena-spread-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-soft);
+}
+
+.arena-spread-lbl {
+  font-size: 9.5px;
+  color: var(--caption);
+  line-height: 1.1;
+}
+
+.arena-spread-val {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--label);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Clean 3-Column Position Strip */
+.arena-pos-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.arena-pos-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.arena-pos-k {
+  font-size: 11px;
+  color: var(--caption);
+}
+
+.arena-pos-v {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arena-wing.is-holding .arena-pos-v {
+  color: var(--ink);
+}
+
+/* Minimal Depth Footer */
+.arena-depth-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border-soft);
+  font-size: 11px;
+  color: var(--caption);
+}
+
+.arena-depth-foot strong {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--label);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 780px) {
+  .arena-tug-head {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    padding: 12px 14px;
+  }
+  .arena-tug-side.down {
+    justify-content: flex-end;
+  }
+  .arena-tug-track-wrap {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+  .arena-prob-num {
+    font-size: 15.5px;
+  }
+  .arena-wings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .arena-wing {
+    padding: 14px 15px;
+    gap: 12px;
+  }
+  .arena-wing.side-up {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .arena-q-px {
+    font-size: 19px;
+  }
+  .arena-pos-v {
+    font-size: 13px;
+  }
+}

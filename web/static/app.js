@@ -1929,10 +1929,12 @@ function updateMarket(live) {
   if ($("up-pos-shares")) $("up-pos-shares").textContent = `${fmtShares(upShares)} 股`;
   if ($("up-pos-avg")) $("up-pos-avg").textContent = upShares > 0 ? fmtPriceCents(posUp.avg_px) : "--";
   if ($("up-pos-cost")) $("up-pos-cost").textContent = fmtUsd(upCost);
+  if ($("card-up")) $("card-up").classList.toggle("is-holding", upShares > 1e-6);
 
   if ($("down-pos-shares")) $("down-pos-shares").textContent = `${fmtShares(dnShares)} 股`;
   if ($("down-pos-avg")) $("down-pos-avg").textContent = dnShares > 0 ? fmtPriceCents(posDn.avg_px) : "--";
   if ($("down-pos-cost")) $("down-pos-cost").textContent = fmtUsd(dnCost);
+  if ($("card-down")) $("card-down").classList.toggle("is-holding", dnShares > 1e-6);
 
   const unwindPnl = Number(live.realized_unwind_pnl || 0);
   const upWinNet = upShares * 1.0 - totalCost + unwindPnl;
@@ -1989,6 +1991,9 @@ function updateMarket(live) {
 
   const upMid =
     upBid && upAsk ? (Number(upBid) + Number(upAsk)) / 2 : Number(live.poly_up ?? upBid ?? upAsk ?? 0.5);
+  const dnMid =
+    dnBid && dnAsk ? (Number(dnBid) + Number(dnAsk)) / 2 : Number(live.poly_down ?? dnBid ?? dnAsk ?? (1 - upMid));
+
   const renderBookMeta = (prefix, bid, ask, mid, bidD5, askD5) => {
     const depthEl = $(`${prefix}-meta-depth`);
     if (depthEl) {
@@ -1999,7 +2004,8 @@ function updateMarket(live) {
     }
     const impEl = $(`${prefix}-meta-implied`);
     if (impEl) {
-      impEl.textContent = bid && ask ? `${(mid * 100).toFixed(1)}%` : "--";
+      const hasMid = Number.isFinite(mid) && mid >= 0 && mid <= 1;
+      impEl.textContent = hasMid ? `${(mid * 100).toFixed(1)}%` : "--%";
     }
     const spEl = $(`${prefix}-meta-spread`);
     if (spEl) {
@@ -2019,9 +2025,14 @@ function updateMarket(live) {
     $("down-ask-sz").title = dnAskSz !== null ? `${fmtShares(dnAskSz)} 股` : "";
   }
 
-  const dnMid =
-    dnBid && dnAsk ? (Number(dnBid) + Number(dnAsk)) / 2 : Number(live.poly_down ?? dnBid ?? dnAsk ?? 0.5);
   renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
+
+  // Live Tug-of-War probability bar width
+  const tugUpEl = $("arena-tug-up");
+  if (tugUpEl) {
+    const upPct = Number.isFinite(upMid) ? Math.min(98, Math.max(2, upMid * 100)) : 50;
+    tugUpEl.style.width = `${upPct.toFixed(1)}%`;
+  }
 
   renderWorkingOrders(live.working_orders || []);
   renderActionFeed(live.actions || [], live.start);
