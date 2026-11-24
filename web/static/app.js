@@ -4725,23 +4725,24 @@ function renderDecisionBulletin(live) {
   const countEl = $("bulletin-count");
   const modalCountEl = $("modal-bulletin-count");
   const previewEl = $("bulletin-latest-preview");
-  const statusBadgeEl = $("bulletin-status-badge");
-  const stateDotEl = $("console-state-dot");
+  const statusPillEl = $("bulletin-status-badge");
+  const statusTextEl = $("bulletin-status-text");
+  const freshEl = $("console-fresh-time");
   if (!listEl) return;
 
   ingestLiveDecisions(live);
 
   const timeline = decisionAuditLog;
   if (!timeline.length) {
-    if (countEl) countEl.textContent = "历史 0";
+    if (countEl) countEl.textContent = "历史";
     if (modalCountEl) modalCountEl.textContent = "0 条记录";
-    if (statusBadgeEl) statusBadgeEl.textContent = "正在观望";
-    if (stateDotEl) stateDotEl.className = "console-state-dot is-wait";
-    if (previewEl) previewEl.textContent = "正在观察实时行情，等待划算的买入价格...";
+    if (statusPillEl) statusPillEl.className = "css-pill is-wait";
+    if (statusTextEl) statusTextEl.textContent = "开盘观察";
+    if (previewEl) previewEl.textContent = "先看行情走势，寻找划算机会";
     setHtmlIfChanged(listEl, `
       <div class="bulletin-empty">
         <div class="bulletin-empty-title">暂无策略思路记录</div>
-        <div class="bulletin-empty-sub">每次策略判断出新的买入、挂单或风控保护动作时，都会用通俗语言记录在这里</div>
+        <div class="bulletin-empty-sub">每次策略判断出新的买入、挂单或风控保护动作时，都会用大白话记录在这里</div>
       </div>`);
     return;
   }
@@ -4752,14 +4753,13 @@ function renderDecisionBulletin(live) {
     taker_buy: ["出手买入", "is-buy"],
     taker_hedge: ["锁定利润", "is-buy"],
     taker_unwind: ["风控止损", "is-warn"],
-    quote: ["挂单排队中", "is-quote"],
-    wait: ["正在观望", "is-wait"],
+    quote: ["排队买入", "is-quote"],
+    wait: ["暂不追高", "is-wait"],
   };
 
   const latest = timeline[timeline.length - 1];
-  const freshEl = $("console-fresh-time");
   if (latest) {
-    let [lTag, lCls] = tagMap[latest.action] || ["正在扫描", "is-wait"];
+    let [lTag, lCls] = tagMap[latest.action] || ["观察中", "is-wait"];
     const uSh = Number(live?.pos_up?.shares || 0);
     const dSh = Number(live?.pos_down?.shares || 0);
     const hasPosNow = uSh > 1e-6 || dSh > 1e-6;
@@ -4770,60 +4770,96 @@ function renderDecisionBulletin(live) {
     const diffUsdNow = openNow > 0 && spotNow > 0 ? (spotNow - openNow) : 0;
     const curRawReason = String(live?.decision_reason || latest.reason || "");
 
-    // Live Co-Pilot Narrative: speaks like a calm human co-pilot riding the 5-minute rollercoaster with you
-    let narrativeText = translateDecisionReason(curRawReason);
+    // Ultra-crisp, human-first 1-sentence verdict (<= 18 Chinese chars, zero jargon, zero repetition)
+    let shortMsg = translateDecisionReason(curRawReason);
     if (wOrders.length > 0) {
       const wo = wOrders[0];
       const wSide = String(wo.side || "").toUpperCase() === "UP" ? "看涨" : "看跌";
       const wPx = Number(wo.price ?? wo.px ?? 0);
       const qAhead = Number(wo.queue_ahead ?? 0);
-      lTag = "排队接货中";
+      lTag = "排队买入";
       lCls = "is-quote";
-      narrativeText = `已在 $${wPx.toFixed(2)} 挂单买${wSide}，${qAhead <= 1 ? "已排到队首，随时可能成交" : `前方还剩 ${qAhead.toFixed(1)} 股排队`}`;
+      shortMsg = qAhead <= 1
+        ? `已挂 $${wPx.toFixed(2)} 买${wSide}，排在队首随时成交`
+        : `已挂 $${wPx.toFixed(2)} 买${wSide}，前方还有 ${qAhead.toFixed(0)} 股`;
     } else if (hasPosNow) {
       const heldUp = uSh >= dSh;
-      const heldCn = heldUp ? "看涨" : "看跌";
-      const heldSh = heldUp ? uSh : dSh;
       const padUsd = heldUp ? diffUsdNow : -diffUsdNow;
       if (tauS > 0 && tauS <= 15) {
-        lTag = "尾盘冲刺";
-        lCls = padUsd >= 0 ? "is-buy" : "is-warn";
-        narrativeText = `最后 ${Math.round(tauS)} 秒决胜，持有 ${fmtShares(heldSh)} 股${heldCn}，当前${padUsd >= 0 ? `领先 +$${Math.abs(padUsd).toFixed(2)}` : `落后 -$${Math.abs(padUsd).toFixed(2)}`}，静待结算`;
+        lTag = "尾盘开奖";
+        lCls = padUsd >= 0 ? "is-buy" : "is-down";
+        shortMsg = padUsd >= 0
+          ? `最后 ${Math.round(tauS)} 秒，目前领先 +$${Math.abs(padUsd).toFixed(1)}，等开奖`
+          : `最后 ${Math.round(tauS)} 秒，落后 -$${Math.abs(padUsd).toFixed(1)}，看能否翻盘`;
       } else if (Math.abs(padUsd) < 12) {
-        lTag = "贴线拉锯";
+        lTag = "焦灼拉锯";
         lCls = "is-warn";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，紧贴开盘线拉锯（${padUsd >= 0 ? "+" : "-"}$${Math.abs(padUsd).toFixed(2)}），风控持续盯守`;
+        shortMsg = padUsd >= 0
+          ? `仅领先 +$${Math.abs(padUsd).toFixed(1)}，随时可能翻盘，紧盯中`
+          : `仅落后 -$${Math.abs(padUsd).toFixed(1)}，随时可能反超，紧盯中`;
       } else if (padUsd >= 12) {
-        lTag = "持仓顺风";
+        lTag = "目前稳赢";
         lCls = "is-buy";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，已拉开 +$${padUsd.toFixed(2)} 安全垫，走势占优，稳拿等结算`;
+        shortMsg = `已拉开 +$${padUsd.toFixed(1)} 优势，安心等交割`;
       } else {
         lTag = "暂时落后";
-        lCls = "is-warn";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，暂时落后 -$${Math.abs(padUsd).toFixed(2)}，距结算还有 ${Math.round(tauS)} 秒`;
+        lCls = "is-down";
+        shortMsg = `目前落后 -$${Math.abs(padUsd).toFixed(1)}，剩 ${Math.round(tauS)} 秒看能否反超`;
       }
     } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(curRawReason)) {
-      lTag = "急震避险";
+      lTag = "急震暂停";
       lCls = "is-warn";
+      shortMsg = "BTC 刚剧烈异动，先避险不乱冲";
     } else if (tauS > 240 || /Observation period/i.test(curRawReason)) {
       lTag = "开盘观察";
       lCls = "is-wait";
+      const leftObs = Math.max(1, Math.round(tauS - 240));
+      shortMsg = `先看前 1 分钟走势，${leftObs} 秒后开始找机会`;
     } else if (tauS > 0 && tauS <= 15) {
-      lTag = "尾盘锁定";
+      lTag = "尾盘停手";
       lCls = "is-wait";
-    } else if (latest.action === "wait") {
-      lTag = "扫描机会";
-      lCls = "is-wait";
+      shortMsg = "最后 15 秒不再开新仓，准备下一轮";
+    } else {
+      const pm = curRawReason.match(/P\*\(?Up\)?=([\d.]+)/i);
+      const um = curRawReason.match(/Up=([\d.-]+)\/([\d.-]+)/i);
+      const dm = curRawReason.match(/Dn=([\d.-]+)\/([\d.-]+)/i);
+      if (pm && (um || dm)) {
+        const pUp = parseFloat(pm[1]);
+        const favorUp = pUp >= 0.5;
+        const sideTxt = favorUp ? "看涨" : "看跌";
+        const fairCents = Math.round((favorUp ? pUp : 1 - pUp) * 100);
+        const askNum = parseFloat(favorUp ? (um ? um[2] : "") : (dm ? dm[2] : ""));
+        if (Number.isFinite(askNum) && askNum > 0) {
+          const askCents = Math.round(askNum * 100);
+          const diffCents = fairCents - askCents;
+          if (askCents >= 92) {
+            lTag = "胜负已分";
+            lCls = "is-wait";
+            shortMsg = `${sideTxt}已涨到 ${askCents}¢，太贵不追，等下一轮`;
+          } else if (diffCents < 0) {
+            lTag = "暂不追高";
+            lCls = "is-wait";
+            shortMsg = `${sideTxt}胜算更大，但卖价贵了 ${Math.abs(diffCents)}¢，等回落`;
+          } else if (diffCents < 5) {
+            lTag = "紧盯出手";
+            lCls = "is-quote";
+            shortMsg = `${sideTxt}已便宜 ${diffCents}¢，再降一点就出手`;
+          } else {
+            lTag = "机会出现";
+            lCls = "is-buy";
+            shortMsg = `${sideTxt}便宜了 ${diffCents}¢，准备择机买入`;
+          }
+        }
+      }
     }
 
-    if (statusBadgeEl) statusBadgeEl.textContent = lTag;
-    if (stateDotEl) stateDotEl.className = `console-state-dot ${lCls}`;
-    if (previewEl) previewEl.textContent = narrativeText;
+    if (statusPillEl) statusPillEl.className = `css-pill ${lCls}`;
+    if (statusTextEl) statusTextEl.textContent = lTag;
+    if (previewEl) previewEl.textContent = shortMsg;
 
-    // Live freshness clock so user always knows the co-pilot is thinking every second
     const nowRef = Number(live?.now || live?.server_time || (Date.now() / 1000));
     const hbSec = Math.max(0, Math.round((Date.now() / 1000) - nowRef));
-    const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
+    const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Shanghai" });
     if (freshEl) {
       freshEl.textContent = hbSec <= 5 ? timeClock : `${hbSec}s前`;
       freshEl.className = "console-fresh-time";

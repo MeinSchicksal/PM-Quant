@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.80">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.81">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -463,27 +463,24 @@
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
             </div>
 
-            <!-- Integrated AI Co-Pilot Live Narration Footer (Sleek 2-Row Clean Layout) -->
-            <div class="chart-verdict-bar copilot-narration-bar" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
-              <div class="cvb-top-row">
-                <div class="cvb-state-group">
-                  <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
-                  <strong class="cvb-state" id="bulletin-status-badge">正在观察</strong>
-                </div>
-                <div class="cvb-meta-group">
-                  <span class="console-fresh-time" id="console-fresh-time">--:--:--</span>
-                  <span class="cvb-meta-sep" aria-hidden="true">·</span>
-                  <span class="cvb-hist-text" id="bulletin-count">历史 0</span>
-                  <svg class="cvb-chev" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 5l5 5-5 5"/></svg>
-                </div>
+            <!-- Crisp 1-Sentence Plain-Language Signal Strip Inside Chart -->
+            <div class="chart-signal-strip" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
+              <div class="css-main">
+                <span class="css-pill is-wait" id="bulletin-status-badge"><span class="css-dot" id="console-state-dot" aria-hidden="true"></span><span id="bulletin-status-text">开盘观察</span></span>
+                <span class="css-msg" id="bulletin-latest-preview">先看前 1 分钟走势，暂不下单</span>
               </div>
-              <p class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，寻找划算的买入时机...</p>
+              <div class="css-meta">
+                <span class="console-fresh-time" id="console-fresh-time">--:--</span>
+                <span class="css-meta-sep" aria-hidden="true">·</span>
+                <span class="css-hist" id="bulletin-count">历史</span>
+                <svg class="cvb-chev" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 5l5 5-5 5"/></svg>
+              </div>
             </div>
           </section>
 
-          <!-- Context-Adaptive Battle Card: Scan Radar (when flat) <-> Holding Bottom-Line Card (when holding) -->
+          <!-- Context-Adaptive Battle Card: Clean Market Balance (when flat) <-> Holding Bottom-Line Card (when holding) -->
           <section class="panel battle-card" id="copilot-battle-card" aria-label="本轮战局与底牌">
-            <!-- State A: Flat / Scanning Mode (Market Balance + Live Sniper Distance) -->
+            <!-- State A: Flat Mode (Clean Market Probability Balance, Zero Redundant Paragraphs) -->
             <div class="battle-scan-view" id="battle-scan-view">
               <div class="bsv-balance-head">
                 <div class="bsv-side up">
@@ -501,10 +498,7 @@
                   <span class="bsv-tag down">看跌 ▼</span>
                 </div>
               </div>
-              <div class="bsv-radar-row" id="battle-radar-row">
-                <span class="bsv-radar-dot" aria-hidden="true"></span>
-                <span class="bsv-radar-text" id="battle-radar-text">策略正在实时比对模型胜率与盘口卖价，出现划算折价会自动出手</span>
-              </div>
+              <span id="battle-radar-text" hidden></span>
             </div>
 
             <!-- State B: Holding Mode (My Position + Crystal-Clear Best / Worst Outcomes) -->
@@ -951,6 +945,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.80"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.81"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>

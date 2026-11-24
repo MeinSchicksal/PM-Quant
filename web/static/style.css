@@ -7793,6 +7793,153 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   CRISP 1-SENTENCE SEMANTIC SIGNAL STRIP (v3.2.81)
+   ========================================================================== */
+.chart-signal-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 20px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.chart-signal-strip:hover {
+  background: var(--surface-subtle);
+}
+
+.css-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.css-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.css-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.css-pill.is-wait {
+  color: var(--label);
+  background: var(--surface-muted);
+}
+.css-pill.is-wait .css-dot { background: var(--caption); }
+
+.css-pill.is-buy {
+  color: var(--up);
+  background: var(--up-soft);
+}
+.css-pill.is-buy .css-dot {
+  background: var(--up);
+  animation: liveBeaconPulse 2.2s ease-in-out infinite;
+}
+
+.css-pill.is-quote {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.css-pill.is-quote .css-dot {
+  background: var(--accent);
+  animation: liveBeaconPulse 2.2s ease-in-out infinite;
+}
+
+.css-pill.is-warn {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+}
+.css-pill.is-warn .css-dot {
+  background: #d97706;
+  animation: liveBeaconPulse 1.8s ease-in-out infinite;
+}
+
+.css-pill.is-down {
+  color: var(--down);
+  background: var(--down-soft);
+}
+.css-pill.is-down .css-dot { background: var(--down); }
+
+[data-theme="dark"] .css-pill.is-warn {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.css-msg {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.4;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.css-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--caption);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.css-meta-sep {
+  color: var(--border);
+}
+
+.css-hist {
+  font-weight: 600;
+  color: var(--caption);
+}
+
+.chart-signal-strip:hover .css-hist {
+  color: var(--ink);
+}
+
+@media (max-width: 780px) {
+  .chart-signal-strip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 10px 14px;
+  }
+  .css-main {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 7px 8px;
+  }
+  .css-msg {
+    font-size: 12.5px;
+    white-space: normal;
+  }
+  .css-meta {
+    width: 100%;
+    justify-content: flex-end;
+    font-size: 10.5px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;
