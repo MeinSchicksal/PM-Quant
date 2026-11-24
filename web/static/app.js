@@ -158,7 +158,7 @@ let cachedModalRecord = null;
 let liveChartHoverIdx = null;
 let liveSelectedActionIdx = null;
 let liveSelectedActionSlug = null;
-let liveActionFilterMode = "all"; // "all" | "fill" | "order"
+let liveActionFilterMode = "key"; // "key" (成交/挂单/撤单) | "fill" | "all"
 let liveChartGeom = null;
 let equityHoverIdx = null;
 let equityChartGeom = null;
@@ -2124,35 +2124,31 @@ function renderWorkingOrders(orders) {
   }
 
   pill.hidden = false;
-  pill.textContent = `${orders.length} 笔排队`;
+  pill.textContent = `${orders.length} 笔排队中`;
   pill.className = "order-pill active";
   box.hidden = false;
 
   setHtmlIfChanged(box, orders
     .map((o) => {
       const side = String(o.side || "Up").toUpperCase();
+      const sideCn = side === "UP" ? "看涨" : "看跌";
       const px = Number(o.price ?? o.px ?? 0);
       const rem = Number(o.remaining_shares ?? o.size ?? o.shares ?? 0);
       const qAhead = Number(o.queue_ahead ?? 0);
-      const ordId = o.id ?? o.order_id ?? "Maker";
       const waitS = Number(o.wait_s ?? 0);
+      const queueHint = qAhead <= 1 ? "已排到最前，随时可能成交" : `前方还有 ${qAhead.toFixed(1)} 股排队`;
 
       return `
-        <div class="queue-status-card active ${side === "UP" ? "up" : "down"}">
-          <div class="queue-card-top">
-            <span class="queue-badge pulsing">FIFO 排队中</span>
-            <span class="queue-order-id">#${escapeHtml(String(ordId))}</span>
+        <div class="queue-live-card ${side === "UP" ? "up" : "down"}">
+          <div class="qlc-top">
+            <span class="qlc-badge"><span class="qlc-pulse"></span>挂单排队中</span>
+            <span class="qlc-wait">已排 ${waitS.toFixed(0)}s</span>
           </div>
-          <div class="queue-card-body">
-            <div class="queue-order-spec">
-              <span class="queue-side ${side === "UP" ? "up" : "down"}">${side} 限价买单</span>
-              <span class="queue-price">@ $${px.toFixed(2)}</span>
-              <span class="queue-size">${rem.toFixed(1)} 股</span>
-            </div>
-            <div class="queue-progress-info">
-              <span>前方排队深度: <strong class="highlight-q">${qAhead.toFixed(1)} 股</strong> · 已挂 ${waitS.toFixed(1)}s</span>
-            </div>
+          <div class="qlc-main">
+            <span class="qlc-side ${side === "UP" ? "up" : "down"}">${sideCn}</span>
+            <strong class="qlc-spec">$${px.toFixed(2)} × ${rem.toFixed(1)} 股</strong>
           </div>
+          <div class="qlc-queue">${queueHint}</div>
         </div>
       `;
     })
@@ -2198,20 +2194,21 @@ function formatActionItem(a, startTs = 0) {
   let typeLabel = "撮合成交";
   let typeClass = "fill";
   if (act === "quote") {
-    typeLabel = "限价报单";
+    typeLabel = "限价挂单";
     typeClass = "quote";
   } else if (act === "cancel") {
-    typeLabel = "队列撤单";
+    typeLabel = "已撤单";
     typeClass = "cancel";
   } else if (act === "taker_reject" || ((act === "fill" || act === "taker_partial") && !isRealFill)) {
-    typeLabel = "拒单拦截";
-    typeClass = "cancel";
+    typeLabel = "暂缓拦截";
+    typeClass = "reject";
   } else if (act === "taker_partial") {
     typeLabel = "部分成交";
     typeClass = "fill";
   }
 
   const side = String(a.side || "--").toUpperCase();
+  const sideLabel = side === "UP" ? "看涨" : side === "DOWN" ? "看跌" : side;
   const sideClass = side === "UP" ? "up" : side === "DOWN" ? "down" : "";
   const specStr = px > 0 && sz > 0 ? `$${px.toFixed(2)} × ${sz.toFixed(1)}股` : "--";
 
@@ -2219,18 +2216,20 @@ function formatActionItem(a, startTs = 0) {
   if (rawReason) {
     reasonStr = translateDecisionReason(rawReason);
   } else if (isRealFill) {
-    const kindTag = String(a.kind || "").toLowerCase() === "taker" ? "Taker 主动吃单" : "Maker 被动队列";
+    const kindTag = String(a.kind || "").toLowerCase() === "taker" ? "主动买入" : "挂单排队";
     const purp = String(a.purpose || "entry").toLowerCase();
-    const purpTag = purp === "hedge" ? "对冲锁仓" : purp === "unwind" ? "尾盘回收" : "首腿开仓";
-    reasonStr = `${kindTag}成交 · ${purpTag}`;
+    const purpTag = purp === "hedge" ? "对冲锁利" : purp === "unwind" ? "尾盘止损" : "建仓";
+    reasonStr = `${kindTag}成交（${purpTag}）`;
   } else if (act === "quote") {
     const ahead = Number(a.queue_ahead ?? 0);
-    reasonStr = `FIFO 限价挂单入列（前方排队 ${ahead.toFixed(1)} 股）`;
+    reasonStr = ahead <= 1 ? "已挂单排在最前，等待对手成交" : `已挂限价单，前方还有 ${ahead.toFixed(1)} 股排队`;
+  } else if (act === "cancel") {
+    reasonStr = "行情变化或超时，已主动撤回未成交挂单";
   } else {
     reasonStr = "交易指令记录";
   }
 
-  return { timeStr, typeLabel, typeClass, sideLabel: side, sideClass, specStr, reasonStr };
+  return { timeStr, typeLabel, typeClass, sideLabel, sideClass, specStr, reasonStr };
 }
 
 function syncChartPinButton() {
@@ -2262,11 +2261,15 @@ function renderActionFeed(actions, startTs = 0) {
     const sz = Number(raw.size ?? raw.shares ?? 0);
     const isRealFill = (act === "fill" || act === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(String(raw.reason || ""));
     if (liveActionFilterMode === "fill") return isRealFill;
+    if (liveActionFilterMode === "key") return isRealFill || act === "quote" || act === "cancel";
     return !isRealFill;
   });
 
   if (filtered.length === 0) {
-    setHtmlIfChanged(list, `<li class="action-empty">当前筛选条件下暂无记录</li>`);
+    const emptyHint = liveActionFilterMode === "key"
+      ? "本轮尚无成交、挂单或撤单动作"
+      : "当前筛选条件下暂无记录";
+    setHtmlIfChanged(list, `<li class="action-empty">${emptyHint}</li>`);
     return;
   }
 
@@ -2275,7 +2278,7 @@ function renderActionFeed(actions, startTs = 0) {
     .map(({ raw, origIdx }) => {
       const item = formatActionItem(raw, startTs);
       const isSel = liveSelectedActionIdx === origIdx;
-      const isMuted = item.typeClass === "cancel";
+      const isMuted = item.typeClass === "reject";
       const specHtml = item.specStr && item.specStr !== "--"
         ? `<span class="tl-spec">${escapeHtml(item.specStr)}</span>`
         : "";
@@ -4185,7 +4188,7 @@ function renderDecisionBulletin(live) {
 
   const timeline = decisionAuditLog;
   if (!timeline.length) {
-    if (countEl) countEl.textContent = "记录 0";
+    if (countEl) countEl.textContent = "思路 0";
     if (modalCountEl) modalCountEl.textContent = "0 条记录";
     if (statusBadgeEl) {
       statusBadgeEl.textContent = "观望中";
@@ -4200,7 +4203,7 @@ function renderDecisionBulletin(live) {
     return;
   }
 
-  if (countEl) countEl.textContent = `记录 ${timeline.length}`;
+  if (countEl) countEl.textContent = `思路 ${timeline.length}`;
   if (modalCountEl) modalCountEl.textContent = `${timeline.length} 条记录`;
   const tagMap = {
     taker_buy: ["出手买入", "is-buy"],

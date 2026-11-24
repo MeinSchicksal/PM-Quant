@@ -6153,3 +6153,161 @@ html, body {
   line-height: 1.55;
   color: var(--ink);
 }
+
+/* ==========================================================================
+   UNIFIED LIVE STRATEGY CONSOLE (CURRENT DECISION + LIVE QUEUE + TIMELINE)
+   ========================================================================== */
+.console-history-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--label);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
+}
+
+.console-history-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
+
+.console-decision-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 13px;
+  border-radius: 11px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-soft);
+}
+
+.cdc-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cdc-sub {
+  font-size: 11px;
+  color: var(--caption);
+}
+
+.cdc-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* Live Queuing Order Card */
+.queue-live-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+  border: 1px solid rgba(37, 99, 235, 0.25);
+}
+
+.qlc-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.qlc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.qlc-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22);
+}
+
+.qlc-wait {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.qlc-main {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.qlc-side {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.qlc-side.up { color: var(--up); background: var(--up-soft); }
+.qlc-side.down { color: var(--down); background: var(--down-soft); }
+
+.qlc-spec {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.qlc-queue {
+  font-size: 11.5px;
+  color: var(--label);
+}
+
+/* Distinct timeline node for Cancel (amber) vs Reject (muted gray) */
+.tl-dot.cancel {
+  width: 8px;
+  height: 8px;
+  margin-top: 0;
+  background: #d97706;
+  border: none;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.20);
+}
+
+.tl-type.cancel {
+  color: #b45309;
+  font-weight: 700;
+}
+
+[data-theme="dark"] .tl-type.cancel {
+  color: #fbbf24;
+}
+
+.tl-dot.reject {
+  width: 6px;
+  height: 6px;
+  margin-top: 1px;
+  background: var(--border);
+  border: 1.5px solid var(--caption);
+}
+
+.tl-type.reject {
+  color: var(--caption);
+  font-weight: 600;
+}

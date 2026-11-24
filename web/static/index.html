@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.67">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.68">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -441,23 +441,7 @@
         </div>
       </section>
 
-      <!-- Plain-Language Live Strategy Assistant Bar -->
-      <section class="panel decision-bulletin-panel" aria-label="策略实时思路">
-        <div class="bulletin-bar" id="bulletin-toggle-btn" role="button" tabindex="0">
-          <div class="bulletin-bar-left">
-            <span class="bulletin-status-pill is-wait" id="bulletin-status-badge">观望中</span>
-            <span class="bulletin-latest-preview" id="bulletin-latest-preview">正在观察实时行情，等待合适的出手时机...</span>
-          </div>
-          <div class="bulletin-bar-right">
-            <span class="bulletin-more-link" id="bulletin-count">记录 0</span>
-            <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M7 5l5 5-5 5"/>
-            </svg>
-          </div>
-        </div>
-      </section>
-
-      <!-- Live Cockpit Grid: Left (Wide Chart + Side-by-Side UP/DOWN) | Right (Full-Height Execution Rail) -->
+      <!-- Live Cockpit Grid: Left (Unobstructed Chart + Outcome Tickets) | Right (Unified Live Strategy Console) -->
       <div class="market-cockpit-grid">
         <div class="cockpit-main-col">
           <!-- Live Price Fluctuation & Strategy Arbitration Chart Panel -->
@@ -597,27 +581,42 @@
         </div>
 
         <div class="cockpit-feed-col">
-          <!-- Live Order Queue & Execution Feed -->
+          <!-- Unified Live Strategy Console: Current Decision + Active Queue + Execution Timeline -->
           <section class="panel section-panel orders-workspace">
             <div class="orders-head-compact">
               <div class="orders-head-top">
-                <h2>在途挂单与撮合流水</h2>
+                <h2>策略动态与委托</h2>
                 <div class="orders-head-meta">
                   <span class="order-pill" id="working-order-pill" hidden></span>
-                  <span class="badge-pill" id="live-action-count">0 笔</span>
+                  <button type="button" class="console-history-btn" id="bulletin-toggle-btn" title="查看本轮完整策略思路历史">
+                    <span id="bulletin-count">思路 0</span>
+                  </button>
+                  <span class="badge-pill" id="live-action-count" hidden>0 笔</span>
                 </div>
-              </div>
-              <div class="orders-subbar">
-                <div class="action-filter-tabs" id="action-feed-filter" role="tablist" aria-label="流水筛选">
-                  <button type="button" class="af-btn active" data-af="all">全部</button>
-                  <button type="button" class="af-btn" data-af="fill">成交</button>
-                  <button type="button" class="af-btn" data-af="order">挂撤</button>
-                </div>
-                <span class="orders-hint">点击定位左图</span>
               </div>
             </div>
 
+            <!-- 1. Current Plain-Language Strategy Decision Card -->
+            <div class="console-decision-card" id="console-decision-card">
+              <div class="cdc-top">
+                <span class="bulletin-status-pill is-wait" id="bulletin-status-badge">观望中</span>
+                <span class="cdc-sub">当前策略决策</span>
+              </div>
+              <p class="cdc-text" id="bulletin-latest-preview">正在观察实时行情，等待合适的出手时机...</p>
+            </div>
+
+            <!-- 2. Active Working Orders Queue Tracker (auto-shows when queuing) -->
             <div id="live-working-orders-box" class="working-orders-box" hidden></div>
+
+            <!-- 3. Execution Timeline Filter & Event Feed -->
+            <div class="orders-subbar">
+              <div class="action-filter-tabs" id="action-feed-filter" role="tablist" aria-label="流水筛选">
+                <button type="button" class="af-btn active" data-af="key">成交/挂撤</button>
+                <button type="button" class="af-btn" data-af="fill">仅成交</button>
+                <button type="button" class="af-btn" data-af="all">全部</button>
+              </div>
+              <span class="orders-hint">点击定位左图</span>
+            </div>
 
             <ol class="action-feed" id="live-action-feed">
               <li class="action-empty">等待撮合引擎输出...</li>
@@ -988,6 +987,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.67"></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.68"></script></script></script></script></script></script>
 </body>
 </html>
