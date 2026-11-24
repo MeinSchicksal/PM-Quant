@@ -8010,24 +8010,109 @@ html, body {
 
 @media (max-width: 780px) {
   .chart-signal-strip {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px 8px;
     padding: 10px 14px;
   }
-  .css-main {
-    width: 100%;
-    flex-wrap: wrap;
-    gap: 7px 8px;
+  .chart-signal-strip .css-pill {
+    order: 1;
   }
-  .css-msg {
+  .chart-signal-strip .css-clock {
+    order: 2;
+    margin-left: auto;
+    font-size: 10.5px;
+  }
+  .chart-signal-strip .css-msg {
+    order: 3;
+    flex: 1 0 100%;
     font-size: 12.5px;
     white-space: normal;
   }
-  .css-meta {
+}
+
+/* Desktop & Mobile Unified 2-Row / Single-Row Round Bar Precision */
+#view-market .stage-round-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+}
+
+.srb-top-line {
+  display: contents;
+}
+
+.srb-time-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#view-market .stage-round-bar .srb-time-group {
+  order: 1;
+}
+
+#view-market .stage-round-bar .stage-stepper {
+  order: 2;
+  margin-left: 0;
+}
+
+#view-market .stage-round-bar .srb-right {
+  order: 3;
+  margin-left: auto;
+}
+
+.chart-signal-strip .css-msg {
+  flex: 1;
+}
+
+.chart-signal-strip .css-clock {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (max-width: 780px) {
+  #view-market .stage-round-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 14px 12px;
+  }
+  .srb-top-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     width: 100%;
-    justify-content: flex-end;
-    font-size: 10.5px;
+  }
+  #view-market .stage-round-bar .srb-time-group {
+    order: initial;
+    gap: 7px;
+  }
+  #view-market .stage-round-bar .srb-right {
+    order: initial;
+    margin-left: 0;
+    width: auto;
+    padding-top: 0;
+    border-top: none;
+    gap: 5px;
+  }
+  #view-market .stage-round-bar .stage-stepper {
+    order: initial;
+    width: 100%;
+    padding-top: 7px;
+    border-top: 1px dashed var(--border-soft);
+    justify-content: space-between;
+  }
+  .srb-range {
+    font-size: 13px;
+  }
+  .srb-tau {
+    font-size: 14px;
   }
 }
 
