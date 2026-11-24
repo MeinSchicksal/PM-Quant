@@ -5565,7 +5565,7 @@ html, body {
 }
 
 /* ==========================================================================
-   LIVE WORKSPACE: UNIFIED UP vs DOWN BATTLE ARENA (TUG-OF-WAR + DUAL WINGS)
+   LIVE WORKSPACE: COMPACT UP/DOWN ARENA + FULL-WIDTH TIMELINE ACTION FEED
    ========================================================================== */
 .panel.arena-panel {
   padding: 0;
@@ -5576,8 +5576,8 @@ html, body {
   display: grid;
   grid-template-columns: auto minmax(120px, 1fr) auto;
   align-items: center;
-  gap: 16px;
-  padding: 13px 20px;
+  gap: 14px;
+  padding: 11px 18px;
   background: var(--surface-subtle);
   border-bottom: 1px solid var(--border-soft);
 }
@@ -5585,7 +5585,7 @@ html, body {
 .arena-tug-side {
   display: inline-flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 7px;
   white-space: nowrap;
 }
 
@@ -5593,9 +5593,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
-  letter-spacing: 0.01em;
 }
 
 .arena-dir-tag.up { color: var(--up); }
@@ -5603,7 +5602,7 @@ html, body {
 
 .arena-prob-num {
   font-family: var(--font-mono);
-  font-size: 17px;
+  font-size: 15.5px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -5619,10 +5618,10 @@ html, body {
 
 .arena-tug-track {
   position: relative;
-  height: 7px;
+  height: 5px;
   width: 100%;
   border-radius: 999px;
-  background: rgba(244, 63, 94, 0.28);
+  background: rgba(244, 63, 94, 0.24);
   overflow: hidden;
 }
 
@@ -5650,12 +5649,13 @@ html, body {
 }
 
 .arena-wing {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 20px 14px;
+  gap: 11px;
+  padding: 14px 18px;
   min-width: 0;
-  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+  transition: background-color 0.2s ease;
 }
 
 .arena-wing.side-up {
@@ -5663,13 +5663,29 @@ html, body {
 }
 
 .arena-wing.side-up.is-holding {
-  background: linear-gradient(180deg, rgba(16, 185, 129, 0.055) 0%, transparent 55%);
-  box-shadow: inset 0 2px 0 var(--up);
+  background: rgba(16, 185, 129, 0.035);
 }
 
 .arena-wing.side-down.is-holding {
-  background: linear-gradient(180deg, rgba(244, 63, 94, 0.055) 0%, transparent 55%);
-  box-shadow: inset 0 2px 0 var(--down);
+  background: rgba(244, 63, 94, 0.035);
+}
+
+.arena-wing.is-holding::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+}
+
+.arena-wing.side-up.is-holding::before {
+  background: var(--up);
+}
+
+.arena-wing.side-down.is-holding::before {
+  background: var(--down);
 }
 
 .arena-wing-top {
@@ -5680,89 +5696,29 @@ html, body {
 }
 
 .arena-wing-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 600;
   color: var(--label);
 }
 
-/* Exchange-Grade Top of Book */
-.arena-book-strip {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
+.wing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
-.arena-quote-col {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.arena-quote-col.right {
-  align-items: flex-end;
-  text-align: right;
-}
-
-.arena-q-lbl {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--caption);
-}
-
-.arena-q-px {
-  font-family: var(--font-mono);
-  font-size: 21px;
-  font-weight: 800;
-  color: var(--ink);
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-}
-
-.arena-q-px.up { color: var(--up); }
-.arena-q-px.down { color: var(--down); }
-
-.arena-q-sz {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--caption);
-  font-variant-numeric: tabular-nums;
-}
-
-.arena-spread-mid {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border-soft);
-}
-
-.arena-spread-lbl {
-  font-size: 9.5px;
-  color: var(--caption);
-  line-height: 1.1;
-}
-
-.arena-spread-val {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--label);
-  font-variant-numeric: tabular-nums;
-}
+.wing-dot.up { background: var(--up); }
+.wing-dot.down { background: var(--down); }
 
 /* Clean 3-Column Position Strip */
 .arena-pos-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-soft);
 }
 
 .arena-pos-cell {
@@ -5773,15 +5729,15 @@ html, body {
 }
 
 .arena-pos-k {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--caption);
 }
 
 .arena-pos-v {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 700;
-  color: var(--ink-secondary);
+  color: var(--caption);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
@@ -5792,31 +5748,215 @@ html, body {
   color: var(--ink);
 }
 
-/* Minimal Depth Footer */
+/* Compact Exchange Orderbook Row */
+.arena-book-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.arena-ba-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.arena-ba-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.arena-ba-k {
+  font-size: 11px;
+  color: var(--caption);
+}
+
+.arena-ba-px {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.arena-ba-px.up { color: var(--up); }
+.arena-ba-px.down { color: var(--down); }
+
+.arena-ba-sz {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
 .arena-depth-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 9px;
-  border-top: 1px dashed var(--border-soft);
   font-size: 11px;
   color: var(--caption);
 }
 
 .arena-depth-foot strong {
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--label);
   font-variant-numeric: tabular-nums;
+  margin-left: 3px;
+}
+
+/* ==========================================================================
+   MODERN FULL-WIDTH ACTION FEED (SOLVES TRUNCATED REASON & VISUAL NOISE)
+   ========================================================================== */
+#live-action-feed.action-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 2px 4px;
+  border: none;
+  background: transparent;
+}
+
+#live-action-feed .action-item.af-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-soft);
+  background: var(--surface-subtle);
+  cursor: pointer;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+#live-action-feed .action-item.af-card:hover {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+#live-action-feed .action-item.af-card.type-fill {
+  background: color-mix(in srgb, var(--up-soft) 42%, var(--surface));
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+#live-action-feed .action-item.af-card.type-quote {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+#live-action-feed .action-item.af-card.is-muted {
+  background: transparent;
+  border-color: transparent;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0;
+  padding: 7px 6px;
+  opacity: 0.78;
+}
+
+#live-action-feed .action-item.af-card.is-muted:hover {
+  opacity: 1;
+  background: var(--surface-subtle);
+  border-radius: 7px;
+}
+
+#live-action-feed .action-item.af-card.selected {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+  opacity: 1;
+}
+
+.af-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.af-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.af-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.af-badge.fill {
+  color: var(--up);
+  background: var(--up-soft);
+}
+
+.af-badge.quote {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.af-badge.cancel {
+  color: var(--caption);
+  background: var(--surface-muted);
+}
+
+.af-side {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.af-side.up { color: var(--up); }
+.af-side.down { color: var(--down); }
+
+.af-spec {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.af-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.af-reason {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--label);
+  word-break: break-word;
+}
+
+#live-action-feed .action-item.af-card.is-muted .af-reason {
+  font-size: 11px;
+  color: var(--caption);
 }
 
 @media (max-width: 780px) {
   .arena-tug-head {
     grid-template-columns: 1fr 1fr;
     gap: 8px 10px;
-    padding: 12px 14px;
+    padding: 11px 14px;
   }
   .arena-tug-side.down {
     justify-content: flex-end;
@@ -5826,23 +5966,23 @@ html, body {
     order: 3;
   }
   .arena-prob-num {
-    font-size: 15.5px;
+    font-size: 15px;
   }
   .arena-wings {
     grid-template-columns: minmax(0, 1fr);
   }
   .arena-wing {
-    padding: 14px 15px;
-    gap: 12px;
+    padding: 13px 14px;
+    gap: 10px;
   }
   .arena-wing.side-up {
     border-right: none;
     border-bottom: 1px solid var(--border);
   }
-  .arena-q-px {
-    font-size: 19px;
+  .arena-ba-px {
+    font-size: 15px;
   }
   .arena-pos-v {
-    font-size: 13px;
+    font-size: 13.5px;
   }
 }
