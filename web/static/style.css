@@ -5366,23 +5366,15 @@ html, body {
   text-align: right;
 }
 
-/* Compact Live Workspace Header (reclaims ~60px above the fold) */
+/* Compact Live Workspace Header (Clean Unified Spacing) */
 #view-market .market-command-strip {
-  padding: 10px 16px;
-  margin-bottom: 8px;
-}
-
-#view-market .decision-bulletin-panel {
-  margin-bottom: 10px;
-}
-
-#view-market .bulletin-bar {
-  padding: 7px 14px;
+  padding: 11px 20px 13px;
+  margin-bottom: 0;
 }
 
 #view-market .chart-header {
-  padding: 12px 16px 8px;
-  gap: 6px;
+  padding: 16px 20px 10px;
+  gap: 8px;
 }
 
 #view-market .chart-subbar {
@@ -7337,6 +7329,342 @@ html, body {
   }
   .bhv-outcome-box {
     padding: 10px 11px;
+  }
+}
+
+/* ==========================================================================
+   DESIGN SYSTEM VISUAL POLISH: UNIFIED RHYTHM, ALIGNMENT & HIERARCHY (v3.2.79)
+   ========================================================================== */
+
+/* 1. Unified 16px Desktop Grid Rhythm & 14px Panel Radii */
+.panel {
+  border-radius: 14px;
+}
+
+#view-overview,
+#view-market,
+#view-history {
+  gap: 16px;
+}
+
+#view-market .market-cockpit-grid {
+  gap: 16px;
+  align-items: stretch;
+}
+
+#view-market .cockpit-main-col {
+  gap: 16px;
+}
+
+#view-market .live-chart-panel {
+  padding: 0;
+  overflow: hidden;
+  gap: 0;
+}
+
+#view-market .live-chart-panel .canvas-container {
+  padding: 0 8px 6px;
+  border: none;
+  border-radius: 0;
+}
+
+/* 2. Flush Chart-Integrated Co-Pilot Narration Footer (Exact 20px Left/Right Alignment) */
+#view-market .chart-verdict-bar.copilot-narration-bar {
+  margin: 0;
+  padding: 12px 20px;
+  border: none;
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: var(--surface-subtle);
+  gap: 16px;
+}
+
+#view-market .chart-verdict-bar.copilot-narration-bar:hover {
+  background: color-mix(in srgb, var(--surface-subtle) 70%, var(--surface));
+}
+
+.cvb-left {
+  gap: 10px;
+  align-items: center;
+}
+
+.cvb-state {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.cvb-reason {
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  line-height: 1.5;
+}
+
+.cvb-right {
+  gap: 10px;
+}
+
+.cvb-hist-link {
+  font-size: 11px;
+  padding: 3px 10px;
+  transition: border-color 0.14s ease, color 0.14s ease;
+}
+
+.chart-verdict-bar:hover .cvb-hist-link {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+/* 3. Clear Typographic Hierarchy: Elevate Hero Numbers, Quiet Secondary Labels */
+.chart-hero-px {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.chart-delta-pill {
+  font-size: 12.5px;
+  padding: 3px 10px;
+}
+
+.chart-hero-sub-row {
+  font-size: 12px;
+  gap: 8px;
+}
+
+#view-market .slim-round-bar {
+  padding: 11px 20px 13px;
+  gap: 12px 16px;
+}
+
+.srb-range {
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.srb-tau-wrap {
+  font-size: 12px;
+  gap: 4px;
+}
+
+.srb-tau {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.srb-right {
+  gap: 10px;
+}
+
+/* 4. Context-Adaptive Battle Card: Precision Padding & High-Impact PnL */
+.panel.battle-card {
+  padding: 18px 20px;
+}
+
+.battle-scan-view {
+  gap: 14px;
+}
+
+.bsv-prob {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.bsv-radar-row {
+  padding-top: 12px;
+  gap: 10px;
+}
+
+.bsv-radar-text {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.battle-holding-view {
+  grid-template-columns: minmax(190px, 0.9fr) minmax(0, 1.5fr);
+  gap: 20px;
+}
+
+.bhv-position-col {
+  gap: 6px;
+  padding-right: 16px;
+}
+
+.bhv-main-pos {
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.bhv-sub {
+  font-size: 12.5px;
+}
+
+.bhv-outcomes-grid {
+  gap: 12px;
+}
+
+.bhv-outcome-box {
+  padding: 13px 16px;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.bhv-pnl-num {
+  font-size: 26px;
+  letter-spacing: -0.03em;
+}
+
+.bhv-ob-prob {
+  font-size: 11.5px;
+}
+
+/* 5. Right Execution Rail Alignment */
+#view-market .orders-workspace.console-panel {
+  padding: 16px 18px;
+  gap: 12px;
+}
+
+.console-rail-head {
+  padding-bottom: 2px;
+}
+
+.console-rail-head h2 {
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+.console-feed-bar {
+  margin-top: 0;
+}
+
+/* 6. Overview Page Alignment & Visual Weight Polish */
+#view-overview .hero-num {
+  font-size: 34px;
+  letter-spacing: -0.035em;
+}
+
+#view-overview .pnl-hero-card,
+#view-overview .equity-curve-card,
+#view-overview .exec-breakdown-panel,
+#view-overview .quality-panel {
+  padding: 20px 22px;
+}
+
+#view-overview .equity-curve-card {
+  padding-bottom: 14px;
+}
+
+#view-overview .qm-val {
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+/* Dark Theme Contrast Refinement */
+[data-theme="dark"] .stage-step.is-active {
+  background: rgba(148, 163, 184, 0.16);
+  color: #f8fafc;
+}
+
+[data-theme="dark"] .bhv-outcome-box.side-up.is-leading {
+  background: rgba(16, 185, 129, 0.10);
+  border-color: rgba(16, 185, 129, 0.36);
+}
+
+[data-theme="dark"] .bhv-outcome-box.side-down.is-leading {
+  background: rgba(244, 63, 94, 0.10);
+  border-color: rgba(244, 63, 94, 0.34);
+}
+
+/* 7. Mobile Precision Alignment & 12px Rhythm (<= 780px) */
+@media (max-width: 780px) {
+  .panel {
+    border-radius: 12px;
+  }
+  #view-overview,
+  #view-market,
+  #view-history {
+    gap: 12px;
+  }
+  #view-market .market-cockpit-grid,
+  #view-market .cockpit-main-col {
+    gap: 12px;
+  }
+  #view-market .slim-round-bar {
+    padding: 10px 14px 12px;
+    gap: 8px 10px;
+  }
+  #view-market .slim-round-bar .srb-left {
+    width: 100%;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  #view-market .slim-round-bar .srb-right {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-soft);
+  }
+  .stage-stepper {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-soft);
+  }
+  #view-market .chart-header {
+    padding: 14px 14px 10px;
+  }
+  .chart-hero-px {
+    font-size: 21px;
+  }
+  .chart-delta-pill {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+  #view-market .live-chart-panel .canvas-container {
+    padding: 0 2px 4px;
+  }
+  #view-market .chart-verdict-bar.copilot-narration-bar {
+    padding: 11px 14px;
+    gap: 8px;
+  }
+  .cvb-state {
+    font-size: 12.5px;
+  }
+  .cvb-reason {
+    font-size: 12px;
+  }
+  .panel.battle-card {
+    padding: 14px 15px;
+  }
+  .bsv-prob {
+    font-size: 16px;
+  }
+  .bsv-radar-text {
+    font-size: 12px;
+  }
+  .bhv-main-pos {
+    font-size: 18px;
+  }
+  .bhv-pnl-num {
+    font-size: 22px;
+  }
+  .bhv-outcome-box {
+    padding: 11px 12px;
+  }
+  #view-market .orders-workspace.console-panel {
+    padding: 14px 15px;
+  }
+  #view-overview .pnl-hero-card,
+  #view-overview .equity-curve-card,
+  #view-overview .exec-breakdown-panel,
+  #view-overview .quality-panel {
+    padding: 15px 16px;
+  }
+  #view-overview .hero-num {
+    font-size: 27px;
   }
 }
 
