@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.64">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.65">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -504,81 +504,94 @@
             </div>
           </section>
 
-          <!-- Clean Institutional Position & Orderbook Table (UP & DOWN) -->
-          <section class="panel book-table-panel" aria-label="本轮持仓与盘口报价">
-            <div class="bt-head" role="row">
-              <span>方向</span>
-              <span class="num">隐含概率</span>
-              <span>最优买一 / 卖一</span>
-              <span class="num">5档深度</span>
-              <span class="num">持仓与成本</span>
-              <span class="num">交割预估</span>
-            </div>
+          <!-- Modern Outcome Ticket Cards (Polymarket / Linear Inspired) -->
+          <div class="outcome-tickets-grid" aria-label="本轮多空实时票据与持仓">
+            <!-- UP Ticket -->
+            <section class="panel outcome-ticket side-up" id="card-up">
+              <div class="ot-head">
+                <div class="ot-title-group">
+                  <span class="ot-pill up">UP</span>
+                  <span class="ot-name">看涨合约</span>
+                </div>
+                <div class="ot-prob-hero">
+                  <strong class="ot-prob-val up" id="up-meta-implied">--%</strong>
+                </div>
+              </div>
 
-            <div class="bt-row side-up" id="card-up" role="row">
-              <div class="bt-side-cell">
-                <span class="bt-side-tag up">▲ UP</span>
-                <span class="bt-side-sub">看涨</span>
+              <div class="ot-book-row">
+                <div class="ot-quote">
+                  <span class="ot-q-k">买一</span>
+                  <strong class="ot-q-v up" id="up-bid-px">--</strong>
+                  <small class="ot-q-s" id="up-bid-sz">--</small>
+                </div>
+                <div class="ot-quote">
+                  <span class="ot-q-k">卖一</span>
+                  <strong class="ot-q-v" id="up-ask-px">--</strong>
+                  <small class="ot-q-s" id="up-ask-sz">--</small>
+                </div>
+                <div class="ot-quote right">
+                  <span class="ot-q-k">价差 · 5档</span>
+                  <span class="ot-q-meta"><b id="up-meta-spread">--</b> · <span id="up-meta-depth">--</span></span>
+                </div>
               </div>
-              <div class="bt-prob-cell num">
-                <strong class="up" id="up-meta-implied">--%</strong>
-              </div>
-              <div class="bt-quote-cell">
-                <span class="bt-ba-pair">
-                  <strong class="up" id="up-bid-px">--</strong>
-                  <small id="up-bid-sz">--</small>
-                  <span class="bt-slash">/</span>
-                  <strong id="up-ask-px">--</strong>
-                  <small id="up-ask-sz">--</small>
-                </span>
-                <span class="bt-spread-note">价差 <b id="up-meta-spread">--</b></span>
-              </div>
-              <div class="bt-depth-cell num">
-                <span id="up-meta-depth">--</span>
-              </div>
-              <div class="bt-pos-cell num">
-                <strong class="bt-pos-sh" id="up-pos-shares">0.0 股</strong>
-                <small class="bt-pos-sub">均 <span id="up-pos-avg">--</span> · <span id="up-pos-cost">$0.00</span></small>
-              </div>
-              <div class="bt-pnl-cell num">
+
+              <div class="ot-pos-dock">
+                <div class="ot-pos-left">
+                  <span class="ot-pos-empty-hint">空仓观望</span>
+                  <div class="ot-pos-filled">
+                    <strong class="ot-pos-sh" id="up-pos-shares">0.0 股</strong>
+                    <span class="ot-pos-detail">均价 <b id="up-pos-avg">--</b> · 投入 <b id="up-pos-cost">$0.00</b></span>
+                  </div>
+                </div>
                 <div class="side-settle-pnl" id="pnl-forecast-up">
                   <span class="pnl-hint">空仓</span>
                 </div>
               </div>
-            </div>
+            </section>
 
-            <div class="bt-row side-down" id="card-down" role="row">
-              <div class="bt-side-cell">
-                <span class="bt-side-tag down">▼ DOWN</span>
-                <span class="bt-side-sub">看跌</span>
+            <!-- DOWN Ticket -->
+            <section class="panel outcome-ticket side-down" id="card-down">
+              <div class="ot-head">
+                <div class="ot-title-group">
+                  <span class="ot-pill down">DOWN</span>
+                  <span class="ot-name">看跌合约</span>
+                </div>
+                <div class="ot-prob-hero">
+                  <strong class="ot-prob-val down" id="down-meta-implied">--%</strong>
+                </div>
               </div>
-              <div class="bt-prob-cell num">
-                <strong class="down" id="down-meta-implied">--%</strong>
+
+              <div class="ot-book-row">
+                <div class="ot-quote">
+                  <span class="ot-q-k">买一</span>
+                  <strong class="ot-q-v down" id="down-bid-px">--</strong>
+                  <small class="ot-q-s" id="down-bid-sz">--</small>
+                </div>
+                <div class="ot-quote">
+                  <span class="ot-q-k">卖一</span>
+                  <strong class="ot-q-v" id="down-ask-px">--</strong>
+                  <small class="ot-q-s" id="down-ask-sz">--</small>
+                </div>
+                <div class="ot-quote right">
+                  <span class="ot-q-k">价差 · 5档</span>
+                  <span class="ot-q-meta"><b id="down-meta-spread">--</b> · <span id="down-meta-depth">--</span></span>
+                </div>
               </div>
-              <div class="bt-quote-cell">
-                <span class="bt-ba-pair">
-                  <strong class="down" id="down-bid-px">--</strong>
-                  <small id="down-bid-sz">--</small>
-                  <span class="bt-slash">/</span>
-                  <strong id="down-ask-px">--</strong>
-                  <small id="down-ask-sz">--</small>
-                </span>
-                <span class="bt-spread-note">价差 <b id="down-meta-spread">--</b></span>
-              </div>
-              <div class="bt-depth-cell num">
-                <span id="down-meta-depth">--</span>
-              </div>
-              <div class="bt-pos-cell num">
-                <strong class="bt-pos-sh" id="down-pos-shares">0.0 股</strong>
-                <small class="bt-pos-sub">均 <span id="down-pos-avg">--</span> · <span id="down-pos-cost">$0.00</span></small>
-              </div>
-              <div class="bt-pnl-cell num">
+
+              <div class="ot-pos-dock">
+                <div class="ot-pos-left">
+                  <span class="ot-pos-empty-hint">空仓观望</span>
+                  <div class="ot-pos-filled">
+                    <strong class="ot-pos-sh" id="down-pos-shares">0.0 股</strong>
+                    <span class="ot-pos-detail">均价 <b id="down-pos-avg">--</b> · 投入 <b id="down-pos-cost">$0.00</b></span>
+                  </div>
+                </div>
                 <div class="side-settle-pnl" id="pnl-forecast-down">
                   <span class="pnl-hint">空仓</span>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
+          </div>
         </div>
 
         <div class="cockpit-feed-col">
@@ -973,6 +986,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.64"></script></script></script>
+  <script src="/static/app.js?v=3.2.65"></script></script></script></script>
 </body>
 </html>

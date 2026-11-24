@@ -2232,19 +2232,22 @@ function renderActionFeed(actions, startTs = 0) {
       const isSel = liveSelectedActionIdx === origIdx;
       const isMuted = item.typeClass === "cancel";
       const specHtml = item.specStr && item.specStr !== "--"
-        ? `<span class="af-spec">${escapeHtml(item.specStr)}</span>`
+        ? `<span class="tl-spec">${escapeHtml(item.specStr)}</span>`
         : "";
       return `
-        <li class="action-item af-card clickable type-${item.typeClass} ${isMuted ? "is-muted" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
-          <div class="af-top">
-            <div class="af-left">
-              <span class="af-badge ${item.typeClass}">${escapeHtml(item.typeLabel)}</span>
-              <span class="af-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
-              ${specHtml}
+        <li class="action-item tl-item clickable type-${item.typeClass} ${isMuted ? "is-muted" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
+          <span class="tl-rail" aria-hidden="true"><span class="tl-dot ${item.typeClass}"></span></span>
+          <div class="tl-body">
+            <div class="tl-head">
+              <div class="tl-meta">
+                <span class="tl-type ${item.typeClass}">${escapeHtml(item.typeLabel)}</span>
+                <span class="tl-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
+                ${specHtml}
+              </div>
+              <span class="tl-time">${escapeHtml(item.timeStr)}</span>
             </div>
-            <span class="af-time">${escapeHtml(item.timeStr)}</span>
+            <div class="tl-reason">${escapeHtml(item.reasonStr)}</div>
           </div>
-          <div class="af-reason">${escapeHtml(item.reasonStr)}</div>
         </li>
       `;
     })
