@@ -2014,12 +2014,14 @@ function updateMarket(live) {
     const el = $(elId);
     if (!el) return;
     if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
+      const sideCn = sideName === "UP" ? "看涨" : "看跌";
+      const lbl = netVal >= 0 ? `若${sideCn}胜出 · 预计净赚` : `若${sideCn}胜出 · 预计净亏`;
       setHtmlIfChanged(
         el,
-        `<span class="pnl-hint">若 ${sideName} 胜出</span><span class="pnl-amt ${netVal >= 0 ? "pos" : "neg"}">${escapeHtml(fmtUsd(netVal, true))}</span>`
+        `<span class="ot-pnl-lbl">${lbl}</span><strong class="ot-pnl-amt ${netVal >= 0 ? "up" : "down"}">${escapeHtml(fmtUsd(netVal, true))}</strong>`
       );
     } else {
-      setHtmlIfChanged(el, `<span class="pnl-hint">空仓观望</span>`);
+      setHtmlIfChanged(el, `<span class="ot-pnl-lbl">预计交割收益</span><strong class="ot-pnl-amt flat">空仓观望</strong>`);
     }
   };
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);

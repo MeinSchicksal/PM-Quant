@@ -5644,9 +5644,9 @@ html, body {
 
 .ot-prob-val {
   font-family: var(--font-mono);
-  font-size: 26px;
+  font-size: 16px;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
@@ -5654,97 +5654,49 @@ html, body {
 .ot-prob-val.up { color: var(--up); }
 .ot-prob-val.down { color: var(--down); }
 
-.ot-book-row {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: end;
-  gap: 18px;
-}
-
-.ot-quote {
+/* Hero Centerpiece: Expected Settlement PnL */
+.ot-pnl-hero {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+  gap: 3px;
+  padding: 2px 0;
 }
 
-.ot-quote.right {
-  align-items: flex-end;
-  text-align: right;
-}
-
-.ot-q-k {
-  font-size: 10.5px;
+.ot-pnl-lbl {
+  font-size: 11.5px;
   font-weight: 500;
   color: var(--caption);
 }
 
-.ot-q-v {
+.ot-pnl-amt {
   font-family: var(--font-mono);
-  font-size: 15.5px;
-  font-weight: 700;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
   color: var(--ink);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.2;
 }
 
-.ot-q-v.up { color: var(--up); }
-.ot-q-v.down { color: var(--down); }
-
-.ot-q-s {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--caption);
-  font-variant-numeric: tabular-nums;
-}
-
-.ot-q-meta {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--caption);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ot-q-meta b {
-  color: var(--label);
+.ot-pnl-amt.up { color: var(--up); }
+.ot-pnl-amt.down { color: var(--down); }
+.ot-pnl-amt.flat {
+  font-family: var(--font-sans);
+  font-size: 17px;
   font-weight: 600;
+  color: var(--caption);
+  letter-spacing: 0;
 }
 
-/* Position Dock: Minimal when flat, elevated sleek strip when holding */
-.ot-pos-dock {
+/* Clean Position Summary Line */
+.ot-pos-line {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border-soft);
-  min-height: 42px;
-}
-
-.outcome-ticket.side-up.is-holding .ot-pos-dock {
-  background: rgba(16, 185, 129, 0.08);
-  border-color: rgba(16, 185, 129, 0.22);
-}
-
-.outcome-ticket.side-down.is-holding .ot-pos-dock {
-  background: rgba(244, 63, 94, 0.075);
-  border-color: rgba(244, 63, 94, 0.22);
-}
-
-.ot-pos-left {
-  display: flex;
-  align-items: center;
-  min-width: 0;
+  min-height: 20px;
 }
 
 .ot-pos-empty-hint {
   font-size: 12px;
-  font-weight: 500;
   color: var(--caption);
 }
 
@@ -5765,7 +5717,7 @@ html, body {
 
 .ot-pos-sh {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 800;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -5774,7 +5726,7 @@ html, body {
 
 .ot-pos-detail {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--label);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -5785,9 +5737,53 @@ html, body {
   font-weight: 700;
 }
 
-.ot-pos-dock .side-settle-pnl {
-  flex-shrink: 0;
+/* Secondary Compact Orderbook Footer (Bid / Ask / Size / Depth) */
+.ot-book-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11px;
+  color: var(--caption);
+}
+
+.ot-bf-quotes,
+.ot-bf-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-bf-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
   white-space: nowrap;
+}
+
+.ot-bf-item b {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.ot-bf-item b.up { color: var(--up); }
+.ot-bf-item b.down { color: var(--down); }
+
+.ot-bf-item small {
+  font-size: 10px;
+  color: var(--caption);
+}
+
+.ot-bf-meta b {
+  font-weight: 600;
+  color: var(--label);
 }
 
 /* ==========================================================================
@@ -5968,10 +5964,6 @@ html, body {
   color: var(--caption);
 }
 
-.outcome-ticket:not(.is-holding) .ot-pos-dock .side-settle-pnl .pnl-hint {
-  display: none;
-}
-
 @media (max-width: 780px) {
   .outcome-tickets-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5979,58 +5971,46 @@ html, body {
   }
   .panel.outcome-ticket {
     padding: 12px 12px 10px;
-    gap: 9px;
+    gap: 8px;
     border-radius: 12px;
   }
   .ot-name {
     display: none;
   }
   .ot-prob-val {
-    font-size: 20px;
+    font-size: 14.5px;
   }
-  .ot-book-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px 8px;
+  .ot-pnl-lbl {
+    font-size: 10px;
   }
-  .ot-quote.right {
-    grid-column: 1 / -1;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    text-align: left;
-    padding-top: 6px;
-    border-top: 1px dashed var(--border-soft);
+  .ot-pnl-amt {
+    font-size: 21px;
   }
-  .ot-q-v {
+  .ot-pnl-amt.flat {
     font-size: 14px;
   }
-  .ot-q-s {
-    font-size: 10px;
-  }
-  .ot-q-meta {
-    font-size: 10px;
-  }
-  .ot-pos-dock {
-    padding: 7px 9px;
-    min-height: 34px;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
-  }
-  .ot-pos-empty-hint {
-    font-size: 11px;
-  }
-  .ot-pos-filled {
-    gap: 4px;
-  }
   .ot-pos-sh {
-    font-size: 12.5px;
+    font-size: 12px;
   }
   .ot-pos-detail {
     font-size: 10px;
   }
-  .ot-pos-dock .side-settle-pnl {
-    font-size: 11px;
+  .ot-book-footer {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding-top: 8px;
+    font-size: 10px;
+  }
+  .ot-bf-quotes,
+  .ot-bf-meta {
+    gap: 6px;
+  }
+  .ot-bf-item b {
+    font-size: 10.5px;
+  }
+  .ot-bf-item small {
+    display: none;
   }
 }
 
