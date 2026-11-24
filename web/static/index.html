@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.85">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.87">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -473,37 +473,34 @@
             </div>
           </section>
 
-          <!-- Context-Adaptive Battle Card: Clean Market Balance (when flat) <-> Holding Bottom-Line Card (when holding) -->
-          <section class="panel battle-card" id="copilot-battle-card" aria-label="本轮战局与底牌">
-            <!-- State A: Flat Mode (Clean Market Probability Balance, Zero Redundant Paragraphs) -->
-            <div class="battle-scan-view" id="battle-scan-view">
-              <div class="bsv-balance-head">
-                <div class="bsv-side up">
-                  <span class="bsv-tag up">▲ 看涨</span>
-                  <strong class="bsv-prob up" id="up-meta-implied">--%</strong>
+          <!-- Unified Battle Card: Always-On Probability Track + Auto-Expanding Holding Bottom-Line -->
+          <section class="panel battle-card" id="copilot-battle-card" aria-label="本轮多空概率与持仓底牌">
+            <!-- Always-On Top Track: Live UP vs DOWN Market Probability Balance -->
+            <div class="bsv-balance-head" id="battle-scan-view">
+              <div class="bsv-side up">
+                <span class="bsv-tag up">▲ 看涨</span>
+                <strong class="bsv-prob up" id="up-meta-implied">--%</strong>
+              </div>
+              <div class="bsv-scale-wrap" aria-hidden="true">
+                <div class="bsv-scale-track">
+                  <div class="bsv-scale-fill up" id="battle-balance-up" style="width: 50%"></div>
+                  <span class="bsv-scale-mid"></span>
                 </div>
-                <div class="bsv-scale-wrap" aria-hidden="true">
-                  <div class="bsv-scale-track">
-                    <div class="bsv-scale-fill up" id="battle-balance-up" style="width: 50%"></div>
-                    <span class="bsv-scale-mid"></span>
-                  </div>
-                </div>
-                <div class="bsv-side down">
-                  <strong class="bsv-prob down" id="down-meta-implied">--%</strong>
-                  <span class="bsv-tag down">看跌 ▼</span>
-                </div>
+              </div>
+              <div class="bsv-side down">
+                <strong class="bsv-prob down" id="down-meta-implied">--%</strong>
+                <span class="bsv-tag down">看跌 ▼</span>
               </div>
               <span id="battle-radar-text" hidden></span>
             </div>
 
-            <!-- State B: Holding Mode (My Position + Crystal-Clear Best / Worst Outcomes) -->
+            <!-- Auto-Expanding Holding Section (Cleanly docks under the track once holding) -->
             <div class="battle-holding-view" id="battle-holding-view" hidden>
               <div class="bhv-position-col">
-                <span class="bhv-k">本轮已持仓</span>
                 <div class="bhv-chips" id="battle-holding-chips">
                   <strong class="bhv-main-pos" id="battle-pos-headline">看涨 0.0 股</strong>
                 </div>
-                <span class="bhv-sub" id="battle-pos-sub">均价 -- · 总投入 $0.00</span>
+                <span class="bhv-sub" id="battle-pos-sub">均价 -- · 投入 $0.00</span>
               </div>
 
               <div class="bhv-outcomes-grid">
@@ -515,7 +512,6 @@
                   <div class="bhv-ob-pnl" id="pnl-forecast-up">
                     <strong class="bhv-pnl-num">$0.00</strong>
                   </div>
-                  <span class="bhv-ob-prob">当前概率 <b class="up" id="up-prob-hold">--%</b></span>
                 </div>
 
                 <div class="bhv-outcome-box side-down" id="card-down" data-focus-side="DOWN">
@@ -526,7 +522,6 @@
                   <div class="bhv-ob-pnl" id="pnl-forecast-down">
                     <strong class="bhv-pnl-num">$0.00</strong>
                   </div>
-                  <span class="bhv-ob-prob">当前概率 <b class="down" id="down-prob-hold">--%</b></span>
                 </div>
               </div>
             </div>
@@ -539,6 +534,8 @@
               <span id="down-pos-shares">0.0 股</span>
               <span id="down-pos-avg">--</span>
               <span id="down-pos-cost">$0.00</span>
+              <span id="up-prob-hold">--%</span>
+              <span id="down-prob-hold">--%</span>
               <span id="console-edge-meter"></span>
             </div>
           </section>
@@ -943,6 +940,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.86"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.87"></script>
 </body>
 </html>

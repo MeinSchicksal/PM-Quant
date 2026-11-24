@@ -2091,12 +2091,10 @@ function updateMarket(live) {
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);
   renderSideForecast("pnl-forecast-down", "DOWN", dnWinNet);
 
-  // Context-Adaptive Battle Card: Toggle Scan Radar vs Holding Bottom-Line Card
+  // Always keep probability track visible; auto-expand holding bottom-line section beneath it when holding
   const hasAnyHolding = upShares > 1e-6 || dnShares > 1e-6 || totalCost > 1e-6;
-  const scanView = $("battle-scan-view");
   const holdView = $("battle-holding-view");
   const battleCard = $("copilot-battle-card");
-  if (scanView) scanView.hidden = hasAnyHolding;
   if (holdView) holdView.hidden = !hasAnyHolding;
   if (battleCard) battleCard.classList.toggle("is-holding-mode", hasAnyHolding);
 
@@ -2112,14 +2110,14 @@ function updateMarket(live) {
     const subEl = $("battle-pos-sub");
     if (headlineEl && subEl) {
       if (upShares > 1e-6 && dnShares > 1e-6) {
-        headlineEl.innerHTML = `<span class="up">看涨 ${fmtShares(upShares)}股</span> <span class="bhv-plus">+</span> <span class="down">看跌 ${fmtShares(dnShares)}股</span>`;
-        subEl.textContent = `双边配比 · 总投入 ${fmtUsd(totalCost)}`;
+        headlineEl.innerHTML = `<span class="bhv-pos-pill up">看涨 ${fmtShares(upShares)}股</span><span class="bhv-pos-pill down">看跌 ${fmtShares(dnShares)}股</span>`;
+        subEl.textContent = `总投入 ${fmtUsd(totalCost)}`;
       } else if (upShares > 1e-6) {
-        headlineEl.innerHTML = `<span class="up">看涨</span> ${fmtShares(upShares)} 股`;
-        subEl.textContent = `均价 ${fmtPriceCents(posUp.avg_px)} · 总投入 ${fmtUsd(upCost)}`;
+        headlineEl.innerHTML = `<span class="bhv-pos-pill up">已买看涨</span><span class="bhv-pos-qty">${fmtShares(upShares)} 股</span>`;
+        subEl.textContent = `均价 ${fmtPriceCents(posUp.avg_px)} · 投入 ${fmtUsd(upCost)}`;
       } else {
-        headlineEl.innerHTML = `<span class="down">看跌</span> ${fmtShares(dnShares)} 股`;
-        subEl.textContent = `均价 ${fmtPriceCents(posDn.avg_px)} · 总投入 ${fmtUsd(dnCost)}`;
+        headlineEl.innerHTML = `<span class="bhv-pos-pill down">已买看跌</span><span class="bhv-pos-qty">${fmtShares(dnShares)} 股</span>`;
+        subEl.textContent = `均价 ${fmtPriceCents(posDn.avg_px)} · 投入 ${fmtUsd(dnCost)}`;
       }
     }
   }

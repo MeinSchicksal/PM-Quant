@@ -8153,6 +8153,82 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   ALWAYS-ON PROBABILITY TRACK + SLEEK DOCKED HOLDING BOTTOM-LINE (v3.2.87)
+   ========================================================================== */
+.panel.battle-card.is-holding-mode .battle-holding-view {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.bhv-main-pos {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bhv-pos-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bhv-pos-pill.up {
+  color: var(--up);
+  background: var(--up-soft);
+}
+
+.bhv-pos-pill.down {
+  color: var(--down);
+  background: var(--down-soft);
+}
+
+.bhv-pos-qty {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.bhv-outcome-box {
+  padding: 12px 15px;
+  gap: 6px;
+}
+
+@media (max-width: 780px) {
+  .panel.battle-card.is-holding-mode .battle-holding-view {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+  .bhv-position-col {
+    align-items: center;
+    padding-bottom: 0 !important;
+    border-bottom: none !important;
+  }
+  .bhv-pos-qty {
+    font-size: 15.5px;
+  }
+  .bhv-sub {
+    font-size: 11.5px;
+    color: var(--caption);
+  }
+  .bhv-outcome-box {
+    padding: 11px 12px;
+    gap: 5px;
+  }
+  .bhv-pnl-num {
+    font-size: 22px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;
