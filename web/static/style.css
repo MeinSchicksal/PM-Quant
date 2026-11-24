@@ -4452,23 +4452,27 @@ html, body {
 }
 
 @media (max-width: 640px) {
-  /* 1. Merge double header (.sidebar + .topbar) into a single sleek 46px mobile app bar */
+  /* 1. Merge double header (.sidebar + .topbar) into a single fixed 48px mobile app bar */
   .sidebar {
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     z-index: 95;
-    height: 46px;
-    min-height: 46px;
-    padding: 0 116px 0 12px;
+    height: 48px;
+    min-height: 48px;
+    padding: 0 118px 0 14px;
     flex-wrap: nowrap;
     align-items: center;
     justify-content: flex-start;
     gap: 8px;
-    background: var(--surface);
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
   }
   .sidebar-brand {
-    height: 46px;
+    height: 48px;
     padding: 0;
     gap: 7px;
   }
@@ -4507,15 +4511,15 @@ html, body {
     top: 0;
     right: 0;
     z-index: 100;
-    height: 46px;
+    height: 48px;
     background: transparent;
     border-bottom: 0;
     pointer-events: none;
   }
   .topbar-inner {
-    height: 46px;
-    min-height: 46px;
-    padding: 0 10px;
+    height: 48px;
+    min-height: 48px;
+    padding: 0 12px;
     justify-content: flex-end;
   }
   .topbar-left,
@@ -4524,10 +4528,10 @@ html, body {
   }
   .topbar-actions {
     pointer-events: auto;
-    gap: 5px;
+    gap: 6px;
   }
   .control-tray {
-    gap: 4px;
+    gap: 6px;
   }
   .icon-btn {
     width: 30px;
@@ -4567,13 +4571,17 @@ html, body {
     border-radius: 10px;
   }
   .shell {
-    padding: 8px 10px calc(74px + env(safe-area-inset-bottom));
+    padding: 58px 14px calc(76px + env(safe-area-inset-bottom));
   }
   .view-panel {
-    gap: 8px;
+    gap: 12px;
   }
-  .overview-hero-grid {
-    gap: 8px;
+  .overview-hero-grid,
+  .overview-lower-grid {
+    gap: 12px;
+  }
+  .panel {
+    padding: 14px 16px;
   }
 
   /* 2. Overview page (View 1): compact active strip without awkward middle black bar */
@@ -4627,8 +4635,8 @@ html, body {
 
   .pnl-hero-card,
   .equity-curve-card {
-    padding: 11px 12px;
-    gap: 8px;
+    padding: 14px 16px;
+    gap: 12px;
   }
   .pnl-hero-card .card-head,
   .equity-curve-card .card-head {
