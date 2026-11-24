@@ -3121,8 +3121,8 @@ function drawLivePriceChart(live) {
     const px = Number(a.price ?? a.px ?? 0);
     const sz = Number(a.size ?? a.shares ?? 0);
     const isRealFill = (actType === "fill" || actType === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(String(a.reason || ""));
-    if (!isRealFill) return;
     const isSel = liveSelectedActionIdx === idx;
+    if (!isRealFill && !isSel) return;
 
     const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
     const elSec = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
@@ -3138,9 +3138,12 @@ function drawLivePriceChart(live) {
     });
 
     const sideUpper = String(a.side || "").toUpperCase();
+    const sideCn = sideUpper === "UP" ? "看涨" : sideUpper === "DOWN" ? "看跌" : sideUpper;
     const actColor =
       actType === "cancel"
-        ? pal.down
+        ? "#d97706"
+        : actType === "quote"
+        ? "#2563eb"
         : sideUpper === "DOWN"
         ? pal.down
         : sideUpper === "UP"
@@ -3161,7 +3164,7 @@ function drawLivePriceChart(live) {
       return;
     }
 
-    // Selected action: full vertical + horizontal extension lines + annotated dot
+    // Selected action (Fill / Quote / Cancel): full vertical + horizontal extension lines across both panes
     ctx.save();
     ctx.strokeStyle = actColor;
     ctx.lineWidth = 1.4;
@@ -3173,8 +3176,24 @@ function drawLivePriceChart(live) {
     ctx.lineTo(ax, h - padB);
     ctx.stroke();
 
-    // Horizontal extension line across probability pane (primary focus)
-    if (probH > 0 && nearest && nearest.up_mid !== null) {
+    // Upper price pane intersection dot
+    if (priceH > 0 && nearest && nearest.poly_spot > 0) {
+      const sy = yOfPrice(nearest.poly_spot);
+      ctx.save();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(ax, sy, 4.2, 0, Math.PI * 2);
+      ctx.fillStyle = actColor;
+      ctx.fill();
+      ctx.strokeStyle = pal.cardBg;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Horizontal extension line across probability pane (or price pane when in price-only mode)
+    const hasProbTarget = probH > 0 && nearest && nearest.up_mid !== null;
+    if (hasProbTarget) {
       const py = yOfProb(nearest.up_mid);
       ctx.beginPath();
       ctx.moveTo(padL, py);
@@ -3184,7 +3203,11 @@ function drawLivePriceChart(live) {
       ctx.setLineDash([]);
       ctx.beginPath();
       ctx.arc(ax, py, 7.5, 0, Math.PI * 2);
-      ctx.fillStyle = sideUpper === "DOWN" ? pal.downSoft : pal.upSoft;
+      ctx.fillStyle = actType === "cancel"
+        ? "rgba(245, 158, 11, 0.20)"
+        : actType === "quote"
+        ? "rgba(37, 99, 235, 0.18)"
+        : sideUpper === "DOWN" ? pal.downSoft : pal.upSoft;
       ctx.fill();
 
       ctx.beginPath();
@@ -3198,11 +3221,11 @@ function drawLivePriceChart(live) {
       // Callout badge beside the probability intersection
       const pxVal = Number(a.price ?? a.px ?? 0);
       const szVal = Number(a.size ?? a.shares ?? 0);
-      const actLabel = actType === "fill" ? "成交" : actType === "cancel" ? "撤单" : "挂单";
+      const actLabel = isRealFill ? "成交" : actType === "cancel" ? "撤单" : actType === "quote" ? "挂单" : "记录";
       const badgeTxt =
         pxVal > 0
-          ? `${actLabel} ${sideUpper} $${pxVal.toFixed(2)}${szVal > 0 ? " × " + szVal.toFixed(0) : ""} · ${(nearest.up_mid * 100).toFixed(1)}%`
-          : `${actLabel} ${sideUpper} · ${(nearest.up_mid * 100).toFixed(1)}%`;
+          ? `${actLabel} ${sideCn} $${pxVal.toFixed(2)}${szVal > 0 ? " × " + szVal.toFixed(0) : ""} · ${(nearest.up_mid * 100).toFixed(1)}%`
+          : `${actLabel} ${sideCn} · ${(nearest.up_mid * 100).toFixed(1)}%`;
       ctx.font = "700 11px 'JetBrains Mono', monospace";
       const bw = ctx.measureText(badgeTxt).width + 14;
       const bx = ax + 10 + bw > w - padR ? Math.max(padL + 4, ax - bw - 10) : ax + 10;
