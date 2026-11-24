@@ -4466,9 +4466,7 @@ html, body {
     align-items: center;
     justify-content: flex-start;
     gap: 8px;
-    background: color-mix(in srgb, var(--surface) 94%, transparent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
   .sidebar-brand {
@@ -5970,26 +5968,68 @@ html, body {
   color: var(--caption);
 }
 
+.outcome-ticket:not(.is-holding) .ot-pos-dock .side-settle-pnl .pnl-hint {
+  display: none;
+}
+
 @media (max-width: 780px) {
   .outcome-tickets-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
   .panel.outcome-ticket {
-    padding: 13px 14px 12px;
-    gap: 11px;
+    padding: 12px 12px 10px;
+    gap: 9px;
+    border-radius: 12px;
+  }
+  .ot-name {
+    display: none;
   }
   .ot-prob-val {
-    font-size: 22px;
+    font-size: 20px;
   }
   .ot-book-row {
-    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 8px;
+  }
+  .ot-quote.right {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    text-align: left;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-soft);
   }
   .ot-q-v {
-    font-size: 14.5px;
+    font-size: 14px;
+  }
+  .ot-q-s {
+    font-size: 10px;
+  }
+  .ot-q-meta {
+    font-size: 10px;
   }
   .ot-pos-dock {
-    padding: 8px 10px;
-    flex-wrap: wrap;
+    padding: 7px 9px;
+    min-height: 34px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+  }
+  .ot-pos-empty-hint {
+    font-size: 11px;
+  }
+  .ot-pos-filled {
+    gap: 4px;
+  }
+  .ot-pos-sh {
+    font-size: 12.5px;
+  }
+  .ot-pos-detail {
+    font-size: 10px;
+  }
+  .ot-pos-dock .side-settle-pnl {
+    font-size: 11px;
   }
 }
