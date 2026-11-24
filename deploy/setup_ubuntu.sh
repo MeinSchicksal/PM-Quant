@@ -50,8 +50,9 @@ PM_WEB_USER=admin
 PM_WEB_PASS=CHANGE_ME_TO_A_STRONG_PASSWORD
 PM_PROXY=
 PM_TZ_OFFSET_HOURS=8
-# Spot WS provider: binance (default) / kraken / coinbase / okx / auto (lowest RTT)
-PM_SPOT_WS_PROVIDER=auto
+# Spot WS provider: 强烈默认使用全球 BTC 定价中心 binance（避免 auto 切到 Kraken 等小所导致价格发现慢 1-5s 引发 Maker 逆向选择）
+# 可选备选: coinbase / okx / kraken / auto（仅在 Binance 不可达或做对照实验时手动切换）
+PM_SPOT_WS_PROVIDER=binance
 
 # Optional external phone/IM alerting (leave blank to disable):
 # Telegram Bot:

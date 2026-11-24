@@ -126,7 +126,7 @@ PARAMS = {
     "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
     "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
-    # 现货 WebSocket 数据源: binance (默认) / kraken / coinbase / okx / auto (启动时自动测速择优)
+    # 现货 WebSocket 数据源: 生产强烈默认 binance (全球 BTC 定价中心)；备选 coinbase / okx / kraken / auto（慎用小所）
     "SPOT_WS_PROVIDER": os.environ.get("PM_SPOT_WS_PROVIDER", "binance").strip().lower() or "binance",
     "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated empirical 5-min BTC std floor (~14 bps); prevents Phi(d) saturation
 

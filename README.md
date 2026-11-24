@@ -82,8 +82,8 @@ python main.py cleanup --dry-run
 python main.py replay --latencies=0.05,0.20,0.50
 python main.py stress
 
-# 在海外/伦敦服务器上自动选择最低延迟现货源（如 Kraken/Coinbase 替代 310ms 东京 Binance）
-PM_SPOT_WS_PROVIDER=auto python main.py run
+# 默认强烈推荐使用全球定价中心 Binance 现货；仅在对照实验或 Binance 不可达时手动切换备选源
+PM_SPOT_WS_PROVIDER=binance python main.py run
 ```
 
 ## 5. Linux 服务器生产部署

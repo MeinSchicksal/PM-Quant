@@ -775,7 +775,7 @@
             </div>
             <div class="guide-item">
               <span class="guide-metric">信号-交易所差</span>
-              <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示信号领先或同步；<strong>黄色（&gt; +100ms）</strong>说明现货比盘口慢太多易接飞刀，建议跑 <code>python main.py probe</code> 并设 <code>PM_SPOT_WS_PROVIDER=auto</code> 切换低延迟现货源。</div>
+              <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示链路延迟同步；<strong>黄色（&gt; +100ms）</strong>说明现货链路往返偏慢。注意：<strong>生产环境强烈默认使用 <code>binance</code></strong>（全球 BTC 定价中心），切到 Kraken 等二线小所虽 ping 低但价格发现往往慢 1~5 秒，反而极易引发 Maker 逆向选择。</div>
             </div>
             <div class="guide-item">
               <span class="guide-metric">Brier (模型 / 盘口)</span>
