@@ -1091,6 +1091,8 @@ class QuantHandler(BaseHTTPRequestHandler):
                 brier_count = 0
                 tz = _display_tz()
                 daily_map = {}
+                first_start_ts = 0.0
+                last_end_ts = 0.0
                 exec_breakdown = {
                     "maker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
                     "taker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
@@ -1114,6 +1116,12 @@ class QuantHandler(BaseHTTPRequestHandler):
                                     continue
 
                                 total_rounds += 1
+                                st_ts = _num(w.get("start"))
+                                en_ts = _num(w.get("end")) or (st_ts + 300.0 if st_ts > 0 else 0.0)
+                                if st_ts > 0 and (first_start_ts <= 0 or st_ts < first_start_ts):
+                                    first_start_ts = st_ts
+                                if en_ts > last_end_ts:
+                                    last_end_ts = en_ts
                                 recent_buf.append(w)
                                 fills_c = int(_num(w.get("fills_count")))
                                 total_fills += fills_c
@@ -1245,8 +1253,31 @@ class QuantHandler(BaseHTTPRequestHandler):
                     for idx, s, cum_p, r_p, st_t in curve_pts
                 ]
                 base_rounds_50 = [_public_round(w, {}) for w in rev_recent[:50]]
+                # 线性回归斜率评估收益是否持续向上（包含初始起点 (0, 0) 与所有已成交累计净值点）
+                trend_slope = 0.0
+                pnl_trend = "pending"
+                if count >= 3 and equity_curve_raw:
+                    xs = [0.0] + [float(i + 1) for i in range(len(equity_curve_raw))]
+                    ys = [0.0] + [float(pt[2]) for pt in equity_curve_raw]
+                    n_pts = len(xs)
+                    mx = sum(xs) / n_pts
+                    my = sum(ys) / n_pts
+                    denom = sum((x - mx) ** 2 for x in xs)
+                    if denom > 1e-9:
+                        trend_slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
+                    if trend_slope > 0.08 and total_pnl > 0:
+                        pnl_trend = "up"
+                    elif trend_slope < -0.08 and total_pnl < 0:
+                        pnl_trend = "down"
+                    else:
+                        pnl_trend = "flat"
+
                 agg = {
                     "total_rounds": total_rounds,
+                    "first_start_ts": first_start_ts,
+                    "last_end_ts": last_end_ts,
+                    "trend_slope": round(trend_slope, 4),
+                    "pnl_trend": pnl_trend,
                     "total_pnl": total_pnl,
                     "total_won": total_won,
                     "total_lost": total_lost,
@@ -1327,6 +1358,32 @@ class QuantHandler(BaseHTTPRequestHandler):
 
             free_capital = round(max(0.0, available_capital - active_cost), 4)
 
+            exp_start_ts = float(agg.get("first_start_ts") or 0.0)
+            if exp_start_ts <= 0 and active:
+                exp_start_ts = _num(active.get("start"))
+            now_ref_ts = time.time()
+            if exp_start_ts > 0:
+                end_ref_ts = now_ref_ts if (active and active.get("slug")) else max(float(agg.get("last_end_ts") or 0.0), exp_start_ts)
+                elapsed_s = max(0.0, end_ref_ts - exp_start_ts)
+            else:
+                elapsed_s = 0.0
+            elapsed_h = elapsed_s / 3600.0
+            if exp_start_ts > 0 and count > 0:
+                eff_h = max(1.0, elapsed_h)
+                hourly_pnl = round(total_pnl / eff_h, 4)
+                hourly_projected = elapsed_h < 1.0
+                if elapsed_h >= 24.0:
+                    daily_pnl = round(total_pnl / (elapsed_h / 24.0), 4)
+                    daily_projected = False
+                else:
+                    daily_pnl = round(hourly_pnl * 24.0, 4)
+                    daily_projected = True
+            else:
+                hourly_pnl = 0.0
+                daily_pnl = 0.0
+                hourly_projected = True
+                daily_projected = True
+
             payload_obj = {
                 "batch_id": target_batch,
                 "current_batch": config.BATCH_ID,
@@ -1371,6 +1428,15 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "brier_model": agg.get("brier_model"),
                 "brier_market": agg.get("brier_market"),
                 "execution_breakdown": agg.get("execution_breakdown") or {},
+                "experiment_start_ts": exp_start_ts if exp_start_ts > 0 else None,
+                "elapsed_seconds": round(elapsed_s, 1),
+                "elapsed_hours": round(elapsed_h, 2),
+                "hourly_pnl": hourly_pnl,
+                "hourly_projected": hourly_projected,
+                "daily_pnl": daily_pnl,
+                "daily_projected": daily_projected,
+                "pnl_trend": agg.get("pnl_trend", "pending"),
+                "trend_slope": agg.get("trend_slope", 0.0),
             }
             raw_bytes = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
             gz_bytes = gzip.compress(raw_bytes, compresslevel=5) if len(raw_bytes) > 1024 else None

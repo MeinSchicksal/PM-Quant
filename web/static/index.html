@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.55">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.56">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -221,7 +221,7 @@
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益">
           <div class="card-head">
             <h2>累计已结算净收益</h2>
-            <span class="today-pnl-pill" id="hero-today-pill" title="按北京时间 (UTC+8) 统计今日已结算收益">今日 --</span>
+            <span class="trend-pill trend-pending" id="hero-trend-pill" title="基于已成交净值曲线线性回归斜率，判断整体收益是否稳步向上">待采样</span>
           </div>
 
           <div class="pnl-primary-block">
@@ -275,6 +275,28 @@
           <div class="equity-canvas-wrap">
             <canvas id="equity-curve-canvas" height="220"></canvas>
             <div class="chart-tooltip" id="equity-tooltip" hidden></div>
+          </div>
+          <div class="curve-pace-strip" id="curve-pace-strip" aria-label="实验运行时长与收益速率">
+            <div class="pace-cell">
+              <span class="pace-label">实验已运行</span>
+              <strong class="pace-val" id="pace-elapsed">--</strong>
+              <small class="pace-sub" id="pace-start-at">始于 --</small>
+            </div>
+            <div class="pace-cell">
+              <span class="pace-label">今日已结算</span>
+              <strong class="pace-val" id="pace-today-pnl">$0.00</strong>
+              <small class="pace-sub" id="pace-today-wl">0胜 0负</small>
+            </div>
+            <div class="pace-cell">
+              <span class="pace-label">每小时均收</span>
+              <strong class="pace-val" id="pace-hourly-pnl">$0.00</strong>
+              <small class="pace-sub" id="pace-hourly-note">等待成交</small>
+            </div>
+            <div class="pace-cell">
+              <span class="pace-label">每天平均收益</span>
+              <strong class="pace-val" id="pace-daily-pnl">$0.00</strong>
+              <small class="pace-sub" id="pace-daily-note">等待成交</small>
+            </div>
           </div>
         </section>
       </div>
@@ -976,6 +998,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.55"></script>
+  <script src="/static/app.js?v=3.2.56"></script>
 </body>
 </html>

@@ -809,13 +809,78 @@ function updateOverview(live, hist) {
     pnlEl.className = `hero-num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}`;
   }
 
-  const todayPill = $("hero-today-pill");
-  if (todayPill) {
-    const tdPnl = Number(hist.today_pnl || 0);
-    const tdW = Number(hist.today_wins || 0);
-    const tdL = Number(hist.today_losses || 0);
-    todayPill.textContent = `今日 ${fmtUsd(tdPnl, true)} · ${tdW}胜${tdL}负`;
-    todayPill.className = `today-pnl-pill ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
+  // 收益趋势徽章（左上 Hero 卡右上角）
+  const trendPill = $("hero-trend-pill");
+  if (trendPill) {
+    const tr = String(hist.pnl_trend || "pending");
+    const slope = Number(hist.trend_slope || 0);
+    const map = {
+      up: ["↗ 收益上行", "trend-up"],
+      down: ["↘ 收益下行", "trend-down"],
+      flat: ["→ 震荡横盘", "trend-flat"],
+      pending: ["待采样", "trend-pending"],
+    };
+    const [lbl, cls] = map[tr] || map.pending;
+    trendPill.textContent = lbl;
+    trendPill.className = `trend-pill ${cls}`;
+    trendPill.title = tr === "pending"
+      ? "成交满 3 场后基于累计净值曲线线性斜率自动研判收益方向"
+      : `线性回归斜率 ${slope >= 0 ? "+" : ""}$${slope.toFixed(3)} / 场`;
+  }
+
+  // 实验运行时长、开始时间、今日战绩与时均/日均收益速率条（净值曲线底部）
+  const expStartTs = Number(hist.experiment_start_ts || (live && live.start) || 0);
+  const elapsedSec = Number(hist.elapsed_seconds || 0);
+  const fmtDuration = (sec) => {
+    const s = Math.max(0, Math.floor(sec));
+    const days = Math.floor(s / 86400);
+    const hrs = Math.floor((s % 86400) / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    if (days > 0) return `${days}天${hrs}时`;
+    if (hrs > 0) return `${hrs}时${String(mins).padStart(2, "0")}分`;
+    return `${Math.max(1, mins)}分钟`;
+  };
+  const fmtStartBjt = (ts) => {
+    if (!ts) return "始于 --";
+    const d = new Date((ts + 8 * 3600) * 1000);
+    const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const da = String(d.getUTCDate()).padStart(2, "0");
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    return `始于 ${mo}/${da} ${hh}:${mm}`;
+  };
+  if ($("pace-elapsed")) {
+    $("pace-elapsed").textContent = expStartTs > 0 ? fmtDuration(elapsedSec) : "--";
+  }
+  if ($("pace-start-at")) {
+    $("pace-start-at").textContent = fmtStartBjt(expStartTs);
+  }
+  const tdPnl = Number(hist.today_pnl || 0);
+  const tdW = Number(hist.today_wins || 0);
+  const tdL = Number(hist.today_losses || 0);
+  if ($("pace-today-pnl")) {
+    $("pace-today-pnl").textContent = fmtUsd(tdPnl, true);
+    $("pace-today-pnl").className = `pace-val ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
+  }
+  if ($("pace-today-wl")) {
+    $("pace-today-wl").textContent = `${tdW}胜 ${tdL}负`;
+  }
+  const hrPnl = Number(hist.hourly_pnl || 0);
+  const dayPnl = Number(hist.daily_pnl || 0);
+  const hasTrades = Number(hist.traded_rounds || hist.count || 0) > 0;
+  if ($("pace-hourly-pnl")) {
+    $("pace-hourly-pnl").textContent = hasTrades ? `${fmtUsd(hrPnl, true)}` : "$0.00";
+    $("pace-hourly-pnl").className = `pace-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
+  }
+  if ($("pace-hourly-note")) {
+    $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hist.hourly_projected ? "未满1时保守折算" : "实测每小时均收");
+  }
+  if ($("pace-daily-pnl")) {
+    $("pace-daily-pnl").textContent = hasTrades ? `${fmtUsd(dayPnl, true)}` : "$0.00";
+    $("pace-daily-pnl").className = `pace-val ${hasTrades ? (dayPnl > 1e-6 ? "up" : dayPnl < -1e-6 ? "down" : "") : ""}`;
+  }
+  if ($("pace-daily-note")) {
+    $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (hist.daily_projected ? "按24小时折算" : "实测日均收益");
   }
 
   const settledBadge = $("hero-settled-count");
