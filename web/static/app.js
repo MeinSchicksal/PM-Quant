@@ -2618,15 +2618,23 @@ function drawLivePriceChart(live) {
       ctx.restore();
     }
 
-    // TradingView-style Baseline Dual-Color Area Fill & Split Stroke (Green above Strike, Red below Strike)
+    // Smooth Quadratic Bezier Baseline Chart (eliminates jagged stair-steps)
     const tracePricePath = () => {
       ctx.beginPath();
-      pts.forEach((p, idx) => {
-        const x = xOfSec(p.elapsed);
-        const y = yOfPrice(p.poly_spot);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
+      if (pts.length === 1) {
+        ctx.moveTo(xOfSec(pts[0].elapsed), yOfPrice(pts[0].poly_spot));
+        return;
+      }
+      ctx.moveTo(xOfSec(pts[0].elapsed), yOfPrice(pts[0].poly_spot));
+      for (let i = 1; i < pts.length - 1; i++) {
+        const x1 = xOfSec(pts[i].elapsed);
+        const y1 = yOfPrice(pts[i].poly_spot);
+        const x2 = xOfSec(pts[i + 1].elapsed);
+        const y2 = yOfPrice(pts[i + 1].poly_spot);
+        ctx.quadraticCurveTo(x1, y1, (x1 + x2) * 0.5, (y1 + y2) * 0.5);
+      }
+      const lastP = pts[pts.length - 1];
+      ctx.lineTo(xOfSec(lastP.elapsed), yOfPrice(lastP.poly_spot));
     };
     const firstX = xOfSec(pts[0].elapsed);
     const lastPtPx = pts[pts.length - 1];
@@ -2639,8 +2647,8 @@ function drawLivePriceChart(live) {
     ctx.rect(padL, priceTop, plotW, Math.max(0, openY - priceTop));
     ctx.clip();
     const upGrad = ctx.createLinearGradient(0, priceTop, 0, openY);
-    upGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.28)" : "rgba(5, 150, 105, 0.20)");
-    upGrad.addColorStop(1, "rgba(16, 185, 129, 0.02)");
+    upGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.14)");
+    upGrad.addColorStop(1, "rgba(16, 185, 129, 0.00)");
     tracePricePath();
     ctx.lineTo(lastX, openY);
     ctx.lineTo(firstX, openY);
@@ -2649,7 +2657,7 @@ function drawLivePriceChart(live) {
     ctx.fill();
     tracePricePath();
     ctx.strokeStyle = pal.up;
-    ctx.lineWidth = 2.3;
+    ctx.lineWidth = 2.0;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.stroke();
@@ -2661,8 +2669,8 @@ function drawLivePriceChart(live) {
     ctx.rect(padL, openY, plotW, Math.max(0, priceTop + priceH - openY));
     ctx.clip();
     const dnGrad = ctx.createLinearGradient(0, openY, 0, priceTop + priceH);
-    dnGrad.addColorStop(0, "rgba(244, 63, 94, 0.02)");
-    dnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.28)" : "rgba(225, 29, 72, 0.20)");
+    dnGrad.addColorStop(0, "rgba(244, 63, 94, 0.00)");
+    dnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.14)");
     tracePricePath();
     ctx.lineTo(lastX, openY);
     ctx.lineTo(firstX, openY);
@@ -2671,48 +2679,65 @@ function drawLivePriceChart(live) {
     ctx.fill();
     tracePricePath();
     ctx.strokeStyle = pal.down;
-    ctx.lineWidth = 2.3;
+    ctx.lineWidth = 2.0;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.stroke();
     ctx.restore();
 
-    // Glowing terminal dot + live dollar-delta pill right next to the tip
+    // TradingView-style subtle horizontal guide to right axis + clean axis tag (no bulky pill on curve tip)
     const curDiff = openPx > 0 ? (lastPtPx.poly_spot - openPx) : 0;
     const isUpNow = curDiff >= 0;
     const tipColor = isUpNow ? pal.up : pal.down;
     ctx.save();
+    ctx.strokeStyle = isUpNow
+      ? (pal.isDark ? "rgba(16, 185, 129, 0.35)" : "rgba(5, 150, 105, 0.28)")
+      : (pal.isDark ? "rgba(244, 63, 94, 0.35)" : "rgba(225, 29, 72, 0.28)");
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
     ctx.beginPath();
-    ctx.arc(lastX, lastY, 7.5, 0, Math.PI * 2);
-    ctx.fillStyle = isUpNow
-      ? (pal.isDark ? "rgba(16, 185, 129, 0.26)" : "rgba(5, 150, 105, 0.18)")
-      : (pal.isDark ? "rgba(244, 63, 94, 0.26)" : "rgba(225, 29, 72, 0.18)");
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 3.8, 0, Math.PI * 2);
-    ctx.fillStyle = tipColor;
-    ctx.fill();
-    ctx.strokeStyle = pal.cardBg;
-    ctx.lineWidth = 1.6;
+    ctx.moveTo(lastX + 4, lastY);
+    ctx.lineTo(w - padR, lastY);
     ctx.stroke();
+    ctx.setLineDash([]);
 
-    const tipSign = curDiff > 0.005 ? "+" : curDiff < -0.005 ? "-" : "";
-    const tipTxt = `${tipSign}$${Math.abs(curDiff).toFixed(2)}`;
-    ctx.font = isMobile ? "700 10px 'JetBrains Mono', monospace" : "700 11px 'JetBrains Mono', monospace";
-    const tw = ctx.measureText(tipTxt).width;
-    const bw = tw + (isMobile ? 10 : 12);
-    const bh = isMobile ? 18 : 20;
-    const placeLeft = lastX + 10 + bw > w - padR;
-    const bx = placeLeft ? Math.max(padL + 4, lastX - 10 - bw) : lastX + 10;
-    const by = Math.max(priceTop + 2, Math.min(priceTop + priceH - bh - 2, lastY - bh / 2));
-    ctx.fillStyle = tipColor;
+    // Crisp minimalist terminal dot
     ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, 5);
+    ctx.arc(lastX, lastY, 5.5, 0, Math.PI * 2);
+    ctx.fillStyle = isUpNow
+      ? (pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.16)")
+      : (pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.16)");
     ctx.fill();
-    ctx.fillStyle = "#ffffff";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(tipTxt, bx + bw / 2, by + bh / 2 + 0.5);
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 2.8, 0, Math.PI * 2);
+    ctx.fillStyle = tipColor;
+    ctx.fill();
+
+    // Right-axis price tag on desktop; clean unobtrusive inline text on mobile
+    const tipSign = curDiff > 0.005 ? "+" : curDiff < -0.005 ? "-" : "";
+    const tipTxt = `${tipSign}$${Math.abs(curDiff).toFixed(1)}`;
+    ctx.font = isMobile ? "700 10px 'JetBrains Mono', monospace" : "700 10.5px 'JetBrains Mono', monospace";
+    if (!isMobile) {
+      const tw = ctx.measureText(tipTxt).width;
+      const bw = Math.min(padR - 4, tw + 10);
+      const bh = 18;
+      const bx = w - padR + 3;
+      const by = Math.max(priceTop, Math.min(priceTop + priceH - bh, lastY - bh / 2));
+      ctx.fillStyle = tipColor;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 4);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(tipTxt, bx + bw / 2, by + bh / 2 + 0.5);
+    } else {
+      ctx.fillStyle = tipColor;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      const lblX = Math.min(w - padR - 44, lastX + 8);
+      ctx.fillText(tipTxt, lblX, lastY);
+    }
     ctx.restore();
 
     // Subtle pane label
@@ -2774,14 +2799,23 @@ function drawLivePriceChart(live) {
     const probPts = pts.filter((p) => p.up_mid !== null);
     if (probPts.length > 0) {
       const midY = yOfProb(0.5);
+      // Smooth quadratic curve for probability pane as well
       const traceProbPath = () => {
         ctx.beginPath();
-        probPts.forEach((p, idx) => {
-          const x = xOfSec(p.elapsed);
-          const y = yOfProb(p.up_mid);
-          if (idx === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
+        if (probPts.length === 1) {
+          ctx.moveTo(xOfSec(probPts[0].elapsed), yOfProb(probPts[0].up_mid));
+          return;
+        }
+        ctx.moveTo(xOfSec(probPts[0].elapsed), yOfProb(probPts[0].up_mid));
+        for (let i = 1; i < probPts.length - 1; i++) {
+          const x1 = xOfSec(probPts[i].elapsed);
+          const y1 = yOfProb(probPts[i].up_mid);
+          const x2 = xOfSec(probPts[i + 1].elapsed);
+          const y2 = yOfProb(probPts[i + 1].up_mid);
+          ctx.quadraticCurveTo(x1, y1, (x1 + x2) * 0.5, (y1 + y2) * 0.5);
+        }
+        const lp = probPts[probPts.length - 1];
+        ctx.lineTo(xOfSec(lp.elapsed), yOfProb(lp.up_mid));
       };
       const pFirstX = xOfSec(probPts[0].elapsed);
       const lastP = probPts[probPts.length - 1];
@@ -2830,24 +2864,50 @@ function drawLivePriceChart(live) {
       ctx.stroke();
       ctx.restore();
 
-      // Endpoint dot + clean text value colored by >=50% vs <50%
+      // Endpoint dot + horizontal guide to right axis (consistent with upper pane)
       const probColor = lastP.up_mid >= 0.5 ? pal.up : pal.down;
+      ctx.save();
+      ctx.strokeStyle = lastP.up_mid >= 0.5
+        ? (pal.isDark ? "rgba(16, 185, 129, 0.30)" : "rgba(5, 150, 105, 0.24)")
+        : (pal.isDark ? "rgba(244, 63, 94, 0.30)" : "rgba(225, 29, 72, 0.24)");
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
       ctx.beginPath();
-      ctx.arc(lx, ly, 3.6, 0, Math.PI * 2);
+      ctx.moveTo(lx + 4, ly);
+      ctx.lineTo(w - padR, ly);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(lx, ly, 2.8, 0, Math.PI * 2);
       ctx.fillStyle = probColor;
       ctx.fill();
-      ctx.strokeStyle = pal.cardBg;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
 
       const tagText = `${(lastP.up_mid * 100).toFixed(1)}%`;
-      ctx.font = isMobile ? "700 10.5px 'JetBrains Mono', monospace" : "700 11.5px 'JetBrains Mono', monospace";
-      ctx.fillStyle = probColor;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      const labelX = Math.min(w - padR - 42, lx + 8);
-      const labelY = Math.max(probTop + 8, Math.min(probTop + probH - 8, ly));
-      ctx.fillText(tagText, labelX, labelY);
+      ctx.font = isMobile ? "700 10px 'JetBrains Mono', monospace" : "700 10.5px 'JetBrains Mono', monospace";
+      if (!isMobile) {
+        const tw = ctx.measureText(tagText).width;
+        const bw = Math.min(padR - 4, tw + 10);
+        const bh = 18;
+        const bx = w - padR + 3;
+        const by = Math.max(probTop, Math.min(probTop + probH - bh, ly - bh / 2));
+        ctx.fillStyle = probColor;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, 4);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(tagText, bx + bw / 2, by + bh / 2 + 0.5);
+      } else {
+        ctx.fillStyle = probColor;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        const labelX = Math.min(w - padR - 40, lx + 7);
+        const labelY = Math.max(probTop + 8, Math.min(probTop + probH - 8, ly));
+        ctx.fillText(tagText, labelX, labelY);
+      }
+      ctx.restore();
     }
   }
 
@@ -4429,6 +4489,8 @@ function renderDecisionBulletin(live) {
   };
 
   const latest = timeline[timeline.length - 1];
+  const freshEl = $("console-fresh-time");
+  const edgeMeterEl = $("console-edge-meter");
   if (latest) {
     let [lTag, lCls] = tagMap[latest.action] || ["正在观望", "is-wait"];
     const hasPosNow = Number(live?.pos_up?.shares || 0) > 1e-6 || Number(live?.pos_down?.shares || 0) > 1e-6;
@@ -4438,8 +4500,49 @@ function renderDecisionBulletin(live) {
     }
     if (statusBadgeEl) statusBadgeEl.textContent = lTag;
     if (stateDotEl) stateDotEl.className = `console-state-dot ${lCls}`;
+
+    // Real-time freshness indicator so user always knows this is the LIVE judgment
+    const nowRef = Number(live?.now || live?.server_time || (Date.now() / 1000));
+    const hbSec = Math.max(0, Math.round((Date.now() / 1000) - nowRef));
+    const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
+    if (freshEl) {
+      freshEl.textContent = hbSec <= 5 ? `实时判断 · ${timeClock}` : `${hbSec}秒前更新 · ${timeClock}`;
+      freshEl.className = `console-fresh-time ${hbSec <= 5 ? "is-live" : ""}`;
+    }
+
+    // Always prefer live.decision_reason (the very latest tick) over stale audit log entry
+    const curRawReason = String(live?.decision_reason || latest.reason || "");
     if (previewEl) {
-      previewEl.textContent = translateDecisionReason(latest.reason);
+      previewEl.textContent = translateDecisionReason(curRawReason);
+    }
+
+    // Structured Fair-Value vs Market-Ask comparison pill (actionable insight)
+    if (edgeMeterEl) {
+      const pm = curRawReason.match(/P\*\(?Up\)?=([\d.]+)/i);
+      const um = curRawReason.match(/Up=([\d.-]+)\/([\d.-]+)/i);
+      const dm = curRawReason.match(/Dn=([\d.-]+)\/([\d.-]+)/i);
+      if (pm && (um || dm)) {
+        const pUp = parseFloat(pm[1]);
+        const favorUp = pUp >= 0.5;
+        const fairCents = Math.round((favorUp ? pUp : 1 - pUp) * 100);
+        const askStr = favorUp ? (um ? um[2] : "") : (dm ? dm[2] : "");
+        const askNum = parseFloat(askStr);
+        if (Number.isFinite(fairCents) && Number.isFinite(askNum) && askNum > 0) {
+          const askCents = Math.round(askNum * 100);
+          const diffCents = fairCents - askCents;
+          const gapText = diffCents > 0 ? `便宜 ${diffCents}¢` : diffCents < 0 ? `偏贵 ${Math.abs(diffCents)}¢` : "平价";
+          const gapCls = diffCents >= 4 ? "up" : diffCents < 0 ? "down" : "flat";
+          edgeMeterEl.hidden = false;
+          setHtmlIfChanged(
+            edgeMeterEl,
+            `<span class="em-item">模型估价 <b>${fairCents}¢</b></span><span class="em-sep">vs</span><span class="em-item">市场卖价 <b>${askCents}¢</b></span><span class="em-gap ${gapCls}">${gapText}</span>`
+          );
+        } else {
+          edgeMeterEl.hidden = true;
+        }
+      } else {
+        edgeMeterEl.hidden = true;
+      }
     }
   }
 

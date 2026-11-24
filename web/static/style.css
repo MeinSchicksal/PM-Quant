@@ -6634,6 +6634,63 @@ html, body {
   }
 }
 
+/* Live Freshness Timestamp & Fair-vs-Market Actionable Comparison Row */
+.console-freshness-row {
+  display: flex;
+  align-items: center;
+  margin-top: -3px;
+}
+
+.console-fresh-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.console-fresh-time.is-live {
+  color: var(--up);
+  font-weight: 600;
+}
+
+.console-edge-meter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  color: var(--label);
+}
+
+.em-item b {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.em-sep {
+  color: var(--caption);
+  font-size: 10.5px;
+}
+
+.em-gap {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.em-gap.up { color: var(--up); background: var(--up-soft); }
+.em-gap.down { color: var(--down); background: var(--down-soft); }
+.em-gap.flat { color: var(--caption); background: var(--surface-muted); }
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.74">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.75">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -579,7 +579,7 @@
         <div class="cockpit-feed-col">
           <!-- Modern Linear-Style Live Strategy Console -->
           <section class="panel section-panel orders-workspace console-panel">
-            <!-- 1. Hero Live Status Header (Zero Nested Boxes) -->
+            <!-- 1. Hero Live Status Header (With Live Freshness & Fair-vs-Market Comparison) -->
             <div class="console-hero-head">
               <div class="console-hero-top">
                 <div class="console-state-row">
@@ -592,7 +592,11 @@
                 </button>
                 <span class="badge-pill" id="live-action-count" hidden>0 笔</span>
               </div>
+              <div class="console-freshness-row">
+                <span class="console-fresh-time" id="console-fresh-time">实时同步中...</span>
+              </div>
               <p class="console-hero-reason" id="bulletin-latest-preview">正在观察实时行情，等待划算的买入价格...</p>
+              <div class="console-edge-meter" id="console-edge-meter" hidden></div>
             </div>
 
             <!-- 2. Active Working Orders Queue Tracker (auto-shows when queuing) -->
@@ -980,6 +984,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.74"></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.75"></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>
