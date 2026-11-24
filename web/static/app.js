@@ -809,23 +809,47 @@ function updateOverview(live, hist) {
     pnlEl.className = `hero-num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}`;
   }
 
-  // 收益趋势徽章（左上 Hero 卡右上角）
+  // 收益趋势徽章（左上 Hero 卡右上角：无成交时隐藏，有成交即基于净值曲线实时给出清晰方向）
   const trendPill = $("hero-trend-pill");
   if (trendPill) {
-    const tr = String(hist.pnl_trend || "pending");
-    const slope = Number(hist.trend_slope || 0);
-    const map = {
-      up: ["↗ 收益上行", "trend-up"],
-      down: ["↘ 收益下行", "trend-down"],
-      flat: ["→ 震荡横盘", "trend-flat"],
-      pending: ["待采样", "trend-pending"],
-    };
-    const [lbl, cls] = map[tr] || map.pending;
-    trendPill.textContent = lbl;
-    trendPill.className = `trend-pill ${cls}`;
-    trendPill.title = tr === "pending"
-      ? "成交满 3 场后基于累计净值曲线线性斜率自动研判收益方向"
-      : `线性回归斜率 ${slope >= 0 ? "+" : ""}$${slope.toFixed(3)} / 场`;
+    const rawCurveArr = Array.isArray(hist.equity_curve) ? hist.equity_curve : [];
+    const nTraded = Number(hist.traded_rounds || hist.count || rawCurveArr.length || 0);
+    if (nTraded <= 0) {
+      trendPill.hidden = true;
+    } else {
+      let tr = hist.pnl_trend && hist.pnl_trend !== "pending" ? String(hist.pnl_trend) : "";
+      let slope = Number(hist.trend_slope || 0);
+      if (!tr) {
+        if (rawCurveArr.length >= 2) {
+          const ys = [0, ...rawCurveArr.map((p) => Number(p.cum_pnl ?? p.pnl ?? 0))];
+          const n = ys.length;
+          const mx = (n - 1) / 2;
+          const my = ys.reduce((a, b) => a + b, 0) / n;
+          let num = 0, den = 0;
+          for (let i = 0; i < n; i++) {
+            const dx = i - mx;
+            num += dx * (ys[i] - my);
+            den += dx * dx;
+          }
+          slope = den > 1e-9 ? num / den : 0;
+        } else {
+          slope = totalPnl;
+        }
+        if (slope > 0.05 && totalPnl > 0) tr = "up";
+        else if (slope < -0.05 && totalPnl < 0) tr = "down";
+        else tr = "flat";
+      }
+      const map = {
+        up: ["↗ 收益上行", "trend-up"],
+        down: ["↘ 收益下行", "trend-down"],
+        flat: ["→ 震荡横盘", "trend-flat"],
+      };
+      const [lbl, cls] = map[tr] || map.flat;
+      trendPill.hidden = false;
+      trendPill.textContent = lbl;
+      trendPill.className = `trend-pill ${cls}`;
+      trendPill.title = `线性趋势斜率 ${slope >= 0 ? "+" : ""}$${slope.toFixed(3)} / 场`;
+    }
   }
 
   // 实验运行时长、开始时间、今日战绩与时均/日均收益速率条（净值曲线底部）
@@ -1127,8 +1151,6 @@ function updateOverview(live, hist) {
 // ============================================================================
 // INTERACTIVE CUMULATIVE EQUITY CURVE CANVAS
 // ============================================================================
-let equityAxisMode = "trade"; // "trade" | "time"
-
 function drawEquityCurve(hist) {
   const canvas = $("equity-curve-canvas");
   if (!canvas) return;
@@ -1147,8 +1169,7 @@ function drawEquityCurve(hist) {
   const rawCurve = Array.isArray(hist?.equity_curve) ? hist.equity_curve : [];
 
   // Backend equity_curve has { idx, slug, pnl (cumulative!), round_pnl, start }
-  const firstStartTs = Number(hist?.experiment_start_ts || 0) || Number(rawCurve[0]?.start || 0);
-  const pts = [{ idx: 0, cum_pnl: 0, round_pnl: 0, slug: "", ts: firstStartTs }];
+  const pts = [{ idx: 0, cum_pnl: 0, round_pnl: 0, slug: "", ts: 0 }];
   let prevCum = 0;
   rawCurve.forEach((p, idx) => {
     const cum = Number(p.cum_pnl ?? p.pnl ?? 0);
@@ -1199,17 +1220,7 @@ function drawEquityCurve(hist) {
     minV -= span * 0.10;
   }
 
-  const validTs = pts.every((p) => p.ts > 0);
-  const tMin = validTs ? Math.min(...pts.map((p) => p.ts)) : 0;
-  const tMax = validTs ? Math.max(...pts.map((p) => p.ts)) : 0;
-  const useTimeAxis = equityAxisMode === "time" && validTs && (tMax - tMin) > 60;
-
-  const xOf = (i) => {
-    if (useTimeAxis) {
-      return padL + ((pts[i].ts - tMin) / (tMax - tMin)) * plotW;
-    }
-    return padL + (i / (pts.length - 1)) * plotW;
-  };
+  const xOf = (i) => padL + (i / (pts.length - 1)) * plotW;
   const yOf = (v) => padT + ((maxV - v) / (maxV - minV)) * plotH;
 
   const coords = pts.map((p, i) => ({
@@ -1383,36 +1394,19 @@ function drawEquityCurve(hist) {
   }
 
   // X-axis labels
-  const fmtAxisHm = (ts) => {
-    const d = new Date((ts + 8 * 3600) * 1000);
-    return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
-  };
   ctx.fillStyle = pal.axis;
   ctx.font = "500 10px 'JetBrains Mono', monospace";
   ctx.textBaseline = "top";
   ctx.textAlign = "left";
-  ctx.fillText(useTimeAxis ? fmtAxisHm(tMin) : "起点 #0", padL, padT + plotH + 7);
+  ctx.fillText("起点 #0", padL, padT + plotH + 7);
   ctx.textAlign = "right";
-  ctx.fillText(useTimeAxis ? fmtAxisHm(tMax) : `最新 #${pts[pts.length - 1].idx}`, w - padR, padT + plotH + 7);
+  ctx.fillText(`最新 #${pts[pts.length - 1].idx}`, w - padR, padT + plotH + 7);
 }
 
 function initEquityCurveInteractions() {
   const canvas = $("equity-curve-canvas");
   const tooltip = $("equity-tooltip");
   if (!canvas || !tooltip) return;
-
-  // Axis mode switcher (By Trade vs By Time)
-  document.querySelectorAll(".curve-mode-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = btn.getAttribute("data-curve-axis");
-      if (!mode || mode === equityAxisMode) return;
-      equityAxisMode = mode;
-      document.querySelectorAll(".curve-mode-btn").forEach((b) => {
-        b.classList.toggle("active", b.getAttribute("data-curve-axis") === mode);
-      });
-      if (cachedHistory) drawEquityCurve(cachedHistory);
-    });
-  });
 
   // Clickable Execution Attribution rows -> jump to History Ledger with smart filter
   document.querySelectorAll("[data-jump-exec]").forEach((row) => {

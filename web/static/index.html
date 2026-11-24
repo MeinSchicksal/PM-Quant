@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.60">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.61">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -221,7 +221,7 @@
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益与收益速率">
           <div class="card-head">
             <h2>累计净收益</h2>
-            <span class="trend-pill trend-pending" id="hero-trend-pill" title="基于已成交净值曲线线性回归斜率，判断整体收益是否稳步向上">待采样</span>
+            <span class="trend-pill trend-pending" id="hero-trend-pill" hidden></span>
           </div>
 
           <div class="pnl-primary-block">
@@ -297,10 +297,6 @@
               <span class="card-head-hint">悬停查看单轮 · 点击直达复盘 · 虚线为线性趋势</span>
             </div>
             <div class="curve-head-right">
-              <div class="curve-mode-switch" role="group" aria-label="曲线横轴视角">
-                <button type="button" class="curve-mode-btn active" data-curve-axis="trade">按场次</button>
-                <button type="button" class="curve-mode-btn" data-curve-axis="time">按时间</button>
-              </div>
               <div class="curve-extrema-text">
                 <span>峰值 <strong class="up" id="equity-peak-badge">+$0.00</strong></span>
                 <span class="exp-sep">·</span>
@@ -1026,6 +1022,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.59"></script>
+  <script src="/static/app.js?v=3.2.61"></script>
 </body>
 </html>
