@@ -800,6 +800,12 @@ function translateDecisionReason(rawReason) {
   if (/Anti-toxicity|Toxic|shock|剧震/i.test(s)) {
     return "BTC 刚刚突发剧烈波动，为防误判已暂停下单并撤回挂单";
   }
+  if (/Post-Only|到达对盘/i.test(s)) {
+    return "盘口价格瞬间移动，为防吃亏已自动撤单";
+  }
+  if (/方向反转|反转撤单/i.test(s)) {
+    return "行情方向发生反转，已主动撤回未成交挂单";
+  }
   if (/卖墙|ask wall|wall/i.test(s)) {
     return "盘口上方出现大额压单，为避免接盘已暂停挂单";
   }
@@ -2280,6 +2286,41 @@ function syncChartPinButton() {
   }
 }
 
+let _lastHudSlug = "";
+let _lastHudActionCount = -1;
+let _chartHudTimer = null;
+
+function triggerChartLiveHud(item) {
+  const hud = $("chart-live-hud");
+  if (!hud || !item) return;
+  const specTxt = item.specStr && item.specStr !== "--" ? ` ${item.specStr}` : "";
+  const titleMap = {
+    fill: "刚刚成交",
+    quote: "已挂限价单",
+    cancel: "已撤回挂单",
+  };
+  const label = titleMap[item.typeClass] || item.typeLabel;
+  hud.className = `chart-live-hud is-${item.typeClass} is-show`;
+  hud.hidden = false;
+  hud.innerHTML = `
+    <span class="hud-dot ${item.typeClass}"></span>
+    <span class="hud-label">${escapeHtml(label)}</span>
+    <span class="hud-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
+    <strong class="hud-spec">${escapeHtml(specTxt)}</strong>
+  `;
+  if (_chartHudTimer) clearTimeout(_chartHudTimer);
+  _chartHudTimer = setTimeout(() => {
+    hud.classList.remove("is-show");
+    hud.classList.add("is-hiding");
+    setTimeout(() => {
+      if (hud.classList.contains("is-hiding")) {
+        hud.hidden = true;
+        hud.classList.remove("is-hiding");
+      }
+    }, 320);
+  }, 4200);
+}
+
 function renderActionFeed(actions, startTs = 0) {
   const list = $("live-action-feed");
   const countEl = $("live-action-count");
@@ -2288,6 +2329,22 @@ function renderActionFeed(actions, startTs = 0) {
   const arr = Array.isArray(actions) ? actions : [];
   if (countEl) countEl.textContent = `${arr.length} 笔`;
   syncChartPinButton();
+
+  // Detect brand-new live action in current round and pop brief Dynamic-Island HUD on chart
+  const curSlug = cachedLive?.slug || "";
+  if (curSlug !== _lastHudSlug) {
+    _lastHudSlug = curSlug;
+    _lastHudActionCount = arr.length;
+  } else if (arr.length > _lastHudActionCount && _lastHudActionCount >= 0) {
+    for (let i = arr.length - 1; i >= _lastHudActionCount; i--) {
+      const it = formatActionItem(arr[i], startTs);
+      if (it.typeClass === "fill" || it.typeClass === "quote" || it.typeClass === "cancel") {
+        triggerChartLiveHud(it);
+        break;
+      }
+    }
+    _lastHudActionCount = arr.length;
+  }
 
   if (arr.length === 0) {
     setHtmlIfChanged(list, `
@@ -2325,12 +2382,13 @@ function renderActionFeed(actions, startTs = 0) {
     .map(({ raw, origIdx }) => {
       const item = formatActionItem(raw, startTs);
       const isSel = liveSelectedActionIdx === origIdx;
-      const isMuted = item.typeClass === "reject";
+      const isFill = item.typeClass === "fill";
+      const isSecondary = !isFill;
       const specHtml = item.specStr && item.specStr !== "--"
         ? `<span class="tl-spec">${escapeHtml(item.specStr)}</span>`
         : "";
       return `
-        <li class="action-item tl-item clickable type-${item.typeClass} ${isMuted ? "is-muted" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
+        <li class="action-item tl-item clickable type-${item.typeClass} ${isFill ? "is-fill-hero" : ""} ${isSecondary ? "is-secondary" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
           <span class="tl-rail" aria-hidden="true"><span class="tl-dot ${item.typeClass}"></span></span>
           <div class="tl-body">
             <div class="tl-head">
@@ -4372,7 +4430,12 @@ function renderDecisionBulletin(live) {
 
   const latest = timeline[timeline.length - 1];
   if (latest) {
-    const [lTag, lCls] = tagMap[latest.action] || ["正在观望", "is-wait"];
+    let [lTag, lCls] = tagMap[latest.action] || ["正在观望", "is-wait"];
+    const hasPosNow = Number(live?.pos_up?.shares || 0) > 1e-6 || Number(live?.pos_down?.shares || 0) > 1e-6;
+    if (latest.action === "wait" && hasPosNow) {
+      lTag = "持仓待结算";
+      lCls = "is-buy";
+    }
     if (statusBadgeEl) statusBadgeEl.textContent = lTag;
     if (stateDotEl) stateDotEl.className = `console-state-dot ${lCls}`;
     if (previewEl) {

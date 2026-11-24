@@ -6406,6 +6406,217 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   DYNAMIC-ISLAND CHART HUD + HIGH-CONTRAST FILL CARDS + REFINED MOTION
+   ========================================================================== */
+@keyframes liveBeaconPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.78; }
+}
+
+@keyframes fillGlowSlide {
+  from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes hudPopIn {
+  from { opacity: 0; transform: translate(-50%, -10px) scale(0.94); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+@keyframes hudFadeOut {
+  from { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -8px) scale(0.96); }
+}
+
+.console-state-dot.is-buy,
+.console-state-dot.is-quote {
+  animation: liveBeaconPulse 2.2s ease-in-out infinite;
+}
+
+/* Chart Dynamic-Island Live Action HUD (auto-fades after 4.2s, never blocks chart) */
+.chart-live-hud {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px -6px rgba(15, 23, 42, 0.16);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: calc(100% - 24px);
+}
+
+.chart-live-hud.is-fill {
+  border-color: rgba(16, 185, 129, 0.42);
+  box-shadow: 0 8px 24px -6px rgba(16, 185, 129, 0.28);
+}
+
+.chart-live-hud.is-quote {
+  border-color: rgba(37, 99, 235, 0.35);
+}
+
+.chart-live-hud.is-cancel {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.chart-live-hud.is-show {
+  animation: hudPopIn 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.chart-live-hud.is-hiding {
+  animation: hudFadeOut 0.28s ease forwards;
+}
+
+.hud-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.hud-dot.fill {
+  background: var(--up);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+}
+
+.hud-dot.quote {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22);
+}
+
+.hud-dot.cancel {
+  background: #d97706;
+}
+
+.hud-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.hud-side {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
+.hud-side.up { color: var(--up); background: var(--up-soft); }
+.hud-side.down { color: var(--down); background: var(--down-soft); }
+
+.hud-spec {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Prominent Execution Fill Hero Card vs De-emphasized Non-Fill Rows */
+#live-action-feed .action-item.tl-item.is-fill-hero {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.11) 0%, rgba(16, 185, 129, 0.03) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.34);
+  border-radius: 11px;
+  padding: 11px 11px 11px 8px;
+  margin: 2px 0 6px;
+  box-shadow: 0 4px 14px -6px rgba(16, 185, 129, 0.24);
+  animation: fillGlowSlide 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#live-action-feed .action-item.tl-item.is-fill-hero:hover {
+  border-color: rgba(16, 185, 129, 0.55);
+}
+
+#live-action-feed .action-item.tl-item.is-fill-hero .tl-dot.fill {
+  width: 9px;
+  height: 9px;
+  animation: liveBeaconPulse 2.4s ease-in-out infinite;
+}
+
+#live-action-feed .action-item.tl-item.is-fill-hero .tl-type {
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+#live-action-feed .action-item.tl-item.is-fill-hero .tl-spec {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+#live-action-feed .action-item.tl-item.is-fill-hero .tl-reason {
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+/* De-emphasized Secondary Events (Quotes / Cancels / Rejects) */
+#live-action-feed .action-item.tl-item.is-secondary {
+  opacity: 0.62;
+  padding: 5px 8px 8px 6px;
+}
+
+#live-action-feed .action-item.tl-item.is-secondary:hover,
+#live-action-feed .action-item.tl-item.is-secondary.selected {
+  opacity: 1;
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 2px;
+  box-shadow: none;
+  background: var(--border);
+  border: 1.5px solid var(--caption);
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-dot.quote {
+  border-color: var(--accent);
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-dot.cancel {
+  border-color: #d97706;
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-type {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--label);
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-spec {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--label);
+}
+
+#live-action-feed .action-item.tl-item.is-secondary .tl-reason {
+  font-size: 10.5px;
+  color: var(--caption);
+  line-height: 1.4;
+}
+
+@media (max-width: 780px) {
+  .chart-live-hud {
+    top: 8px;
+    padding: 5px 11px;
+    gap: 5px;
+  }
+  .hud-label,
+  .hud-spec {
+    font-size: 11px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;
