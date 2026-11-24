@@ -2125,12 +2125,26 @@ function updateLiveChartReadouts(live, spot, polySpot, openPx, upMid) {
   if ($("chart-stat-low")) $("chart-stat-low").textContent = fmtUsd(lo);
   if ($("chart-stat-range")) $("chart-stat-range").textContent = `${rangeBps.toFixed(1)} bps`;
 
+  const deltaPill = $("chart-delta-pill");
+  if (deltaPill) {
+    const diffUsd = openPx > 0 ? (polySpot - openPx) : 0;
+    const diffPct = openPx > 0 ? (diffUsd / openPx) * 100 : 0;
+    const isUp = diffUsd > 0.005;
+    const isDn = diffUsd < -0.005;
+    const arrow = isUp ? "▲" : isDn ? "▼" : "•";
+    const sign = isUp ? "+" : isDn ? "-" : "";
+    const pctSign = isUp ? "+" : "";
+    deltaPill.textContent = `${arrow} ${sign}$${Math.abs(diffUsd).toFixed(2)} (${pctSign}${diffPct.toFixed(3)}%)`;
+    deltaPill.className = `chart-delta-pill ${isUp ? "up" : isDn ? "down" : "flat"}`;
+  }
+
   const lastPt = hist.length > 0 ? hist[hist.length - 1] : null;
   const probUpMarket = lastPt?.poly_up ?? live.poly_up ?? upMid ?? null;
 
   if ($("chart-stat-prob-up")) {
-    $("chart-stat-prob-up").textContent =
-      probUpMarket !== null ? `${(Number(probUpMarket) * 100).toFixed(1)}%` : "--%";
+    const pVal = probUpMarket !== null ? Number(probUpMarket) * 100 : null;
+    $("chart-stat-prob-up").textContent = pVal !== null ? `${pVal.toFixed(1)}%` : "--%";
+    $("chart-stat-prob-up").className = pVal !== null ? (pVal >= 50 ? "up" : "down") : "";
   }
 }
 
@@ -2489,10 +2503,11 @@ function drawLivePriceChart(live) {
     ctx.fillText(`0${mins}:00`, x, h - padB + 9);
   }
 
-  // -------------------- UPPER PANE: PRICE TRAJECTORY --------------------
+  // -------------------- UPPER PANE: BASELINE PRICE TRAJECTORY --------------------
   if (priceH > 0) {
-    ctx.font = "500 12px 'JetBrains Mono', monospace";
+    ctx.font = "500 11.5px 'JetBrains Mono', monospace";
     const pSteps = 4;
+    const spanPx = Math.abs(maxPx - minPx);
     for (let i = 0; i <= pSteps; i++) {
       const val = minPx + ((maxPx - minPx) * i) / pSteps;
       const y = yOfPrice(val);
@@ -2508,19 +2523,22 @@ function drawLivePriceChart(live) {
       ctx.fillText(`$${val.toFixed(1)}`, padL - 9, y);
 
       if (openPx > 0) {
-        const bps = ((val - openPx) / openPx) * 10000;
-        const sign = bps > 0 ? "+" : "";
+        const diff = val - openPx;
+        const absD = Math.abs(diff);
+        const sign = diff > 0.05 ? "+" : diff < -0.05 ? "-" : "";
+        const fmtDiff = spanPx < 25 ? absD.toFixed(1) : Math.round(absD).toString();
+        ctx.fillStyle = diff > 0.05 ? pal.up : diff < -0.05 ? pal.down : pal.axis;
         ctx.textAlign = "left";
-        ctx.fillText(`${sign}${bps.toFixed(0)}bp`, w - padR + 8, y);
+        ctx.fillText(sign ? `${sign}$${fmtDiff}` : "$0", w - padR + 8, y);
       }
     }
 
+    const openY = Math.max(priceTop, Math.min(priceTop + priceH, yOfPrice(openPx)));
     if (openPx >= minPx && openPx <= maxPx) {
-      const openY = yOfPrice(openPx);
       ctx.save();
-      ctx.strokeStyle = pal.amber;
-      ctx.lineWidth = 1.2;
-      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = pal.isDark ? "rgba(148, 163, 184, 0.45)" : "rgba(100, 116, 139, 0.40)";
+      ctx.lineWidth = 1.15;
+      ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(padL, openY);
       ctx.lineTo(w - padR, openY);
@@ -2528,42 +2546,109 @@ function drawLivePriceChart(live) {
       ctx.restore();
     }
 
-    // Chainlink 60s TWAP — the only displayed price series (display-only change).
-    const twapGrad = ctx.createLinearGradient(0, priceTop, 0, priceTop + priceH);
-    twapGrad.addColorStop(0, pal.spotFillTop);
-    twapGrad.addColorStop(1, pal.spotFillBot);
+    // TradingView-style Baseline Dual-Color Area Fill & Split Stroke (Green above Strike, Red below Strike)
+    const tracePricePath = () => {
+      ctx.beginPath();
+      pts.forEach((p, idx) => {
+        const x = xOfSec(p.elapsed);
+        const y = yOfPrice(p.poly_spot);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+    };
+    const firstX = xOfSec(pts[0].elapsed);
+    const lastPtPx = pts[pts.length - 1];
+    const lastX = xOfSec(lastPtPx.elapsed);
+    const lastY = yOfPrice(lastPtPx.poly_spot);
 
+    // Above-strike green zone
+    ctx.save();
     ctx.beginPath();
-    pts.forEach((p, idx) => {
-      const x = xOfSec(p.elapsed);
-      const y = yOfPrice(p.poly_spot);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.lineTo(xOfSec(pts[pts.length - 1].elapsed), priceTop + priceH);
-    ctx.lineTo(xOfSec(pts[0].elapsed), priceTop + priceH);
+    ctx.rect(padL, priceTop, plotW, Math.max(0, openY - priceTop));
+    ctx.clip();
+    const upGrad = ctx.createLinearGradient(0, priceTop, 0, openY);
+    upGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.28)" : "rgba(5, 150, 105, 0.20)");
+    upGrad.addColorStop(1, "rgba(16, 185, 129, 0.02)");
+    tracePricePath();
+    ctx.lineTo(lastX, openY);
+    ctx.lineTo(firstX, openY);
     ctx.closePath();
-    ctx.fillStyle = twapGrad;
+    ctx.fillStyle = upGrad;
     ctx.fill();
-
-    ctx.beginPath();
-    pts.forEach((p, idx) => {
-      const x = xOfSec(p.elapsed);
-      const y = yOfPrice(p.poly_spot);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = pal.twap;
-    ctx.lineWidth = 2.2;
+    tracePricePath();
+    ctx.strokeStyle = pal.up;
+    ctx.lineWidth = 2.3;
     ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.restore();
+
+    // Below-strike red zone
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padL, openY, plotW, Math.max(0, priceTop + priceH - openY));
+    ctx.clip();
+    const dnGrad = ctx.createLinearGradient(0, openY, 0, priceTop + priceH);
+    dnGrad.addColorStop(0, "rgba(244, 63, 94, 0.02)");
+    dnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.28)" : "rgba(225, 29, 72, 0.20)");
+    tracePricePath();
+    ctx.lineTo(lastX, openY);
+    ctx.lineTo(firstX, openY);
+    ctx.closePath();
+    ctx.fillStyle = dnGrad;
+    ctx.fill();
+    tracePricePath();
+    ctx.strokeStyle = pal.down;
+    ctx.lineWidth = 2.3;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.restore();
+
+    // Glowing terminal dot + live dollar-delta pill right next to the tip
+    const curDiff = openPx > 0 ? (lastPtPx.poly_spot - openPx) : 0;
+    const isUpNow = curDiff >= 0;
+    const tipColor = isUpNow ? pal.up : pal.down;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 7.5, 0, Math.PI * 2);
+    ctx.fillStyle = isUpNow
+      ? (pal.isDark ? "rgba(16, 185, 129, 0.26)" : "rgba(5, 150, 105, 0.18)")
+      : (pal.isDark ? "rgba(244, 63, 94, 0.26)" : "rgba(225, 29, 72, 0.18)");
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 3.8, 0, Math.PI * 2);
+    ctx.fillStyle = tipColor;
+    ctx.fill();
+    ctx.strokeStyle = pal.cardBg;
+    ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    // Subtle pane label (offset 7px above top gridline so it never collides with top Y-axis tick label)
+    const tipSign = curDiff > 0.005 ? "+" : curDiff < -0.005 ? "-" : "";
+    const tipTxt = `${tipSign}$${Math.abs(curDiff).toFixed(2)}`;
+    ctx.font = "700 11px 'JetBrains Mono', monospace";
+    const tw = ctx.measureText(tipTxt).width;
+    const bw = tw + 12;
+    const bh = 20;
+    const placeLeft = lastX + 10 + bw > w - padR;
+    const bx = placeLeft ? Math.max(padL + 4, lastX - 10 - bw) : lastX + 10;
+    const by = Math.max(priceTop + 2, Math.min(priceTop + priceH - bh - 2, lastY - bh / 2));
+    ctx.fillStyle = tipColor;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(tipTxt, bx + bw / 2, by + bh / 2 + 0.5);
+    ctx.restore();
+
+    // Subtle pane label
     ctx.fillStyle = pal.axis;
     ctx.font = isMobile ? "600 10.5px Inter, sans-serif" : "600 11px Inter, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    ctx.fillText("BTC 价格 (Chainlink 60s TWAP)", padL + 4, priceTop - 7);
+    ctx.fillText("BTC 相对开盘涨跌 (美元)", padL + 4, priceTop - 7);
   }
 
   // -------------------- LOWER PANE: IMPLIED PROBABILITY --------------------

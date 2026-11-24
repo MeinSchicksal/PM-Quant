@@ -6316,6 +6316,98 @@ html, body {
   max-width: 240px;
 }
 
+/* ==========================================================================
+   MODERN CHART HERO READOUT (PRICE + LIVE DOLLAR/PERCENT DELTA PILL)
+   ========================================================================== */
+.chart-hero-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chart-hero-price-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chart-hero-px {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.chart-delta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chart-delta-pill.up {
+  color: var(--up);
+  background: var(--up-soft);
+}
+
+.chart-delta-pill.down {
+  color: var(--down);
+  background: var(--down-soft);
+}
+
+.chart-delta-pill.flat {
+  color: var(--caption);
+  background: var(--surface-muted);
+}
+
+.chart-hero-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--caption);
+}
+
+.chart-hero-sub-row strong {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--label);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-hero-sub-row strong.up { color: var(--up); }
+.chart-hero-sub-row strong.down { color: var(--down); }
+
+.chart-sub-dot {
+  color: var(--border);
+  font-weight: 700;
+}
+
+@media (max-width: 780px) {
+  .chart-hero-px {
+    font-size: 18.5px;
+  }
+  .chart-delta-pill {
+    font-size: 11px;
+    padding: 2px 7px;
+  }
+  .chart-hero-sub-row {
+    font-size: 10.5px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;
