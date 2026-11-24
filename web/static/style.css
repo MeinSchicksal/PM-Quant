@@ -7019,6 +7019,327 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   5-MINUTE AI TRADING CO-PILOT: 4-ACT STAGE BAR & CONTEXT-ADAPTIVE BATTLE CARD
+   ========================================================================== */
+.stage-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+}
+
+.stage-step {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--caption);
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+
+.stage-step.is-done {
+  color: var(--label);
+}
+
+.stage-step.is-active {
+  color: var(--ink);
+  font-weight: 700;
+  background: var(--surface-muted);
+}
+
+#market-round-bar.is-crunch .stage-step.is-active {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+#market-round-bar.is-freeze .stage-step.is-active {
+  color: var(--down);
+  background: var(--down-soft);
+}
+
+.stage-arrow {
+  font-size: 11px;
+  color: var(--border);
+  user-select: none;
+}
+
+/* Context-Adaptive Battle Card */
+.panel.battle-card {
+  padding: 15px 18px;
+  border-radius: 14px;
+}
+
+/* Mode A: Flat Scanning Radar */
+.battle-scan-view {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.bsv-balance-head {
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.bsv-side {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.bsv-tag {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bsv-tag.up { color: var(--up); }
+.bsv-tag.down { color: var(--down); }
+
+.bsv-prob {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.bsv-prob.up { color: var(--up); }
+.bsv-prob.down { color: var(--down); }
+
+.bsv-scale-track {
+  position: relative;
+  height: 5px;
+  width: 100%;
+  border-radius: 999px;
+  background: rgba(244, 63, 94, 0.22);
+  overflow: hidden;
+}
+
+.bsv-scale-fill.up {
+  height: 100%;
+  border-radius: 999px 0 0 999px;
+  background: var(--up);
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bsv-scale-mid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--surface);
+}
+
+.bsv-radar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.bsv-radar-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+  flex-shrink: 0;
+  animation: liveBeaconPulse 2.4s ease-in-out infinite;
+}
+
+.bsv-radar-text {
+  font-size: 12.5px;
+  color: var(--label);
+  line-height: 1.5;
+}
+
+.bsv-radar-text b {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.bsv-radar-text b.up { color: var(--up); }
+.bsv-radar-text b.down { color: var(--down); }
+
+/* Mode B: Holding Bottom-Line Card */
+.battle-holding-view {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.85fr) minmax(0, 1.55fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.bhv-position-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding-right: 12px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.bhv-k {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--caption);
+}
+
+.bhv-main-pos {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
+.bhv-main-pos .up { color: var(--up); }
+.bhv-main-pos .down { color: var(--down); }
+.bhv-plus { color: var(--caption); font-weight: 500; margin: 0 2px; }
+
+.bhv-sub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--label);
+  font-variant-numeric: tabular-nums;
+}
+
+.bhv-outcomes-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bhv-outcome-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.16s ease;
+}
+
+.bhv-outcome-box.side-up.is-leading {
+  background: rgba(16, 185, 129, 0.06);
+  border-color: rgba(16, 185, 129, 0.30);
+}
+
+.bhv-outcome-box.side-down.is-leading {
+  background: rgba(244, 63, 94, 0.055);
+  border-color: rgba(244, 63, 94, 0.28);
+}
+
+.bhv-outcome-box.is-focused {
+  border-color: var(--accent) !important;
+  transform: translateY(-1px);
+}
+
+.bhv-outcome-box.is-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 55%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  pointer-events: none;
+  animation: cardShimmerSweep 0.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.bhv-ob-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.bhv-ob-dir {
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.bhv-ob-dir.up { color: var(--up); }
+.bhv-ob-dir.down { color: var(--down); }
+
+.bhv-pnl-num {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.bhv-pnl-num.up { color: var(--up); }
+.bhv-pnl-num.down { color: var(--down); }
+
+.bhv-ob-prob {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.bhv-ob-prob b.up { color: var(--up); }
+.bhv-ob-prob b.down { color: var(--down); }
+
+@media (max-width: 780px) {
+  .stage-stepper {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border-soft);
+  }
+  .stage-step {
+    font-size: 10.5px;
+    padding: 2px 6px;
+  }
+  .panel.battle-card {
+    padding: 13px 14px;
+  }
+  .bsv-balance-head {
+    gap: 10px;
+  }
+  .bsv-prob {
+    font-size: 15px;
+  }
+  .bsv-radar-text {
+    font-size: 11.5px;
+  }
+  .battle-holding-view {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .bhv-position-col {
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .bhv-main-pos {
+    font-size: 16.5px;
+  }
+  .bhv-pnl-num {
+    font-size: 19px;
+  }
+  .bhv-outcome-box {
+    padding: 10px 11px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;

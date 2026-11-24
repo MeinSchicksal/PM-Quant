@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.77">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.78">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -391,22 +391,29 @@
          VIEW 2: LIVE MARKET WORKSPACE (实时工作区)
          ==================================================================== -->
     <section class="view-panel" id="view-market" hidden>
-      <!-- Ultra-Slim Round & Countdown Top Strip with 300s Live Pulse Rail & Battle Standing -->
-      <section class="panel market-command-strip slim-round-bar" id="market-round-bar" aria-label="当前轮次与剩余时间">
+      <!-- 4-Act 5-Minute Round Stage Bar (Co-Pilot Timeline) -->
+      <section class="panel market-command-strip slim-round-bar stage-round-bar" id="market-round-bar" aria-label="本轮5分钟阶段进度">
         <div class="srb-left">
-          <span class="srb-badge">本轮</span>
           <strong class="srb-range" id="market-time-range">--:-- ~ --:--</strong>
-          <span class="srb-sep" aria-hidden="true">·</span>
-          <span class="srb-tau-wrap">剩余 <strong class="srb-tau" id="market-tau">--</strong><span class="srb-unit">s</span></span>
-          <span class="srb-standing-pill" id="market-standing-pill" hidden></span>
+          <div class="stage-stepper" id="round-stage-stepper" aria-label="本轮所处阶段">
+            <span class="stage-step is-active" data-stage="observe">观察</span>
+            <span class="stage-arrow" aria-hidden="true">›</span>
+            <span class="stage-step" data-stage="active" id="stage-step-active">扫描机会</span>
+            <span class="stage-arrow" aria-hidden="true">›</span>
+            <span class="stage-step" data-stage="freeze">尾盘锁定</span>
+            <span class="stage-arrow" aria-hidden="true">›</span>
+            <span class="stage-step" data-stage="settle">结算</span>
+          </div>
           <span class="chart-sub-tag" id="chart-elapsed-badge" hidden>已运行 0s / 300s</span>
           <span hidden><strong id="market-spot">$0.00</strong><small id="market-open">基准 $0.00</small><strong id="market-bps">$0.00</strong><small id="market-bps-sub">+0.000%</small></span>
         </div>
 
         <div class="srb-right">
+          <span class="srb-standing-pill" id="market-standing-pill" hidden></span>
+          <span class="srb-tau-wrap">剩 <strong class="srb-tau" id="market-tau">--:--</strong></span>
           <span class="status-pill status-ready" id="market-risk-pill">
             <span class="status-dot"></span>
-            <span id="market-risk">流动性正常</span>
+            <span id="market-risk">守护正常</span>
           </span>
           <button type="button" class="conn-help-btn mc-help-btn" id="regime-help-btn" title="查看微观风控与行情形态说明" aria-label="微观风控与形态说明">?</button>
         </div>
@@ -456,13 +463,12 @@
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
             </div>
 
-            <!-- Integrated Live Strategy Verdict Bar Inside Chart Card -->
-            <div class="chart-verdict-bar" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
+            <!-- Integrated AI Co-Pilot Live Narration Footer -->
+            <div class="chart-verdict-bar copilot-narration-bar" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
               <div class="cvb-left">
                 <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
-                <strong class="cvb-state" id="bulletin-status-badge">正在观望</strong>
-                <span class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，等待划算的买入价格...</span>
-                <span class="cvb-edge-inline" id="console-edge-meter" hidden></span>
+                <strong class="cvb-state" id="bulletin-status-badge">正在观察</strong>
+                <span class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，寻找划算的买入时机...</span>
               </div>
               <div class="cvb-right">
                 <span class="console-fresh-time" id="console-fresh-time">--:--:--</span>
@@ -471,76 +477,78 @@
             </div>
           </section>
 
-          <!-- Focused Position & Expected PnL Cards (UP | DOWN) -->
-          <div class="outcome-tickets-grid" aria-label="本轮多空持仓与预计收益">
-            <!-- UP Ticket -->
-            <section class="panel outcome-ticket side-up" id="card-up" data-focus-side="UP">
-              <div class="ot-head">
-                <div class="ot-title-group">
-                  <span class="ot-pill up">UP</span>
-                  <span class="ot-name">看涨</span>
-                  <span class="ot-lead-tag" id="up-lead-tag" hidden>领先</span>
+          <!-- Context-Adaptive Battle Card: Scan Radar (when flat) <-> Holding Bottom-Line Card (when holding) -->
+          <section class="panel battle-card" id="copilot-battle-card" aria-label="本轮战局与底牌">
+            <!-- State A: Flat / Scanning Mode (Market Balance + Live Sniper Distance) -->
+            <div class="battle-scan-view" id="battle-scan-view">
+              <div class="bsv-balance-head">
+                <div class="bsv-side up">
+                  <span class="bsv-tag up">▲ 看涨</span>
+                  <strong class="bsv-prob up" id="up-meta-implied">--%</strong>
                 </div>
-                <strong class="ot-prob-val up" id="up-meta-implied">--%</strong>
+                <div class="bsv-scale-wrap" aria-hidden="true">
+                  <div class="bsv-scale-track">
+                    <div class="bsv-scale-fill up" id="battle-balance-up" style="width: 50%"></div>
+                    <span class="bsv-scale-mid"></span>
+                  </div>
+                </div>
+                <div class="bsv-side down">
+                  <strong class="bsv-prob down" id="down-meta-implied">--%</strong>
+                  <span class="bsv-tag down">看跌 ▼</span>
+                </div>
+              </div>
+              <div class="bsv-radar-row" id="battle-radar-row">
+                <span class="bsv-radar-dot" aria-hidden="true"></span>
+                <span class="bsv-radar-text" id="battle-radar-text">策略正在实时比对模型胜率与盘口卖价，出现划算折价会自动出手</span>
+              </div>
+            </div>
+
+            <!-- State B: Holding Mode (My Position + Crystal-Clear Best / Worst Outcomes) -->
+            <div class="battle-holding-view" id="battle-holding-view" hidden>
+              <div class="bhv-position-col">
+                <span class="bhv-k">本轮已持仓</span>
+                <div class="bhv-chips" id="battle-holding-chips">
+                  <strong class="bhv-main-pos" id="battle-pos-headline">看涨 0.0 股</strong>
+                </div>
+                <span class="bhv-sub" id="battle-pos-sub">均价 -- · 总投入 $0.00</span>
               </div>
 
-              <!-- Hero Centerpiece: Expected Settlement PnL -->
-              <div class="ot-pnl-hero" id="pnl-forecast-up">
-                <span class="ot-pnl-lbl">预计交割收益</span>
-                <strong class="ot-pnl-amt flat">空仓观望</strong>
-              </div>
+              <div class="bhv-outcomes-grid">
+                <div class="bhv-outcome-box side-up" id="card-up" data-focus-side="UP">
+                  <div class="bhv-ob-top">
+                    <span class="bhv-ob-dir up">若看涨胜出</span>
+                    <span class="ot-lead-tag" id="up-lead-tag" hidden>当前占优</span>
+                  </div>
+                  <div class="bhv-ob-pnl" id="pnl-forecast-up">
+                    <strong class="bhv-pnl-num">$0.00</strong>
+                  </div>
+                  <span class="bhv-ob-prob">当前概率 <b class="up" id="up-prob-hold">--%</b></span>
+                </div>
 
-              <!-- Prominent 3-Column Position Metrics: Shares | Avg Price | Cost -->
-              <div class="ot-pos-grid">
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">买入股数</span>
-                  <strong class="ot-pg-v" id="up-pos-shares">0.0 股</strong>
-                </div>
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">均价</span>
-                  <strong class="ot-pg-v" id="up-pos-avg">--</strong>
-                </div>
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">投入</span>
-                  <strong class="ot-pg-v" id="up-pos-cost">$0.00</strong>
+                <div class="bhv-outcome-box side-down" id="card-down" data-focus-side="DOWN">
+                  <div class="bhv-ob-top">
+                    <span class="bhv-ob-dir down">若看跌胜出</span>
+                    <span class="ot-lead-tag" id="down-lead-tag" hidden>当前占优</span>
+                  </div>
+                  <div class="bhv-ob-pnl" id="pnl-forecast-down">
+                    <strong class="bhv-pnl-num">$0.00</strong>
+                  </div>
+                  <span class="bhv-ob-prob">当前概率 <b class="down" id="down-prob-hold">--%</b></span>
                 </div>
               </div>
-            </section>
+            </div>
 
-            <!-- DOWN Ticket -->
-            <section class="panel outcome-ticket side-down" id="card-down" data-focus-side="DOWN">
-              <div class="ot-head">
-                <div class="ot-title-group">
-                  <span class="ot-pill down">DOWN</span>
-                  <span class="ot-name">看跌</span>
-                  <span class="ot-lead-tag" id="down-lead-tag" hidden>领先</span>
-                </div>
-                <strong class="ot-prob-val down" id="down-meta-implied">--%</strong>
-              </div>
-
-              <!-- Hero Centerpiece: Expected Settlement PnL -->
-              <div class="ot-pnl-hero" id="pnl-forecast-down">
-                <span class="ot-pnl-lbl">预计交割收益</span>
-                <strong class="ot-pnl-amt flat">空仓观望</strong>
-              </div>
-
-              <!-- Prominent 3-Column Position Metrics: Shares | Avg Price | Cost -->
-              <div class="ot-pos-grid">
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">买入股数</span>
-                  <strong class="ot-pg-v" id="down-pos-shares">0.0 股</strong>
-                </div>
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">均价</span>
-                  <strong class="ot-pg-v" id="down-pos-avg">--</strong>
-                </div>
-                <div class="ot-pg-cell">
-                  <span class="ot-pg-k">投入</span>
-                  <strong class="ot-pg-v" id="down-pos-cost">$0.00</strong>
-                </div>
-              </div>
-            </section>
-          </div>
+            <!-- Hidden compatibility hooks for legacy JS references -->
+            <div hidden>
+              <span id="up-pos-shares">0.0 股</span>
+              <span id="up-pos-avg">--</span>
+              <span id="up-pos-cost">$0.00</span>
+              <span id="down-pos-shares">0.0 股</span>
+              <span id="down-pos-avg">--</span>
+              <span id="down-pos-cost">$0.00</span>
+              <span id="console-edge-meter"></span>
+            </div>
+          </section>
         </div>
 
         <div class="cockpit-feed-col">
@@ -939,6 +947,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.77"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.78"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>

@@ -2068,18 +2068,49 @@ function updateMarket(live) {
     const el = $(elId);
     if (!el) return;
     if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
-      const sideCn = sideName === "UP" ? "看涨" : "看跌";
-      const lbl = netVal >= 0 ? `若${sideCn}胜出 · 预计净赚` : `若${sideCn}胜出 · 预计净亏`;
       setHtmlIfChanged(
         el,
-        `<span class="ot-pnl-lbl">${lbl}</span><strong class="ot-pnl-amt ${netVal >= 0 ? "up" : "down"}">${escapeHtml(fmtUsd(netVal, true))}</strong>`
+        `<strong class="bhv-pnl-num ${netVal >= 0 ? "up" : "down"}">${escapeHtml(fmtUsd(netVal, true))}</strong>`
       );
     } else {
-      setHtmlIfChanged(el, `<span class="ot-pnl-lbl">预计交割收益</span><strong class="ot-pnl-amt flat">空仓观望</strong>`);
+      setHtmlIfChanged(el, `<strong class="bhv-pnl-num flat">$0.00</strong>`);
     }
   };
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);
   renderSideForecast("pnl-forecast-down", "DOWN", dnWinNet);
+
+  // Context-Adaptive Battle Card: Toggle Scan Radar vs Holding Bottom-Line Card
+  const hasAnyHolding = upShares > 1e-6 || dnShares > 1e-6 || totalCost > 1e-6;
+  const scanView = $("battle-scan-view");
+  const holdView = $("battle-holding-view");
+  const battleCard = $("copilot-battle-card");
+  if (scanView) scanView.hidden = hasAnyHolding;
+  if (holdView) holdView.hidden = !hasAnyHolding;
+  if (battleCard) battleCard.classList.toggle("is-holding-mode", hasAnyHolding);
+
+  // Update active stage label ("扫描机会" -> "持仓博弈" once holding)
+  const activeStageEl = $("stage-step-active");
+  if (activeStageEl) {
+    const hasWorking = Array.isArray(live.working_orders) && live.working_orders.length > 0;
+    activeStageEl.textContent = hasAnyHolding ? "持仓博弈" : hasWorking ? "排队接货" : "扫描机会";
+  }
+
+  if (hasAnyHolding) {
+    const headlineEl = $("battle-pos-headline");
+    const subEl = $("battle-pos-sub");
+    if (headlineEl && subEl) {
+      if (upShares > 1e-6 && dnShares > 1e-6) {
+        headlineEl.innerHTML = `<span class="up">看涨 ${fmtShares(upShares)}股</span> <span class="bhv-plus">+</span> <span class="down">看跌 ${fmtShares(dnShares)}股</span>`;
+        subEl.textContent = `双边配比 · 总投入 ${fmtUsd(totalCost)}`;
+      } else if (upShares > 1e-6) {
+        headlineEl.innerHTML = `<span class="up">看涨</span> ${fmtShares(upShares)} 股`;
+        subEl.textContent = `均价 ${fmtPriceCents(posUp.avg_px)} · 总投入 ${fmtUsd(upCost)}`;
+      } else {
+        headlineEl.innerHTML = `<span class="down">看跌</span> ${fmtShares(dnShares)} 股`;
+        subEl.textContent = `均价 ${fmtPriceCents(posDn.avg_px)} · 总投入 ${fmtUsd(dnCost)}`;
+      }
+    }
+  }
 
   const upBid = bookUp.best_bid ?? bookUp.bid ?? null;
   const upAsk = bookUp.best_ask ?? bookUp.ask ?? null;
@@ -2152,6 +2183,61 @@ function updateMarket(live) {
   }
 
   renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
+
+  // Sync probability readouts for both Scan Balance bar & Holding Outcome boxes
+  const upPctNum = Number.isFinite(upMid) ? Math.min(98, Math.max(2, upMid * 100)) : 50;
+  const balUpEl = $("battle-balance-up");
+  if (balUpEl) balUpEl.style.width = `${upPctNum.toFixed(1)}%`;
+  if ($("up-prob-hold")) $("up-prob-hold").textContent = Number.isFinite(upMid) ? `${(upMid * 100).toFixed(1)}%` : "--%";
+  if ($("down-prob-hold")) $("down-prob-hold").textContent = Number.isFinite(dnMid) ? `${(dnMid * 100).toFixed(1)}%` : "--%";
+
+  // Update Scan Sniper Radar text (shows distance to trigger so flat mode feels alive & reassuring)
+  const radarEl = $("battle-radar-text");
+  if (radarEl && !hasAnyHolding) {
+    const rawR = String(live.decision_reason || "");
+    const wOrdersNow = Array.isArray(live.working_orders) ? live.working_orders : [];
+    const tauNow = Number(live.tau_s ?? 0);
+    if (wOrdersNow.length > 0) {
+      const wo = wOrdersNow[0];
+      const wSideCn = String(wo.side || "").toUpperCase() === "UP" ? "看涨" : "看跌";
+      const wPx = Number(wo.price ?? wo.px ?? 0);
+      const qAhead = Number(wo.queue_ahead ?? 0);
+      radarEl.innerHTML = `已在 <b>$${wPx.toFixed(2)}</b> 挂单排队买 <b class="${wSideCn === "看涨" ? "up" : "down"}">${wSideCn}</b> · ${qAhead <= 1 ? "已排在队首，随时可能成交" : `前方还有 ${qAhead.toFixed(1)} 股排队`}`;
+    } else if (tauNow > 240 || /Observation period/i.test(rawR)) {
+      const waitLeft = Math.max(1, Math.round(tauNow - 240));
+      radarEl.textContent = `开盘前 60 秒先校准基准价与波动节奏 · 约 ${waitLeft} 秒后开启机会扫描`;
+    } else if (tauNow > 0 && tauNow <= 15) {
+      radarEl.textContent = "已进入最后 15 秒尾盘锁定阶段 · 停止新开仓，准备迎接下一轮";
+    } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(rawR)) {
+      radarEl.textContent = "检测到 BTC 突发剧烈波动 · 风控已自动挡在门外，等行情平稳后再评估";
+    } else {
+      const pm = rawR.match(/P\*\(?Up\)?=([\d.]+)/i);
+      const um = rawR.match(/Up=([\d.-]+)\/([\d.-]+)/i);
+      const dm = rawR.match(/Dn=([\d.-]+)\/([\d.-]+)/i);
+      if (pm && (um || dm)) {
+        const pUp = parseFloat(pm[1]);
+        const favorUp = pUp >= 0.5;
+        const sideTxt = favorUp ? "看涨" : "看跌";
+        const sideCls = favorUp ? "up" : "down";
+        const fairCents = Math.round((favorUp ? pUp : 1 - pUp) * 100);
+        const askNum = parseFloat(favorUp ? (um ? um[2] : "") : (dm ? dm[2] : ""));
+        if (Number.isFinite(askNum) && askNum > 0) {
+          const askCents = Math.round(askNum * 100);
+          const diffCents = fairCents - askCents;
+          const gapHint = diffCents < 0
+            ? `市场偏贵 <b>${Math.abs(diffCents)}¢</b>，耐心等更划算价格`
+            : diffCents < 5
+              ? `折价仅 <b>${diffCents}¢</b>（离出手线还差一点），持续紧盯`
+              : `已出现 <b>${diffCents}¢</b> 折价，准备择机出手`;
+          radarEl.innerHTML = `当前关注 <b class="${sideCls}">${sideTxt}</b>（模型估价 <b>${fairCents}¢</b> vs 卖价 <b>${askCents}¢</b>）· ${gapHint}`;
+        } else {
+          radarEl.textContent = translateDecisionReason(rawR);
+        }
+      } else {
+        radarEl.textContent = translateDecisionReason(rawR);
+      }
+    }
+  }
 
   renderWorkingOrders(live.working_orders || []);
   renderActionFeed(live.actions || [], live.start);
@@ -3227,6 +3313,10 @@ function initLiveChartInteractions() {
       const dPct = `${((1 - pt.up_mid) * 100).toFixed(1)}%`;
       if ($("up-meta-implied")) $("up-meta-implied").textContent = uPct;
       if ($("down-meta-implied")) $("down-meta-implied").textContent = dPct;
+      if ($("up-prob-hold")) $("up-prob-hold").textContent = uPct;
+      if ($("down-prob-hold")) $("down-prob-hold").textContent = dPct;
+      const balEl = $("battle-balance-up");
+      if (balEl) balEl.style.width = `${Math.min(98, Math.max(2, pt.up_mid * 100)).toFixed(1)}%`;
       if ($("chart-stat-prob-up")) {
         $("chart-stat-prob-up").textContent = uPct;
         $("chart-stat-prob-up").className = pt.up_mid >= 0.5 ? "up" : "down";
@@ -4665,59 +4755,75 @@ function renderDecisionBulletin(live) {
 
   const latest = timeline[timeline.length - 1];
   const freshEl = $("console-fresh-time");
-  const edgeMeterEl = $("console-edge-meter");
   if (latest) {
-    let [lTag, lCls] = tagMap[latest.action] || ["正在观望", "is-wait"];
-    const hasPosNow = Number(live?.pos_up?.shares || 0) > 1e-6 || Number(live?.pos_down?.shares || 0) > 1e-6;
-    if (latest.action === "wait" && hasPosNow) {
-      lTag = "持仓待结算";
-      lCls = "is-buy";
+    let [lTag, lCls] = tagMap[latest.action] || ["正在扫描", "is-wait"];
+    const uSh = Number(live?.pos_up?.shares || 0);
+    const dSh = Number(live?.pos_down?.shares || 0);
+    const hasPosNow = uSh > 1e-6 || dSh > 1e-6;
+    const wOrders = Array.isArray(live?.working_orders) ? live.working_orders : [];
+    const tauS = Number(live?.tau_s ?? 0);
+    const spotNow = Number(live?.poly_spot || live?.spot || 0);
+    const openNow = Number(live?.open_px || 0);
+    const diffUsdNow = openNow > 0 && spotNow > 0 ? (spotNow - openNow) : 0;
+    const curRawReason = String(live?.decision_reason || latest.reason || "");
+
+    // Live Co-Pilot Narrative: speaks like a calm human co-pilot riding the 5-minute rollercoaster with you
+    let narrativeText = translateDecisionReason(curRawReason);
+    if (wOrders.length > 0) {
+      const wo = wOrders[0];
+      const wSide = String(wo.side || "").toUpperCase() === "UP" ? "看涨" : "看跌";
+      const wPx = Number(wo.price ?? wo.px ?? 0);
+      const qAhead = Number(wo.queue_ahead ?? 0);
+      lTag = "排队接货中";
+      lCls = "is-quote";
+      narrativeText = `已在 $${wPx.toFixed(2)} 挂单买【${wSide}】，${qAhead <= 1 ? "已排到队首，随时可能成交" : `前方还剩 ${qAhead.toFixed(1)} 股排队`}`;
+    } else if (hasPosNow) {
+      const heldUp = uSh >= dSh;
+      const heldCn = heldUp ? "看涨" : "看跌";
+      const heldSh = heldUp ? uSh : dSh;
+      const padUsd = heldUp ? diffUsdNow : -diffUsdNow;
+      if (tauS > 0 && tauS <= 15) {
+        lTag = "尾盘冲刺";
+        lCls = padUsd >= 0 ? "is-buy" : "is-warn";
+        narrativeText = `最后 ${Math.round(tauS)} 秒决胜！持有 ${fmtShares(heldSh)} 股【${heldCn}】，当前${padUsd >= 0 ? `领先 +$${Math.abs(padUsd).toFixed(2)}` : `落后 -$${Math.abs(padUsd).toFixed(2)}`}，静待开奖`;
+      } else if (Math.abs(padUsd) < 12) {
+        lTag = "贴线拉锯";
+        lCls = "is-warn";
+        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，当前紧贴开盘线拉锯（${padUsd >= 0 ? "+" : "-"}$${Math.abs(padUsd).toFixed(2)}），风控持续盯守`;
+      } else if (padUsd >= 12) {
+        lTag = "持仓顺风";
+        lCls = "is-buy";
+        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，已拉开 +$${padUsd.toFixed(2)} 安全垫，目前走势占优，稳拿等结算`;
+      } else {
+        lTag = "暂时落后";
+        lCls = "is-warn";
+        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，目前暂时落后 -$${Math.abs(padUsd).toFixed(2)}，距结算还有 ${Math.round(tauS)} 秒`;
+      }
+    } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(curRawReason)) {
+      lTag = "急震避险";
+      lCls = "is-warn";
+    } else if (tauS > 240 || /Observation period/i.test(curRawReason)) {
+      lTag = "开盘观察";
+      lCls = "is-wait";
+    } else if (tauS > 0 && tauS <= 15) {
+      lTag = "尾盘锁定";
+      lCls = "is-wait";
+    } else if (latest.action === "wait") {
+      lTag = "扫描机会";
+      lCls = "is-wait";
     }
+
     if (statusBadgeEl) statusBadgeEl.textContent = lTag;
     if (stateDotEl) stateDotEl.className = `console-state-dot ${lCls}`;
+    if (previewEl) previewEl.textContent = narrativeText;
 
-    // Real-time freshness indicator so user always knows this is the LIVE judgment
+    // Live freshness clock so user always knows the co-pilot is thinking every second
     const nowRef = Number(live?.now || live?.server_time || (Date.now() / 1000));
     const hbSec = Math.max(0, Math.round((Date.now() / 1000) - nowRef));
     const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
     if (freshEl) {
-      freshEl.textContent = hbSec <= 5 ? `实时判断 · ${timeClock}` : `${hbSec}秒前更新 · ${timeClock}`;
+      freshEl.textContent = hbSec <= 5 ? `${timeClock} 实时` : `${hbSec}s前`;
       freshEl.className = `console-fresh-time ${hbSec <= 5 ? "is-live" : ""}`;
-    }
-
-    // Always prefer live.decision_reason (the very latest tick) over stale audit log entry
-    const curRawReason = String(live?.decision_reason || latest.reason || "");
-    if (previewEl) {
-      previewEl.textContent = translateDecisionReason(curRawReason);
-    }
-
-    // Structured Fair-Value vs Market-Ask comparison pill (actionable insight)
-    if (edgeMeterEl) {
-      const pm = curRawReason.match(/P\*\(?Up\)?=([\d.]+)/i);
-      const um = curRawReason.match(/Up=([\d.-]+)\/([\d.-]+)/i);
-      const dm = curRawReason.match(/Dn=([\d.-]+)\/([\d.-]+)/i);
-      if (pm && (um || dm)) {
-        const pUp = parseFloat(pm[1]);
-        const favorUp = pUp >= 0.5;
-        const fairCents = Math.round((favorUp ? pUp : 1 - pUp) * 100);
-        const askStr = favorUp ? (um ? um[2] : "") : (dm ? dm[2] : "");
-        const askNum = parseFloat(askStr);
-        if (Number.isFinite(fairCents) && Number.isFinite(askNum) && askNum > 0) {
-          const askCents = Math.round(askNum * 100);
-          const diffCents = fairCents - askCents;
-          const gapText = diffCents > 0 ? `便宜 ${diffCents}¢` : diffCents < 0 ? `偏贵 ${Math.abs(diffCents)}¢` : "平价";
-          const gapCls = diffCents >= 4 ? "up" : diffCents < 0 ? "down" : "flat";
-          edgeMeterEl.hidden = false;
-          setHtmlIfChanged(
-            edgeMeterEl,
-            `<span class="em-item">模型估价 <b>${fairCents}¢</b></span><span class="em-sep">vs</span><span class="em-item">市场卖价 <b>${askCents}¢</b></span><span class="em-gap ${gapCls}">${gapText}</span>`
-          );
-        } else {
-          edgeMeterEl.hidden = true;
-        }
-      } else {
-        edgeMeterEl.hidden = true;
-      }
     }
   }
 
@@ -4771,7 +4877,9 @@ function updateSmoothCountdowns() {
   lastCountdownTau = tau;
   const elapsed = Math.min(300, Math.max(0, 300 - tau));
 
-  if ($("market-tau")) $("market-tau").textContent = String(tau);
+  const tauMm = String(Math.floor(tau / 60)).padStart(2, "0");
+  const tauSs = String(tau % 60).padStart(2, "0");
+  if ($("market-tau")) $("market-tau").textContent = `${tauMm}:${tauSs}`;
   if ($("chart-elapsed-badge")) $("chart-elapsed-badge").textContent = `已运行 ${elapsed}s / 300s`;
   if ($("overview-live-tau")) {
     setHtmlIfChanged($("overview-live-tau"), `${tau}<span class="val-unit">s</span>`);
@@ -4786,6 +4894,15 @@ function updateSmoothCountdowns() {
     roundBar.classList.toggle("is-crunch", tau <= 60 && tau > 15);
     roundBar.classList.toggle("is-freeze", tau <= 15 && tau > 0);
   }
+
+  // Update 4-Act Stage Stepper: observe (0..60s) -> active (60..285s) -> freeze (285..300s) -> settle (0s)
+  const stageOrder = ["observe", "active", "freeze", "settle"];
+  const curStageIdx = tau === 0 ? 3 : tau <= 15 ? 2 : elapsed < 60 ? 0 : 1;
+  document.querySelectorAll("#round-stage-stepper .stage-step").forEach((el) => {
+    const idx = stageOrder.indexOf(el.getAttribute("data-stage"));
+    el.classList.toggle("is-active", idx === curStageIdx);
+    el.classList.toggle("is-done", idx >= 0 && idx < curStageIdx);
+  });
 }
 
 let cachedSystemStatus = null;
