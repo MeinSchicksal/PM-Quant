@@ -2390,8 +2390,8 @@ function drawLivePriceChart(live) {
   const rect = canvas.getBoundingClientRect();
   const w = Math.max(280, rect.width || 800);
   const isMobile = w < 520;
-  const minH = isMobile ? (chartViewMode === "dual" ? 260 : 200) : 360;
-  const h = Math.max(minH, rect.height || (isMobile ? 270 : 500));
+  const minH = isMobile ? (chartViewMode === "dual" ? 305 : 220) : 360;
+  const h = Math.max(minH, rect.height || (isMobile ? 305 : 500));
 
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -2413,8 +2413,9 @@ function drawLivePriceChart(live) {
     return;
   }
 
-  const padL = isMobile ? 62 : 68;
-  const padR = isMobile ? 42 : 54;
+  // Mobile reclaims ~46px horizontal plot width by showing delta-USD on left and hiding redundant 6-digit price axis
+  const padL = isMobile ? 48 : 68;
+  const padR = isMobile ? 14 : 56;
   const padT = 24;
   const padB = isMobile ? 22 : 26;
   const plotW = w - padL - padR;
@@ -2426,9 +2427,10 @@ function drawLivePriceChart(live) {
   let probH = 0;
 
   if (chartViewMode === "dual") {
+    const gapBetween = isMobile ? 42 : 40;
     priceH = Math.round(totalPlotH * 0.52);
-    probTop = padT + priceH + 38;
-    probH = totalPlotH - priceH - 38;
+    probTop = padT + priceH + gapBetween;
+    probH = totalPlotH - priceH - gapBetween;
   } else if (chartViewMode === "prob") {
     priceH = 0;
     probTop = padT;
@@ -2505,7 +2507,7 @@ function drawLivePriceChart(live) {
 
   // -------------------- UPPER PANE: BASELINE PRICE TRAJECTORY --------------------
   if (priceH > 0) {
-    ctx.font = "500 11.5px 'JetBrains Mono', monospace";
+    ctx.font = isMobile ? "500 10.5px 'JetBrains Mono', monospace" : "500 11.5px 'JetBrains Mono', monospace";
     const pSteps = 4;
     const spanPx = Math.abs(maxPx - minPx);
     for (let i = 0; i <= pSteps; i++) {
@@ -2517,19 +2519,29 @@ function drawLivePriceChart(live) {
       ctx.lineTo(w - padR, y);
       ctx.stroke();
 
-      ctx.fillStyle = pal.axis;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "middle";
-      ctx.fillText(`$${val.toFixed(1)}`, padL - 9, y);
+      const diff = openPx > 0 ? (val - openPx) : 0;
+      const absD = Math.abs(diff);
+      const sign = diff > 0.05 ? "+" : diff < -0.05 ? "-" : "";
+      const fmtDiff = spanPx < 25 ? absD.toFixed(1) : Math.round(absD).toString();
+      const diffLabel = sign ? `${sign}$${fmtDiff}` : "$0";
+      const diffColor = diff > 0.05 ? pal.up : diff < -0.05 ? pal.down : pal.axis;
 
-      if (openPx > 0) {
-        const diff = val - openPx;
-        const absD = Math.abs(diff);
-        const sign = diff > 0.05 ? "+" : diff < -0.05 ? "-" : "";
-        const fmtDiff = spanPx < 25 ? absD.toFixed(1) : Math.round(absD).toString();
-        ctx.fillStyle = diff > 0.05 ? pal.up : diff < -0.05 ? pal.down : pal.axis;
-        ctx.textAlign = "left";
-        ctx.fillText(sign ? `${sign}$${fmtDiff}` : "$0", w - padR + 8, y);
+      ctx.textBaseline = "middle";
+      if (isMobile) {
+        // Mobile: clean delta-USD on left, maximizing chart width
+        ctx.fillStyle = diffColor;
+        ctx.textAlign = "right";
+        ctx.fillText(diffLabel, padL - 6, y);
+      } else {
+        ctx.fillStyle = pal.axis;
+        ctx.textAlign = "right";
+        ctx.fillText(`$${val.toFixed(1)}`, padL - 9, y);
+
+        if (openPx > 0) {
+          ctx.fillStyle = diffColor;
+          ctx.textAlign = "left";
+          ctx.fillText(diffLabel, w - padR + 8, y);
+        }
       }
     }
 
@@ -2626,16 +2638,16 @@ function drawLivePriceChart(live) {
 
     const tipSign = curDiff > 0.005 ? "+" : curDiff < -0.005 ? "-" : "";
     const tipTxt = `${tipSign}$${Math.abs(curDiff).toFixed(2)}`;
-    ctx.font = "700 11px 'JetBrains Mono', monospace";
+    ctx.font = isMobile ? "700 10px 'JetBrains Mono', monospace" : "700 11px 'JetBrains Mono', monospace";
     const tw = ctx.measureText(tipTxt).width;
-    const bw = tw + 12;
-    const bh = 20;
+    const bw = tw + (isMobile ? 10 : 12);
+    const bh = isMobile ? 18 : 20;
     const placeLeft = lastX + 10 + bw > w - padR;
     const bx = placeLeft ? Math.max(padL + 4, lastX - 10 - bw) : lastX + 10;
     const by = Math.max(priceTop + 2, Math.min(priceTop + priceH - bh - 2, lastY - bh / 2));
     ctx.fillStyle = tipColor;
     ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.roundRect(bx, by, bw, bh, 5);
     ctx.fill();
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "center";
@@ -2691,61 +2703,89 @@ function drawLivePriceChart(live) {
       ctx.fillStyle = prob === 0.5 ? pal.label : pal.axis;
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      ctx.fillText(lbl, padL - 9, y);
+      ctx.fillText(lbl, padL - (isMobile ? 6 : 9), y);
 
-      ctx.textAlign = "left";
-      ctx.fillText(lbl, w - padR + 8, y);
+      if (!isMobile) {
+        ctx.textAlign = "left";
+        ctx.fillText(lbl, w - padR + 8, y);
+      }
     });
 
     const probPts = pts.filter((p) => p.up_mid !== null);
     if (probPts.length > 0) {
-      const probGrad = ctx.createLinearGradient(0, probTop, 0, probTop + probH);
-      probGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.16)" : "rgba(5, 150, 105, 0.12)");
-      probGrad.addColorStop(1, "rgba(16, 185, 129, 0.00)");
-
-      ctx.beginPath();
-      probPts.forEach((p, idx) => {
-        const x = xOfSec(p.elapsed);
-        const y = yOfProb(p.up_mid);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.lineTo(xOfSec(probPts[probPts.length - 1].elapsed), probTop + probH);
-      ctx.lineTo(xOfSec(probPts[0].elapsed), probTop + probH);
-      ctx.closePath();
-      ctx.fillStyle = probGrad;
-      ctx.fill();
-
-      ctx.beginPath();
-      probPts.forEach((p, idx) => {
-        const x = xOfSec(p.elapsed);
-        const y = yOfProb(p.up_mid);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.strokeStyle = pal.up;
-      ctx.lineWidth = 2.2;
-      ctx.lineJoin = "round";
-      ctx.stroke();
-
-      // Subtle endpoint dot + clean text value
+      const midY = yOfProb(0.5);
+      const traceProbPath = () => {
+        ctx.beginPath();
+        probPts.forEach((p, idx) => {
+          const x = xOfSec(p.elapsed);
+          const y = yOfProb(p.up_mid);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+      };
+      const pFirstX = xOfSec(probPts[0].elapsed);
       const lastP = probPts[probPts.length - 1];
       const lx = xOfSec(lastP.elapsed);
       const ly = yOfProb(lastP.up_mid);
+
+      // Above 50% green baseline zone
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(padL, probTop, plotW, Math.max(0, midY - probTop));
+      ctx.clip();
+      const probUpGrad = ctx.createLinearGradient(0, probTop, 0, midY);
+      probUpGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.16)");
+      probUpGrad.addColorStop(1, "rgba(16, 185, 129, 0.01)");
+      traceProbPath();
+      ctx.lineTo(lx, midY);
+      ctx.lineTo(pFirstX, midY);
+      ctx.closePath();
+      ctx.fillStyle = probUpGrad;
+      ctx.fill();
+      traceProbPath();
+      ctx.strokeStyle = pal.up;
+      ctx.lineWidth = 2.1;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.restore();
+
+      // Below 50% red baseline zone
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(padL, midY, plotW, Math.max(0, probTop + probH - midY));
+      ctx.clip();
+      const probDnGrad = ctx.createLinearGradient(0, midY, 0, probTop + probH);
+      probDnGrad.addColorStop(0, "rgba(244, 63, 94, 0.01)");
+      probDnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.16)");
+      traceProbPath();
+      ctx.lineTo(lx, midY);
+      ctx.lineTo(pFirstX, midY);
+      ctx.closePath();
+      ctx.fillStyle = probDnGrad;
+      ctx.fill();
+      traceProbPath();
+      ctx.strokeStyle = pal.down;
+      ctx.lineWidth = 2.1;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.restore();
+
+      // Endpoint dot + clean text value colored by >=50% vs <50%
+      const probColor = lastP.up_mid >= 0.5 ? pal.up : pal.down;
       ctx.beginPath();
       ctx.arc(lx, ly, 3.6, 0, Math.PI * 2);
-      ctx.fillStyle = pal.up;
+      ctx.fillStyle = probColor;
       ctx.fill();
       ctx.strokeStyle = pal.cardBg;
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
       const tagText = `${(lastP.up_mid * 100).toFixed(1)}%`;
-      ctx.font = "600 11.5px 'JetBrains Mono', monospace";
-      ctx.fillStyle = pal.up;
+      ctx.font = isMobile ? "700 10.5px 'JetBrains Mono', monospace" : "700 11.5px 'JetBrains Mono', monospace";
+      ctx.fillStyle = probColor;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      const labelX = Math.min(w - padR - 44, lx + 8);
+      const labelX = Math.min(w - padR - 42, lx + 8);
       const labelY = Math.max(probTop + 8, Math.min(probTop + probH - 8, ly));
       ctx.fillText(tagText, labelX, labelY);
     }

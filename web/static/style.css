@@ -6396,15 +6396,33 @@ html, body {
 }
 
 @media (max-width: 780px) {
+  .chart-header-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .chart-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .chart-mode-toggle {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .chart-mode-toggle .mode-btn {
+    text-align: center;
+    padding: 5px 4px;
+  }
   .chart-hero-px {
-    font-size: 18.5px;
+    font-size: 19px;
   }
   .chart-delta-pill {
     font-size: 11px;
-    padding: 2px 7px;
+    padding: 2px 8px;
   }
   .chart-hero-sub-row {
-    font-size: 10.5px;
+    font-size: 11px;
   }
 }
 
