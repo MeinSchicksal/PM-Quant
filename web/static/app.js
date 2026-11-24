@@ -881,7 +881,7 @@ function updateOverview(live, hist) {
   const tdL = Number(hist.today_losses || 0);
   if ($("pace-today-pnl")) {
     $("pace-today-pnl").textContent = fmtUsd(tdPnl, true);
-    $("pace-today-pnl").className = `pace-val ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
+    $("pace-today-pnl").className = `tempo-val ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
   }
   if ($("pace-today-wl")) {
     $("pace-today-wl").textContent = `${tdW}胜 ${tdL}负`;
@@ -901,17 +901,17 @@ function updateOverview(live, hist) {
     : (elapsedH < 24);
   if ($("pace-hourly-pnl")) {
     $("pace-hourly-pnl").textContent = hasTrades ? `${fmtUsd(hrPnl, true)}` : "$0.00";
-    $("pace-hourly-pnl").className = `pace-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
+    $("pace-hourly-pnl").className = `tempo-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-hourly-note")) {
-    $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hrProjected ? "未满1时保守折算" : "实测每小时均收");
+    $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hrProjected ? "未满1时折算" : "实测时均");
   }
   if ($("pace-daily-pnl")) {
     $("pace-daily-pnl").textContent = hasTrades ? `${fmtUsd(dayPnl, true)}` : "$0.00";
-    $("pace-daily-pnl").className = `pace-val ${hasTrades ? (dayPnl > 1e-6 ? "up" : dayPnl < -1e-6 ? "down" : "") : ""}`;
+    $("pace-daily-pnl").className = `tempo-val ${hasTrades ? (dayPnl > 1e-6 ? "up" : dayPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-daily-note")) {
-    $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (dayProjected ? "按24小时折算" : "实测日均收益");
+    $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (dayProjected ? "按24h推算" : "实测日均");
   }
 
   const settledBadge = $("hero-settled-count");
@@ -953,16 +953,30 @@ function updateOverview(live, hist) {
     roiPill.style.borderColor = equityRoi >= 0 ? "var(--up-border)" : "var(--down-border)";
   }
 
-  // Gross Won vs Lost bar
+  // Gross Won vs Lost bar + Profit Factor
   const wonEl = $("hero-won");
   const lostEl = $("hero-lost");
   const winBarEl = $("hero-win-bar");
+  const pfEl = $("hero-pf-badge");
   if (wonEl) wonEl.textContent = fmtUsd(totalWon, true);
   if (lostEl) lostEl.textContent = `-$${totalLost.toFixed(2)}`;
   if (winBarEl) {
     const grossSum = totalWon + totalLost;
     const ratio = grossSum > 0 ? Math.min(98, Math.max(2, (totalWon / grossSum) * 100)) : 50;
     winBarEl.style.width = `${ratio.toFixed(1)}%`;
+  }
+  if (pfEl) {
+    if (totalWon > 1e-6 && totalLost <= 1e-6) {
+      pfEl.textContent = "PF ∞";
+      pfEl.className = "pf-inline up";
+    } else if (totalLost > 1e-6) {
+      const pf = totalWon / totalLost;
+      pfEl.textContent = `PF ${pf.toFixed(2)}`;
+      pfEl.className = `pf-inline ${pf >= 1.15 ? "up" : pf < 1.0 ? "down" : ""}`;
+    } else {
+      pfEl.textContent = "PF --";
+      pfEl.className = "pf-inline";
+    }
   }
 
   // Capital Matrix
@@ -976,14 +990,17 @@ function updateOverview(live, hist) {
     heroRoiEl.className = `cap-sub ${turnoverRoi >= 0 ? "up" : "down"}`;
   }
 
-  // Row 4: Execution Structure Attribution (Maker / Taker / Mode B)
+  // Lower Left: Execution Structure Attribution (Diverging Bar Leaderboard)
   const eb = hist.execution_breakdown || {};
-  const totalExecCount = ["maker", "taker", "mode_b"].reduce((acc, k) => acc + Number(eb[k]?.count || 0), 0);
+  const maxAbsExecPnl = Math.max(
+    0.5,
+    ...["maker", "taker", "mode_b"].map((k) => Math.abs(Number(eb[k]?.pnl || 0)))
+  );
   [
-    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr", "exec-maker-bar"],
-    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr", "exec-taker-bar"],
-    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr", "exec-modeb-bar"],
-  ].forEach(([key, cardId, cntId, pnlId, wrId, barId]) => {
+    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr", "exec-maker-pos", "exec-maker-neg"],
+    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr", "exec-taker-pos", "exec-taker-neg"],
+    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr", "exec-modeb-pos", "exec-modeb-neg"],
+  ].forEach(([key, cardId, cntId, pnlId, wrId, posId, negId]) => {
     const item = eb[key] || { count: 0, wins: 0, losses: 0, win_rate: 0, pnl: 0 };
     const c = Number(item.count || 0);
     const w = Number(item.wins || 0);
@@ -996,14 +1013,11 @@ function updateOverview(live, hist) {
       $(pnlId).className = `exec-card-pnl ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "") : ""}`;
     }
     if ($(wrId)) {
-      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% · ${w}胜${l}负` : "暂无成交";
+      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% · ${w}胜 ${l}负` : "暂无成交";
     }
-    const barEl = $(barId);
-    if (barEl) {
-      const sharePct = totalExecCount > 0 && c > 0 ? Math.max(8, (c / totalExecCount) * 100) : 0;
-      barEl.style.width = `${sharePct.toFixed(1)}%`;
-      barEl.className = `exec-bar-fill ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "flat") : ""}`;
-    }
+    const pct = c > 0 ? Math.min(100, Math.max(6, (Math.abs(p) / maxAbsExecPnl) * 100)) : 0;
+    if ($(posId)) $(posId).style.width = (c > 0 && p > 1e-6) ? `${pct.toFixed(1)}%` : "0%";
+    if ($(negId)) $(negId).style.width = (c > 0 && p < -1e-6) ? `${pct.toFixed(1)}%` : "0%";
     const card = $(cardId);
     if (card) {
       const isAlert = c >= 5 && wr < 45.0 && p < -1e-6;
@@ -1065,42 +1079,69 @@ function updateOverview(live, hist) {
     }
   }
 
-  // 4 Core Non-Redundant KPI Strip Cards
+  // Lower Right: Strategy Edge & Quality Diagnostics (2x2 Micro-Cards + Visual Meters)
   if ($("kpi-winrate")) $("kpi-winrate").textContent = `${winRate.toFixed(1)}%`;
   if ($("kpi-winloss")) $("kpi-winloss").textContent = `${wins} 胜 · ${losses} 负 · ${flats} 平`;
+  const wrBarEl = $("kpi-winrate-bar");
+  if (wrBarEl) {
+    wrBarEl.style.width = `${Math.min(100, Math.max(0, winRate)).toFixed(1)}%`;
+    wrBarEl.className = `q-meter-fill ${winRate >= 55 ? "up" : (wins + losses > 0 && winRate < 45) ? "down" : "accent"}`;
+  }
 
   const avgPnlEl = $("kpi-avg-pnl");
   if (avgPnlEl) {
     avgPnlEl.textContent = fmtUsd(avgPnl, true);
-    avgPnlEl.className = `kpi-box-val ${avgPnl > 0 ? "up" : avgPnl < 0 ? "down" : ""}`;
+    avgPnlEl.className = `q-val ${avgPnl > 0 ? "up" : avgPnl < 0 ? "down" : ""}`;
   }
   if ($("kpi-avg-split")) {
     $("kpi-avg-split").textContent = `均盈 +$${avgWin.toFixed(2)} · 均亏 -$${avgLoss.toFixed(2)}`;
   }
+  const evBarEl = $("kpi-ev-bar");
+  if (evBarEl) {
+    const evScale = Math.max(0.5, avgWin, avgLoss);
+    const evPct = tradedRounds > 0 ? Math.min(100, Math.max(8, (Math.abs(avgPnl) / evScale) * 100)) : 0;
+    evBarEl.style.width = `${evPct.toFixed(1)}%`;
+    evBarEl.className = `q-meter-fill ${avgPnl > 1e-6 ? "up" : avgPnl < -1e-6 ? "down" : "neutral"}`;
+  }
 
-  // Full-history Max Drawdown & Peak PnL (prefer server exact full-ledger stats)
+  // Full-history Max Drawdown (in Equity Curve Header) & Total Fills (in Engine Attribution Header)
   const rawRecords = Array.isArray(hist.records) ? hist.records : [];
   const normRecords = rawRecords.map(normalizeRecord).filter(Boolean);
   let totalFills = Number.isFinite(Number(hist.total_fills)) ? Number(hist.total_fills) : 0;
   if (!Number.isFinite(Number(hist.total_fills))) {
     totalFills = normRecords.reduce((acc, r) => acc + r.fills_count, 0);
   }
-  const peakPnl = Number.isFinite(Number(hist.peak_pnl)) ? Number(hist.peak_pnl) : Math.max(0, totalPnl);
   const maxDd = Number.isFinite(Number(hist.max_drawdown)) ? Math.max(0, Number(hist.max_drawdown)) : 0;
   const maxDdEl = $("kpi-max-dd");
   if (maxDdEl) {
     maxDdEl.textContent = maxDd > 1e-4 ? `-$${maxDd.toFixed(2)}` : "$0.00";
-    maxDdEl.className = `kpi-box-val ${maxDd > 1e-4 ? "down" : ""}`;
+    maxDdEl.className = maxDd > 1e-4 ? "down" : "";
   }
   if ($("kpi-total-fills")) {
-    $("kpi-total-fills").textContent = `峰值 ${fmtUsd(peakPnl, true)} · 共 ${totalFills} 笔成交`;
+    $("kpi-total-fills").textContent = `共 ${totalFills} 笔成交`;
   }
 
   const partRate = totalRounds > 0 ? (tradedRounds / totalRounds) * 100 : 0;
   const capTurnMultiple = initialCap > 0 ? turnover / initialCap : 0;
   if ($("kpi-participation-rate")) $("kpi-participation-rate").textContent = `${partRate.toFixed(1)}%`;
   if ($("kpi-participation-sub")) {
-    $("kpi-participation-sub").textContent = `${tradedRounds}/${totalRounds} 场成交 · 周转 ${capTurnMultiple.toFixed(2)}x`;
+    $("kpi-participation-sub").textContent = `成交 ${tradedRounds} / 监测 ${totalRounds} 场`;
+  }
+  const partBarEl = $("kpi-part-bar");
+  if (partBarEl) {
+    partBarEl.style.width = `${Math.min(100, Math.max(0, partRate)).toFixed(1)}%`;
+  }
+  if ($("kpi-turnover-mult")) {
+    $("kpi-turnover-mult").textContent = `${capTurnMultiple.toFixed(2)}x`;
+  }
+  if ($("kpi-turnover-note")) {
+    $("kpi-turnover-note").textContent = `下注 ${fmtUsd(turnover)} · 周转ROI ${fmtPct(turnoverRoi, true)}`;
+  }
+  const turnBarEl = $("kpi-turn-bar");
+  if (turnBarEl) {
+    const turnPct = capTurnMultiple > 0 ? Math.min(100, Math.max(8, (capTurnMultiple / Math.max(1, Math.ceil(capTurnMultiple))) * 100)) : 0;
+    turnBarEl.style.width = `${turnPct.toFixed(1)}%`;
+    turnBarEl.className = `q-meter-fill ${turnoverRoi > 0 ? "up" : turnoverRoi < 0 ? "down" : "neutral"}`;
   }
 
   // Render Cumulative Equity Curve
@@ -1278,6 +1319,41 @@ function drawEquityCurve(hist) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.stroke();
+
+  // Linear regression trendline overlay (visualizes whether equity is genuinely trending upward)
+  if (coords.length >= 4) {
+    const nT = coords.length;
+    let sumX = 0, sumY = 0;
+    for (let i = 0; i < nT; i++) { sumX += i; sumY += coords[i].cum_pnl; }
+    const meanX = sumX / nT;
+    const meanY = sumY / nT;
+    let num = 0, den = 0;
+    for (let i = 0; i < nT; i++) {
+      const dx = i - meanX;
+      num += dx * (coords[i].cum_pnl - meanY);
+      den += dx * dx;
+    }
+    if (den > 1e-9) {
+      const slope = num / den;
+      const intercept = meanY - slope * meanX;
+      const y0 = Math.max(padT, Math.min(padT + plotH, yOf(intercept)));
+      const y1 = Math.max(padT, Math.min(padT + plotH, yOf(intercept + slope * (nT - 1))));
+      const trendColor = slope > 0.05
+        ? (pal.isDark ? "rgba(52, 211, 153, 0.55)" : "rgba(5, 150, 105, 0.45)")
+        : slope < -0.05
+          ? (pal.isDark ? "rgba(251, 113, 133, 0.55)" : "rgba(225, 29, 72, 0.45)")
+          : (pal.isDark ? "rgba(251, 191, 36, 0.50)" : "rgba(180, 83, 9, 0.40)");
+      ctx.save();
+      ctx.strokeStyle = trendColor;
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(coords[0].x, y0);
+      ctx.lineTo(coords[nT - 1].x, y1);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
 
   // Terminal glowing endpoint dot
   const lastPt = coords[coords.length - 1];

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.57">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.58">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -215,173 +215,221 @@
         </div>
       </section>
 
-      <!-- Row 2: Golden-Ratio 2-Column Hero Grid (Left: Net PnL & Capital Scorecard | Right: Wide Equity Curve) -->
+      <!-- Row 2: Asymmetric Hero Grid (Left 38%: Money & Pace | Right 62%: Equity Trajectory & Timeline) -->
       <div class="overview-hero-grid">
-        <!-- Card 1: Net PnL & Capital Structure -->
-        <section class="panel pnl-hero-card" aria-label="累计已结算净收益">
+        <!-- Card 1: Net PnL, Profit Factor, Tempo Trio & Capital Footer -->
+        <section class="panel pnl-hero-card" aria-label="累计已结算净收益与收益速率">
           <div class="card-head">
-            <h2>累计已结算净收益</h2>
+            <h2>累计净收益</h2>
             <span class="trend-pill trend-pending" id="hero-trend-pill" title="基于已成交净值曲线线性回归斜率，判断整体收益是否稳步向上">待采样</span>
           </div>
 
           <div class="pnl-primary-block">
             <strong class="hero-num" id="hero-total-pnl">+$0.00</strong>
-            <span class="roi-pill" id="hero-equity-roi-pill">总回报率 <strong id="kpi-avail-sub">+0.00%</strong></span>
+            <span class="roi-pill" id="hero-equity-roi-pill">总回报 <strong id="kpi-avail-sub">+0.00%</strong></span>
           </div>
 
-          <!-- Visual Win vs Loss Gross Bar -->
+          <!-- Visual Win vs Loss Gross Bar + Profit Factor -->
           <div class="winloss-bar-block">
             <div class="winloss-labels">
-              <span>盈利累计 <strong class="up" id="hero-won">+$0.00</strong></span>
-              <span>亏损累计 <strong class="down" id="hero-lost">-$0.00</strong></span>
+              <span>盈利 <strong class="up" id="hero-won">+$0.00</strong></span>
+              <span class="pf-inline" id="hero-pf-badge" title="盈亏比 (Profit Factor) = 累计盈利 / 累计亏损，大于 1.0 表示正收益结构">PF --</span>
+              <span>亏损 <strong class="down" id="hero-lost">-$0.00</strong></span>
             </div>
             <div class="dual-progress-track" aria-hidden="true">
               <div class="dual-progress-fill up-fill" id="hero-win-bar" style="width: 50%"></div>
             </div>
           </div>
 
-          <div class="capital-grid">
-            <div class="cap-cell">
-              <span class="cap-label" title="账户初始本金 + 累计已结算净收益">当前账户净值</span>
-              <strong class="cap-val" id="kpi-available-cap">$100.00</strong>
+          <!-- Tempo Trio: Today / Hourly / Daily (All Earnings Velocity in One Place) -->
+          <div class="tempo-trio" aria-label="收益节奏">
+            <div class="tempo-item">
+              <span class="tempo-label">今日已结算</span>
+              <strong class="tempo-val" id="pace-today-pnl">$0.00</strong>
+              <small class="tempo-sub" id="pace-today-wl">0胜 0负</small>
             </div>
-            <div class="cap-cell">
-              <span class="cap-label" title="扣除当前轮次在途占用后的可用资金">可用自由资金</span>
-              <strong class="cap-val" id="hero-free-cap">$100.00</strong>
+            <div class="tempo-item">
+              <span class="tempo-label">每小时均收</span>
+              <strong class="tempo-val" id="pace-hourly-pnl">$0.00</strong>
+              <small class="tempo-sub" id="pace-hourly-note">等待成交</small>
             </div>
-            <div class="cap-cell">
-              <span class="cap-label" title="纸面模拟账户起始底仓总额">账户初始本金</span>
-              <strong class="cap-val" id="hero-initial-cap">$100.00</strong>
+            <div class="tempo-item">
+              <span class="tempo-label">每天均收</span>
+              <strong class="tempo-val" id="pace-daily-pnl">$0.00</strong>
+              <small class="tempo-sub" id="pace-daily-note">等待成交</small>
             </div>
-            <div class="cap-cell">
-              <span class="cap-label" title="已结算轮次中实际用于买入份额的总支出成本 / 周转回报率">累计下注 / 周转ROI</span>
-              <div class="cap-inline">
-                <strong class="cap-val" id="hero-turnover">$0.00</strong>
-                <small class="cap-sub" id="hero-roi">+0.00%</small>
-              </div>
+          </div>
+
+          <!-- Compact Capital Waterline Footer -->
+          <div class="capital-waterline" aria-label="资金水位">
+            <div class="cw-item" title="账户初始本金 + 累计已结算净收益">
+              <span class="cw-label">净值</span>
+              <strong class="cw-val" id="kpi-available-cap">$100.00</strong>
+            </div>
+            <span class="cw-dot" aria-hidden="true">·</span>
+            <div class="cw-item" title="扣除当前轮次在途占用后的可用资金">
+              <span class="cw-label">自由</span>
+              <strong class="cw-val" id="hero-free-cap">$100.00</strong>
+            </div>
+            <span class="cw-dot" aria-hidden="true">·</span>
+            <div class="cw-item" title="纸面模拟账户起始底仓总额">
+              <span class="cw-label">本金</span>
+              <strong class="cw-val" id="hero-initial-cap">$100.00</strong>
+            </div>
+            <div class="cw-item cw-turnover" title="已结算轮次累计买入总成本 / 周转回报率">
+              <span class="cw-label">下注</span>
+              <strong class="cw-val" id="hero-turnover">$0.00</strong>
+              <small class="cap-sub" id="hero-roi">+0.00%</small>
             </div>
           </div>
         </section>
 
-        <!-- Card 2: Wide Interactive Cumulative Equity Curve -->
+        <!-- Card 2: Tall Interactive Equity Trajectory with Timeline Header & Trendline -->
         <section class="panel equity-curve-card" aria-label="累计净值收益曲线">
-          <div class="card-head">
-            <div class="card-head-inline">
-              <h2>已结算轮次净值曲线</h2>
-              <span class="card-head-hint">悬停检视 · 点击直达复盘</span>
+          <div class="card-head curve-card-head">
+            <div class="curve-title-stack">
+              <div class="card-head-inline">
+                <h2>净值增长轨迹</h2>
+                <span class="exp-timeline-chip" title="本次实验启动时间与累计运行时长">
+                  <span class="exp-live-dot" aria-hidden="true"></span>
+                  <span id="pace-start-at">始于 --</span>
+                  <span class="exp-sep">·</span>
+                  <span>已运行 <strong id="pace-elapsed">--</strong></span>
+                </span>
+              </div>
+              <span class="card-head-hint">悬停检视单轮明细 · 点击直达复盘 · 虚线为线性趋势</span>
             </div>
-            <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
+            <div class="curve-extrema-pills">
+              <span class="badge-pill badge-peak" id="equity-peak-badge">峰值 +$0.00</span>
+              <span class="badge-pill badge-dd" id="kpi-max-dd-pill" title="历史最高净值到最低谷的最大回撤">回撤 <strong id="kpi-max-dd">$0.00</strong></span>
+            </div>
           </div>
           <div class="equity-canvas-wrap">
-            <canvas id="equity-curve-canvas" height="240"></canvas>
+            <canvas id="equity-curve-canvas" height="270"></canvas>
             <div class="chart-tooltip" id="equity-tooltip" hidden></div>
-          </div>
-          <div class="curve-pace-strip" id="curve-pace-strip" aria-label="实验运行时长与收益速率">
-            <div class="pace-cell">
-              <span class="pace-label">实验已运行</span>
-              <strong class="pace-val" id="pace-elapsed">--</strong>
-              <small class="pace-sub" id="pace-start-at">始于 --</small>
-            </div>
-            <div class="pace-cell">
-              <span class="pace-label">今日已结算</span>
-              <strong class="pace-val" id="pace-today-pnl">$0.00</strong>
-              <small class="pace-sub" id="pace-today-wl">0胜 0负</small>
-            </div>
-            <div class="pace-cell">
-              <span class="pace-label">每小时均收</span>
-              <strong class="pace-val" id="pace-hourly-pnl">$0.00</strong>
-              <small class="pace-sub" id="pace-hourly-note">等待成交</small>
-            </div>
-            <div class="pace-cell">
-              <span class="pace-label">每天平均收益</span>
-              <strong class="pace-val" id="pace-daily-pnl">$0.00</strong>
-              <small class="pace-sub" id="pace-daily-note">等待成交</small>
-            </div>
           </div>
         </section>
       </div>
 
-      <!-- Row 3: Unified 4-Column Operational KPI Bar -->
-      <section class="panel kpi-strip-panel" aria-label="核心运营指标">
-        <div class="kpi-strip">
-          <div class="kpi-box">
-            <span class="kpi-box-label">有效胜率 (剔除平局)</span>
-            <strong class="kpi-box-val" id="kpi-winrate">0.0%</strong>
-            <span class="kpi-box-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
-          </div>
-
-          <div class="kpi-box">
-            <span class="kpi-box-label">单场数学期望 (均值)</span>
-            <strong class="kpi-box-val" id="kpi-avg-pnl">$0.00</strong>
-            <span class="kpi-box-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
-          </div>
-
-          <div class="kpi-box">
-            <span class="kpi-box-label">最大回撤 (Max DD)</span>
-            <strong class="kpi-box-val" id="kpi-max-dd">$0.00</strong>
-            <span class="kpi-box-sub" id="kpi-total-fills">峰值 +$0.00 · 共 0 笔成交</span>
-          </div>
-
-          <div class="kpi-box">
-            <span class="kpi-box-label">窗口参与率与资金周转</span>
-            <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
-            <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- Row 4: Unified Execution Structure Attribution Panel -->
-      <section class="panel exec-breakdown-panel" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
-        <div class="exec-panel-head">
-          <div class="exec-panel-title-group">
-            <h2>策略执行结构归因</h2>
-            <span class="exec-panel-hint">按首仓触发通道拆分盈亏与胜率</span>
-          </div>
-        </div>
-        <div class="exec-breakdown-grid">
-          <div class="exec-col" id="exec-card-maker">
-            <div class="exec-card-head">
-              <span class="exec-card-title">模式 A · 首仓 Maker 挂单</span>
-              <span class="exec-card-count" id="exec-maker-cnt">0 场</span>
+      <!-- Row 3: Asymmetric Bento Lower Grid (Left 55%: Execution Engines | Right 45%: Strategy Edge Diagnostics) -->
+      <div class="overview-lower-grid">
+        <!-- Lower Left: Execution Structure Attribution (Diverging Bar Leaderboard) -->
+        <section class="panel exec-breakdown-panel" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
+          <div class="bento-panel-head">
+            <div>
+              <h2>赚钱引擎拆解</h2>
+              <span class="bento-panel-sub">按首仓触发通道归因，居中 0 轴直视盈亏贡献</span>
             </div>
-            <div class="exec-card-body">
+            <span class="badge-pill" id="kpi-total-fills">共 0 笔成交</span>
+          </div>
+
+          <div class="exec-list">
+            <div class="exec-row" id="exec-card-maker">
+              <div class="exec-row-meta">
+                <div class="exec-row-top">
+                  <span class="exec-row-name">模式 A · 首仓 Maker 挂单</span>
+                  <span class="exec-card-count" id="exec-maker-cnt">0 场</span>
+                </div>
+                <span class="exec-card-wr" id="exec-maker-wr">暂无成交</span>
+              </div>
+              <div class="exec-div-bar" aria-hidden="true">
+                <div class="exec-div-half left"><div class="exec-div-fill down" id="exec-maker-neg" style="width: 0%"></div></div>
+                <div class="exec-div-axis"></div>
+                <div class="exec-div-half right"><div class="exec-div-fill up" id="exec-maker-pos" style="width: 0%"></div></div>
+              </div>
               <strong class="exec-card-pnl" id="exec-maker-pnl">$0.00</strong>
-              <span class="exec-card-wr" id="exec-maker-wr">暂无成交</span>
             </div>
-            <div class="exec-bar-track" aria-hidden="true">
-              <div class="exec-bar-fill" id="exec-maker-bar" style="width: 0%"></div>
-            </div>
-          </div>
 
-          <div class="exec-col" id="exec-card-taker">
-            <div class="exec-card-head">
-              <span class="exec-card-title">模式 A · 首仓 Taker 吃单</span>
-              <span class="exec-card-count" id="exec-taker-cnt">0 场</span>
-            </div>
-            <div class="exec-card-body">
+            <div class="exec-row" id="exec-card-taker">
+              <div class="exec-row-meta">
+                <div class="exec-row-top">
+                  <span class="exec-row-name">模式 A · 首仓 Taker 吃单</span>
+                  <span class="exec-card-count" id="exec-taker-cnt">0 场</span>
+                </div>
+                <span class="exec-card-wr" id="exec-taker-wr">暂无成交</span>
+              </div>
+              <div class="exec-div-bar" aria-hidden="true">
+                <div class="exec-div-half left"><div class="exec-div-fill down" id="exec-taker-neg" style="width: 0%"></div></div>
+                <div class="exec-div-axis"></div>
+                <div class="exec-div-half right"><div class="exec-div-fill up" id="exec-taker-pos" style="width: 0%"></div></div>
+              </div>
               <strong class="exec-card-pnl" id="exec-taker-pnl">$0.00</strong>
-              <span class="exec-card-wr" id="exec-taker-wr">暂无成交</span>
             </div>
-            <div class="exec-bar-track" aria-hidden="true">
-              <div class="exec-bar-fill" id="exec-taker-bar" style="width: 0%"></div>
+
+            <div class="exec-row" id="exec-card-modeb">
+              <div class="exec-row-meta">
+                <div class="exec-row-top">
+                  <span class="exec-row-name">模式 B · 单边顺势折价</span>
+                  <span class="exec-card-count" id="exec-modeb-cnt">0 场</span>
+                </div>
+                <span class="exec-card-wr" id="exec-modeb-wr">暂无成交</span>
+              </div>
+              <div class="exec-div-bar" aria-hidden="true">
+                <div class="exec-div-half left"><div class="exec-div-fill down" id="exec-modeb-neg" style="width: 0%"></div></div>
+                <div class="exec-div-axis"></div>
+                <div class="exec-div-half right"><div class="exec-div-fill up" id="exec-modeb-pos" style="width: 0%"></div></div>
+              </div>
+              <strong class="exec-card-pnl" id="exec-modeb-pnl">$0.00</strong>
+            </div>
+          </div>
+        </section>
+
+        <!-- Lower Right: Strategy Edge & Quality Diagnostics (2x2 Micro-Cards with Visual Gauges) -->
+        <section class="panel quality-panel" aria-label="策略数学优势诊断">
+          <div class="bento-panel-head">
+            <div>
+              <h2>策略质量诊断</h2>
+              <span class="bento-panel-sub">胜率、数学期望与资金利用效率</span>
             </div>
           </div>
 
-          <div class="exec-col" id="exec-card-modeb">
-            <div class="exec-card-head">
-              <span class="exec-card-title">模式 B · 单边顺势折价</span>
-              <span class="exec-card-count" id="exec-modeb-cnt">0 场</span>
+          <div class="quality-grid">
+            <div class="q-cell">
+              <div class="q-top">
+                <span class="q-label">有效胜率</span>
+                <strong class="q-val" id="kpi-winrate">0.0%</strong>
+              </div>
+              <div class="q-meter" aria-hidden="true">
+                <div class="q-meter-fill up" id="kpi-winrate-bar" style="width: 0%"></div>
+              </div>
+              <span class="q-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
             </div>
-            <div class="exec-card-body">
-              <strong class="exec-card-pnl" id="exec-modeb-pnl">$0.00</strong>
-              <span class="exec-card-wr" id="exec-modeb-wr">暂无成交</span>
+
+            <div class="q-cell">
+              <div class="q-top">
+                <span class="q-label">单场数学期望</span>
+                <strong class="q-val" id="kpi-avg-pnl">$0.00</strong>
+              </div>
+              <div class="q-meter" aria-hidden="true">
+                <div class="q-meter-fill accent" id="kpi-ev-bar" style="width: 0%"></div>
+              </div>
+              <span class="q-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
             </div>
-            <div class="exec-bar-track" aria-hidden="true">
-              <div class="exec-bar-fill" id="exec-modeb-bar" style="width: 0%"></div>
+
+            <div class="q-cell">
+              <div class="q-top">
+                <span class="q-label">窗口参与率</span>
+                <strong class="q-val" id="kpi-participation-rate">0.0%</strong>
+              </div>
+              <div class="q-meter" aria-hidden="true">
+                <div class="q-meter-fill accent" id="kpi-part-bar" style="width: 0%"></div>
+              </div>
+              <span class="q-sub" id="kpi-participation-sub">0/0 场成交 · 周转 0.00x</span>
+            </div>
+
+            <div class="q-cell">
+              <div class="q-top">
+                <span class="q-label">资金周转倍数</span>
+                <strong class="q-val" id="kpi-turnover-mult">0.00x</strong>
+              </div>
+              <div class="q-meter" aria-hidden="true">
+                <div class="q-meter-fill neutral" id="kpi-turn-bar" style="width: 0%"></div>
+              </div>
+              <span class="q-sub" id="kpi-turnover-note">累计下注 $0.00 · 周转ROI +0.00%</span>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </section>
 
     <!-- ====================================================================
@@ -1019,6 +1067,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.57"></script>
+  <script src="/static/app.js?v=3.2.58"></script>
 </body>
 </html>
