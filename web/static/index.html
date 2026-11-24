@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.53">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.55">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -268,7 +268,7 @@
           <div class="card-head">
             <div class="card-head-inline">
               <h2>已结算轮次净值曲线</h2>
-              <span class="card-head-hint">悬停检视单场损益</span>
+              <span class="card-head-hint">悬停检视 · 点击直达复盘</span>
             </div>
             <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
           </div>
@@ -303,6 +303,40 @@
           <span class="kpi-box-label">窗口参与率与资金周转</span>
           <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
           <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
+        </div>
+      </section>
+
+      <!-- Row 4: Execution Structure Attribution Strip (Maker vs Taker vs Mode B) -->
+      <section class="exec-breakdown-strip" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
+        <div class="panel exec-card" id="exec-card-maker">
+          <div class="exec-card-head">
+            <span class="exec-card-title">模式 A · 首仓 Maker 挂单</span>
+            <span class="exec-card-count" id="exec-maker-cnt">0 场</span>
+          </div>
+          <div class="exec-card-body">
+            <strong class="exec-card-pnl" id="exec-maker-pnl">$0.00</strong>
+            <span class="exec-card-wr" id="exec-maker-wr">胜率 --</span>
+          </div>
+        </div>
+        <div class="panel exec-card" id="exec-card-taker">
+          <div class="exec-card-head">
+            <span class="exec-card-title">模式 A · 首仓 Taker 吃单</span>
+            <span class="exec-card-count" id="exec-taker-cnt">0 场</span>
+          </div>
+          <div class="exec-card-body">
+            <strong class="exec-card-pnl" id="exec-taker-pnl">$0.00</strong>
+            <span class="exec-card-wr" id="exec-taker-wr">胜率 --</span>
+          </div>
+        </div>
+        <div class="panel exec-card" id="exec-card-modeb">
+          <div class="exec-card-head">
+            <span class="exec-card-title">模式 B · 单边顺势折价</span>
+            <span class="exec-card-count" id="exec-modeb-cnt">0 场</span>
+          </div>
+          <div class="exec-card-body">
+            <strong class="exec-card-pnl" id="exec-modeb-pnl">$0.00</strong>
+            <span class="exec-card-wr" id="exec-modeb-wr">胜率 --</span>
+          </div>
         </div>
       </section>
     </section>
@@ -407,17 +441,13 @@
                 </div>
               </div>
 
-              <!-- De-duplicated Structured Readout Bar + Strategy Decision Arbitration Banner -->
+              <!-- De-duplicated Structured Readout Bar (removed values already shown in top strip & quote cards) -->
               <div class="chart-subbar">
                 <div class="chart-stats-row">
-                  <span class="chart-stat-item" hidden><strong id="chart-stat-open">$0.00</strong><strong id="chart-stat-spot">$0.00</strong></span>
-                  <span class="chart-stat-item">60s TWAP <strong class="poly-tag" id="chart-stat-poly-spot">$0.00</strong></span>
-                  <span class="stat-sep" aria-hidden="true"></span>
+                  <span class="chart-stat-item" hidden><strong id="chart-stat-open">$0.00</strong><strong id="chart-stat-spot">$0.00</strong><strong id="chart-stat-poly-spot">$0.00</strong><strong id="chart-stat-prob-up">--%</strong></span>
                   <span class="chart-stat-item">最高 <strong class="up" id="chart-stat-high">$0.00</strong></span>
                   <span class="chart-stat-item">最低 <strong class="down" id="chart-stat-low">$0.00</strong></span>
-                  <span class="chart-stat-item">振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
-                  <span class="stat-sep" aria-hidden="true"></span>
-                  <span class="chart-stat-item">UP 盘口隐含 <strong class="prob-tag-up" id="chart-stat-prob-up">--%</strong></span>
+                  <span class="chart-stat-item">本轮振幅 <strong id="chart-stat-range">0.0 bps</strong></span>
                 </div>
               </div>
             </div>
@@ -597,11 +627,13 @@
           </div>
           <div class="history-controls">
             <div class="filter-group" id="history-filter-group" role="group" aria-label="场次筛选">
-              <button type="button" class="filter-btn active" data-filter="all">全部场次</button>
-              <button type="button" class="filter-btn" data-filter="traded">仅已成交</button>
+              <button type="button" class="filter-btn active" data-filter="all">全部</button>
+              <button type="button" class="filter-btn" data-filter="traded">已成交</button>
               <button type="button" class="filter-btn" data-filter="win">盈利</button>
               <button type="button" class="filter-btn" data-filter="loss">亏损</button>
+              <button type="button" class="filter-btn" data-filter="mode_b">模式B</button>
             </div>
+            <button type="button" class="filter-today-btn" id="history-today-toggle" aria-pressed="false" title="仅筛选今日 (北京时间 UTC+8) 场次">仅看今日</button>
             <span class="history-count-stat" id="history-count">共 <strong>0</strong> 场</span>
           </div>
         </div>
@@ -944,6 +976,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.54"></script>
+  <script src="/static/app.js?v=3.2.55"></script>
 </body>
 </html>

@@ -1799,6 +1799,16 @@ class PaperRunner:
         }
         if unwind_proc > 1e-9:
             record["unwind_proceeds"] = round(unwind_proc, 4)
+        # 记录首仓触发模式（mode_b / maker / taker），供看板总览与场次表 0ms 零解压归因展示
+        if self.fills:
+            f0 = self.fills[0]
+            f0_reason = str(f0.get("reason") or "")
+            if "模式B" in f0_reason or "[MODE_B]" in f0_reason:
+                record["entry_mode"] = "mode_b"
+            elif str(f0.get("kind") or "").lower() == "maker":
+                record["entry_mode"] = "maker"
+            else:
+                record["entry_mode"] = "taker"
         # Independent Alpha benchmark metrics (Brier Score: lower is better)
         # Evaluates whether pricing model P* actually beats Polymarket mid, decoupled from execution.
         y_up = 1.0 if winner == "Up" else 0.0

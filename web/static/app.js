@@ -148,7 +148,9 @@ function getPalette() {
 
 let currentPage = "overview";
 let chartViewMode = "dual"; // "dual" | "price" | "prob"
-let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss"
+let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss" | "mode_b"
+let historyTodayOnly = false;
+let _lastNotifiedSettledSlug = null;
 let cachedLive = null;
 let cachedHistory = null;
 let cachedModalWindow = null;
@@ -291,6 +293,7 @@ function normalizeRecord(r) {
     winner: r.winner || "PENDING",
     winner_source: String(r.winner_source || ""),
     regime: String(r.regime || ""),
+    entry_mode: String(r.entry_mode || ""),
     open_px: Number(r.open_px || 0),
     close_px: Number(r.close_px || 0),
     up_shares: upShares,
@@ -877,6 +880,35 @@ function updateOverview(live, hist) {
     heroRoiEl.className = `cap-sub ${turnoverRoi >= 0 ? "up" : "down"}`;
   }
 
+  // Row 4: Execution Structure Attribution (Maker / Taker / Mode B)
+  const eb = hist.execution_breakdown || {};
+  [
+    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr"],
+    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr"],
+    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr"],
+  ].forEach(([key, cardId, cntId, pnlId, wrId]) => {
+    const item = eb[key] || { count: 0, wins: 0, losses: 0, win_rate: 0, pnl: 0 };
+    const c = Number(item.count || 0);
+    const w = Number(item.wins || 0);
+    const l = Number(item.losses || 0);
+    const wr = Number(item.win_rate || 0);
+    const p = Number(item.pnl || 0);
+    if ($(cntId)) $(cntId).textContent = `${c} 场`;
+    if ($(pnlId)) {
+      $(pnlId).textContent = c > 0 ? fmtUsd(p, true) : "$0.00";
+      $(pnlId).className = `exec-card-pnl ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "") : ""}`;
+    }
+    if ($(wrId)) {
+      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% (${w}胜${l}负)` : "暂无成交";
+    }
+    const card = $(cardId);
+    if (card) {
+      const isAlert = c >= 5 && wr < 45.0 && p < -1e-6;
+      card.classList.toggle("is-alert", isAlert);
+      card.title = isAlert ? "警示：该执行通道胜率偏低且持续亏损，建议核查信号源或参数" : "";
+    }
+  });
+
   // Active Round Card in Overview
   const liveStatusPill = $("overview-live-status");
   const nowSecOv = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
@@ -1200,11 +1232,10 @@ function initEquityCurveInteractions() {
   const tooltip = $("equity-tooltip");
   if (!canvas || !tooltip) return;
 
-  canvas.addEventListener("mousemove", (e) => {
-    if (!equityChartGeom || !equityChartGeom.pts?.length) return;
+  const findNearestIdx = (clientX) => {
+    if (!equityChartGeom || !equityChartGeom.pts?.length) return null;
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-
+    const mx = clientX - rect.left;
     let bestIdx = 0;
     let bestDist = Infinity;
     equityChartGeom.pts.forEach((p, idx) => {
@@ -1214,11 +1245,15 @@ function initEquityCurveInteractions() {
         bestIdx = idx;
       }
     });
+    return { bestIdx, rect };
+  };
 
+  const renderTooltipAt = (bestIdx, rect) => {
     equityHoverIdx = bestIdx;
     drawEquityCurve(cachedHistory);
 
     const pt = equityChartGeom.pts[bestIdx];
+    canvas.style.cursor = bestIdx > 0 && pt?.slug ? "pointer" : "default";
     if (bestIdx === 0) {
       tooltip.innerHTML = `
         <div class="tt-time">账户初始起点 (#0)</div>
@@ -1239,6 +1274,7 @@ function initEquityCurveInteractions() {
           <span>累计已结算净利</span>
           <b class="${cum > 0 ? "up" : cum < 0 ? "down" : ""}">${fmtUsd(cum, true)}</b>
         </div>
+        <div class="tt-hint">点击直达本轮复盘 ›</div>
       `;
     }
 
@@ -1248,10 +1284,17 @@ function initEquityCurveInteractions() {
     const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, pt.x - ttW / 2));
     tooltip.style.left = `${leftPos}px`;
     tooltip.style.top = `10px`;
+  };
+
+  canvas.addEventListener("mousemove", (e) => {
+    const hit = findNearestIdx(e.clientX);
+    if (!hit) return;
+    renderTooltipAt(hit.bestIdx, hit.rect);
   });
 
   canvas.addEventListener("mouseleave", () => {
     equityHoverIdx = null;
+    canvas.style.cursor = "default";
     tooltip.hidden = true;
     if (cachedHistory) drawEquityCurve(cachedHistory);
   });
@@ -1259,18 +1302,23 @@ function initEquityCurveInteractions() {
   canvas.addEventListener("touchstart", (e) => {
     const t = e.touches && e.touches[0];
     if (!t) return;
-    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+    const hit = findNearestIdx(t.clientX);
+    if (hit) renderTooltipAt(hit.bestIdx, hit.rect);
   }, { passive: true });
 
   canvas.addEventListener("touchmove", (e) => {
     const t = e.touches && e.touches[0];
     if (!t) return;
-    canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
+    const hit = findNearestIdx(t.clientX);
+    if (hit) renderTooltipAt(hit.bestIdx, hit.rect);
   }, { passive: true });
 
-  canvas.addEventListener("click", () => {
-    if (equityHoverIdx !== null && equityChartGeom?.pts?.[equityHoverIdx]?.slug) {
-      window.openRoundModal(equityChartGeom.pts[equityHoverIdx].slug);
+  canvas.addEventListener("click", (e) => {
+    const hit = findNearestIdx(e.clientX);
+    const idx = hit ? hit.bestIdx : equityHoverIdx;
+    const slug = idx !== null && idx > 0 ? equityChartGeom?.pts?.[idx]?.slug : null;
+    if (slug) {
+      openRoundModal(slug);
     }
   });
 }
@@ -1466,11 +1514,37 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
     ? `<td class="center">${fmtUsd(insVal)}</td>`
     : "";
 
+  const regimeShortMap = {
+    range_bound: "震荡",
+    normal_oscillation: "常规",
+    skewed_drift: "单边",
+    trending_up: "涨势",
+    trending_down: "跌势",
+    toxic: "毒流",
+    wide_spread: "宽差",
+    transitional: "过渡",
+    tail_freeze: "尾盘",
+  };
+  const modeMetaMap = {
+    mode_b: ["模式B", "tag-mode-b"],
+    taker: ["Taker", "tag-taker"],
+    maker: ["Maker", "tag-maker"],
+  };
+  const regLabel = regimeShortMap[r.regime] || "";
+  const modeMeta = r.traded && r.entry_mode ? modeMetaMap[r.entry_mode] : null;
+  const miniTags = [
+    regLabel ? `<span class="row-mini-tag tag-regime">${regLabel}</span>` : "",
+    modeMeta ? `<span class="row-mini-tag ${modeMeta[1]}">${modeMeta[0]}</span>` : "",
+  ].filter(Boolean).join("");
+
   return `
     <tr class="history-row-clickable" data-slug="${escapeHtml(r.slug)}" title="点击调阅 ${escapeHtml(winInfo.fullLabel)} 的 5 分钟行情与交易复盘">
       <td>
         <span class="time-cell-main">${escapeHtml(winInfo.range)}</span>
-        <small style="display:block;font-size:11.5px;color:var(--caption)">${escapeHtml(winInfo.dateStr)}</small>
+        <div class="time-cell-sub">
+          <small>${escapeHtml(winInfo.dateStr)}</small>
+          ${miniTags ? `<span class="row-tags">${miniTags}</span>` : ""}
+        </div>
       </td>
       <td class="center">${winnerBadge}${provNote}</td>
       <td class="center col-price-cell">
@@ -1503,17 +1577,29 @@ function renderHistoryTable(hist) {
   const rawRecords = Array.isArray(hist?.records) ? hist.records : [];
   const totalServerRounds = Number(hist?.records_total || hist?.total_rounds || rawRecords.length);
   const allRecords = rawRecords.map(normalizeRecord).filter(Boolean);
+  const todayDateStr = String(hist?.today_date || "");
+  const fmtBjtYmd = (ts) => {
+    if (!ts) return "";
+    const d = new Date((Number(ts) + 8 * 3600) * 1000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  };
   const filtered = allRecords.filter((r) => {
+    if (historyTodayOnly && todayDateStr) {
+      const rDay = fmtBjtYmd(r.end_ts || r.start_ts);
+      if (rDay !== todayDateStr) return false;
+    }
     if (historyFilterMode === "traded") return r.traded;
     if (historyFilterMode === "win") return r.pnl > 1e-6;
     if (historyFilterMode === "loss") return r.pnl < -1e-6;
+    if (historyFilterMode === "mode_b") return r.entry_mode === "mode_b";
     return true;
   });
 
   const visible = filtered.slice(0, _historyRenderCap);
   if (countEl) {
     const capNote = totalServerRounds > allRecords.length ? `（已载入近 ${allRecords.length} 场）` : "";
-    const statHtml = historyFilterMode === "all"
+    const isFiltered = historyFilterMode !== "all" || historyTodayOnly;
+    const statHtml = !isFiltered
       ? `共 <strong>${totalServerRounds}</strong> 场${capNote}`
       : `已筛选 <strong>${filtered.length}</strong> / ${allRecords.length} 场${capNote}`;
     setHtmlIfChanged(countEl, statHtml);
@@ -4036,6 +4122,22 @@ async function refreshHistoryInBackground(isManual = false, curSlug = null, curF
       throw new Error(`HTTP history=${histRes.status}`);
     }
     const hist = await histRes.json();
+    // 换轮结算即时 Toast 反馈（非首次加载时，最新已结算场次变化即刻播报）
+    const topSettled = Array.isArray(hist?.records) && hist.records.length > 0 ? hist.records[0] : null;
+    if (topSettled && topSettled.slug) {
+      if (_lastNotifiedSettledSlug && _lastNotifiedSettledSlug !== topSettled.slug) {
+        const nr = normalizeRecord(topSettled);
+        const wInfo = slugToWindowText(nr.slug, nr.start_ts, nr.end_ts);
+        const winLbl = String(nr.winner || "").toUpperCase() === "UP" ? "UP 胜出" : String(nr.winner || "").toUpperCase() === "DOWN" ? "DOWN 胜出" : "已结算";
+        if (nr.traded) {
+          const tone = nr.pnl > 1e-6 ? "up" : nr.pnl < -1e-6 ? "down" : "info";
+          showToast(`上轮 ${wInfo.range} 结算：${winLbl} · 净收益 ${fmtUsd(nr.pnl, true)}`, tone);
+        } else if (currentPage === "market") {
+          showToast(`上轮 ${wInfo.range} 结算：${winLbl} · 本轮空仓观望`, "info");
+        }
+      }
+      _lastNotifiedSettledSlug = topSettled.slug;
+    }
     cachedHistory = hist;
     _lastHistoryFetchMs = Date.now();
     if (curSlug !== null) _lastHistorySlug = curSlug;
@@ -4181,6 +4283,16 @@ function initInteractions() {
       filterGroup.querySelectorAll(".filter-btn").forEach((b) => {
         b.classList.toggle("active", b === btn);
       });
+      if (cachedHistory) renderHistoryTable(cachedHistory);
+    });
+  }
+
+  const todayToggleBtn = $("history-today-toggle");
+  if (todayToggleBtn) {
+    todayToggleBtn.addEventListener("click", () => {
+      historyTodayOnly = !historyTodayOnly;
+      todayToggleBtn.classList.toggle("active", historyTodayOnly);
+      todayToggleBtn.setAttribute("aria-pressed", String(historyTodayOnly));
       if (cachedHistory) renderHistoryTable(cachedHistory);
     });
   }

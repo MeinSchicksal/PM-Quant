@@ -280,6 +280,46 @@ _SUMMARY_AGG_CACHE = OrderedDict()
 _SUMMARY_AGG_LOCK = threading.Lock()
 _SUMMARY_AGG_MAX_ENTRIES = 8
 
+_ENTRY_MODE_CACHE = OrderedDict()
+_ENTRY_MODE_LOCK = threading.Lock()
+_ENTRY_MODE_MAX_ENTRIES = 2000
+
+
+def _infer_entry_mode(ledger_dir: Path, record: dict):
+    """返回该轮首仓触发模式（mode_b / maker / taker），旧记录通过缓存仅解压一次 detail 文件。"""
+    existing = record.get("entry_mode")
+    if existing in ("mode_b", "maker", "taker"):
+        return existing
+    slug = str(record.get("slug") or "")
+    if not slug:
+        return None
+    cache_key = (str(ledger_dir), slug)
+    with _ENTRY_MODE_LOCK:
+        if cache_key in _ENTRY_MODE_CACHE:
+            _ENTRY_MODE_CACHE.move_to_end(cache_key)
+            return _ENTRY_MODE_CACHE[cache_key]
+    mode = None
+    try:
+        detail = _read_detail(ledger_dir, slug)
+        fills = (detail or {}).get("fills") or []
+        if fills:
+            f0 = fills[0]
+            r0 = str(f0.get("reason") or "")
+            if "模式B" in r0 or "[MODE_B]" in r0:
+                mode = "mode_b"
+            elif str(f0.get("kind") or "").lower() == "maker":
+                mode = "maker"
+            else:
+                mode = "taker"
+    except Exception:
+        mode = None
+    with _ENTRY_MODE_LOCK:
+        _ENTRY_MODE_CACHE[cache_key] = mode
+        _ENTRY_MODE_CACHE.move_to_end(cache_key)
+        while len(_ENTRY_MODE_CACHE) > _ENTRY_MODE_MAX_ENTRIES:
+            _ENTRY_MODE_CACHE.popitem(last=False)
+    return mode
+
 _STATIC_CACHE = OrderedDict()
 _STATIC_CACHE_LOCK = threading.Lock()
 _STATIC_CACHE_MAX_ENTRIES = 16
@@ -1051,6 +1091,11 @@ class QuantHandler(BaseHTTPRequestHandler):
                 brier_count = 0
                 tz = _display_tz()
                 daily_map = {}
+                exec_breakdown = {
+                    "maker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                    "taker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                    "mode_b": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                }
 
                 if summary_file.exists():
                     try:
@@ -1091,6 +1136,17 @@ class QuantHandler(BaseHTTPRequestHandler):
                                         pass
 
                                 if is_traded:
+                                    e_mode = _infer_entry_mode(ledger_dir, w)
+                                    if e_mode:
+                                        w["entry_mode"] = e_mode
+                                        eb = exec_breakdown.get(e_mode)
+                                        if eb is not None:
+                                            eb["count"] += 1
+                                            eb["pnl"] = round(eb["pnl"] + pnl, 4)
+                                            if pnl > 1e-9:
+                                                eb["wins"] += 1
+                                            elif pnl < -1e-9:
+                                                eb["losses"] += 1
                                     count += 1
                                     total_pnl += pnl
                                     running_pnl += pnl
@@ -1213,6 +1269,16 @@ class QuantHandler(BaseHTTPRequestHandler):
                     "brier_count": brier_count,
                     "brier_model": round(brier_model_sum / brier_count, 5) if brier_count > 0 else None,
                     "brier_market": round(brier_market_sum / brier_count, 5) if brier_count > 0 else None,
+                    "execution_breakdown": {
+                        k: {
+                            "count": v["count"],
+                            "wins": v["wins"],
+                            "losses": v["losses"],
+                            "win_rate": round((v["wins"] / (v["wins"] + v["losses"])) * 100.0, 1) if (v["wins"] + v["losses"]) > 0 else 0.0,
+                            "pnl": round(v["pnl"], 4),
+                        }
+                        for k, v in exec_breakdown.items()
+                    },
                 }
                 with _SUMMARY_AGG_LOCK:
                     _SUMMARY_AGG_CACHE[agg_cache_key] = agg
@@ -1304,6 +1370,7 @@ class QuantHandler(BaseHTTPRequestHandler):
                 "brier_count": agg.get("brier_count", 0),
                 "brier_model": agg.get("brier_model"),
                 "brier_market": agg.get("brier_market"),
+                "execution_breakdown": agg.get("execution_breakdown") or {},
             }
             raw_bytes = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
             gz_bytes = gzip.compress(raw_bytes, compresslevel=5) if len(raw_bytes) > 1024 else None
