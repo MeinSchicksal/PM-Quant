@@ -6891,6 +6891,134 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   FULL-WORKSPACE LIVE LINKAGE: 300s PULSE RAIL, STANDING, SHIMMER & CROSS-SYNC
+   ========================================================================== */
+@keyframes cardShimmerSweep {
+  0% { transform: translateX(-110%) skewX(-18deg); opacity: 0; }
+  25% { opacity: 0.7; }
+  100% { transform: translateX(220%) skewX(-18deg); opacity: 0; }
+}
+
+#view-market .slim-round-bar {
+  position: relative;
+  overflow: hidden;
+  padding-bottom: 11px;
+}
+
+.srb-progress-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.5px;
+  background: var(--border-soft);
+}
+
+.srb-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #0ea5e9);
+  transition: width 0.5s linear, background 0.35s ease;
+}
+
+#market-round-bar.is-crunch .srb-progress-fill {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+#market-round-bar.is-crunch .srb-tau {
+  color: #d97706;
+}
+
+#market-round-bar.is-freeze .srb-progress-fill {
+  background: linear-gradient(90deg, #e11d48, #fb7185);
+}
+
+#market-round-bar.is-freeze .srb-tau {
+  color: var(--down);
+  animation: liveBeaconPulse 1.1s ease-in-out infinite;
+}
+
+.srb-standing-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.srb-standing-pill.up {
+  color: var(--up);
+  background: var(--up-soft);
+}
+
+.srb-standing-pill.down {
+  color: var(--down);
+  background: var(--down-soft);
+}
+
+/* Leading Tag & Interactive Focus / Scrub / Shimmer on Outcome Tickets */
+.panel.outcome-ticket {
+  cursor: pointer;
+}
+
+.ot-lead-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+
+.side-up .ot-lead-tag {
+  color: var(--up);
+  background: var(--up-soft);
+}
+
+.side-down .ot-lead-tag {
+  color: var(--down);
+  background: var(--down-soft);
+}
+
+.panel.outcome-ticket.is-leading:not(.is-holding) {
+  border-color: var(--border);
+}
+
+.panel.outcome-ticket.is-focused {
+  transform: translateY(-1px);
+  border-color: var(--accent) !important;
+  box-shadow: 0 8px 22px -12px rgba(37, 99, 235, 0.35), var(--shadow-sm);
+}
+
+.panel.outcome-ticket.is-scrubbing .ot-prob-val {
+  opacity: 0.82;
+  transition: opacity 0.12s ease;
+}
+
+.panel.outcome-ticket.is-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 55%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.48), transparent);
+  pointer-events: none;
+  animation: cardShimmerSweep 0.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+[data-theme="dark"] .panel.outcome-ticket.is-shimmer::after {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+}
+
+@media (max-width: 780px) {
+  .srb-standing-pill {
+    font-size: 10.5px;
+    padding: 1px 7px;
+  }
+}
+
 /* Live Queuing Order Card */
 .queue-live-card {
   display: flex;

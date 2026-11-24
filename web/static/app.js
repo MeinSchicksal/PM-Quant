@@ -1918,6 +1918,19 @@ function renderHistoryTable(hist) {
 // ============================================================================
 // VIEW 2: LIVE MARKET WORKSPACE (实时工作区)
 // ============================================================================
+let _prevPosUpShares = 0;
+let _prevPosDnShares = 0;
+let _prevPosSlug = "";
+let liveFocusSide = null; // "UP" | "DOWN" | null (card <-> chart highlight sync)
+
+function triggerCardShimmer(cardEl) {
+  if (!cardEl) return;
+  cardEl.classList.remove("is-shimmer");
+  void cardEl.offsetWidth;
+  cardEl.classList.add("is-shimmer");
+  setTimeout(() => cardEl.classList.remove("is-shimmer"), 900);
+}
+
 function updateMarket(live) {
   if (!live || live.status === "idle") return;
 
@@ -2012,9 +2025,44 @@ function updateMarket(live) {
   if ($("down-pos-cost")) $("down-pos-cost").textContent = fmtUsd(dnCost);
   if ($("card-down")) $("card-down").classList.toggle("is-holding", dnShares > 1e-6);
 
+  // Trigger subtle shimmer when new fill increases position on UP or DOWN card
+  const curSlugPos = live.slug || "";
+  if (curSlugPos !== _prevPosSlug) {
+    _prevPosSlug = curSlugPos;
+    _prevPosUpShares = upShares;
+    _prevPosDnShares = dnShares;
+  } else {
+    if (upShares > _prevPosUpShares + 1e-6) triggerCardShimmer($("card-up"));
+    if (dnShares > _prevPosDnShares + 1e-6) triggerCardShimmer($("card-down"));
+    _prevPosUpShares = upShares;
+    _prevPosDnShares = dnShares;
+  }
+
   const unwindPnl = Number(live.realized_unwind_pnl || 0);
   const upWinNet = upShares * 1.0 - totalCost + unwindPnl;
   const dnWinNet = dnShares * 1.0 - totalCost + unwindPnl;
+
+  // Live Battle Standing Sync: Highlight leading side & show live standing pill in top bar
+  const upLeadingNow = openPx > 0 ? (polySpot >= openPx) : true;
+  if ($("card-up")) $("card-up").classList.toggle("is-leading", openPx > 0 && upLeadingNow);
+  if ($("card-down")) $("card-down").classList.toggle("is-leading", openPx > 0 && !upLeadingNow);
+  if ($("up-lead-tag")) $("up-lead-tag").hidden = !(openPx > 0 && upLeadingNow);
+  if ($("down-lead-tag")) $("down-lead-tag").hidden = !(openPx > 0 && !upLeadingNow);
+
+  const standingPill = $("market-standing-pill");
+  if (standingPill) {
+    if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
+      const curNet = upLeadingNow ? upWinNet : dnWinNet;
+      const isWinNow = curNet >= 0;
+      standingPill.hidden = false;
+      standingPill.className = `srb-standing-pill ${isWinNow ? "up" : "down"}`;
+      standingPill.textContent = isWinNow
+        ? `目前领先 ${fmtUsd(curNet, true)}`
+        : `目前落后 ${fmtUsd(curNet, true)}`;
+    } else {
+      standingPill.hidden = true;
+    }
+  }
 
   const renderSideForecast = (elId, sideName, netVal) => {
     const el = $(elId);
@@ -2864,6 +2912,60 @@ function drawLivePriceChart(live) {
       ctx.stroke();
       ctx.restore();
 
+      // Overlay Live Holding Cost Lines & Working Order Queue Lines on Probability Pane
+      const drawProbLevelLine = (probPos, label, color, isDashed, emphasized) => {
+        if (!Number.isFinite(probPos) || probPos <= 0.01 || probPos >= 0.99) return;
+        const lyLine = yOfProb(probPos);
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = emphasized ? 2.0 : 1.25;
+        ctx.globalAlpha = emphasized ? 0.95 : 0.72;
+        if (isDashed) ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(padL, lyLine);
+        ctx.lineTo(w - padR, lyLine);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Clean pill label anchored on the left side of the line
+        ctx.font = isMobile ? "700 9.5px 'JetBrains Mono', monospace" : "700 10px 'JetBrains Mono', monospace";
+        const tw = ctx.measureText(label).width;
+        const bw = tw + 10;
+        const bh = 16;
+        const bx = padL + 6;
+        const by = Math.max(probTop + 2, Math.min(probTop + probH - bh - 2, lyLine - bh - 2));
+        ctx.globalAlpha = emphasized ? 0.96 : 0.86;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, 4);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, bx + 5, by + bh / 2 + 0.5);
+        ctx.restore();
+      };
+
+      const pUpPos = live.pos_up || {};
+      const pDnPos = live.pos_down || {};
+      if (Number(pUpPos.shares || 0) > 1e-6 && Number(pUpPos.avg_px || 0) > 0) {
+        const avgU = Number(pUpPos.avg_px);
+        drawProbLevelLine(avgU, `成本 看涨 $${avgU.toFixed(2)}`, pal.up, true, liveFocusSide === "UP");
+      }
+      if (Number(pDnPos.shares || 0) > 1e-6 && Number(pDnPos.avg_px || 0) > 0) {
+        const avgD = Number(pDnPos.avg_px);
+        drawProbLevelLine(1 - avgD, `成本 看跌 $${avgD.toFixed(2)}`, pal.down, true, liveFocusSide === "DOWN");
+      }
+      const wOrders = Array.isArray(live.working_orders) ? live.working_orders : [];
+      wOrders.forEach((wo) => {
+        const wSide = String(wo.side || "").toUpperCase();
+        const wPx = Number(wo.price ?? wo.px ?? 0);
+        if (wPx <= 0 || wPx >= 1) return;
+        const yProbPos = wSide === "UP" ? wPx : (1 - wPx);
+        const wLbl = wSide === "UP" ? `挂单排队 看涨 $${wPx.toFixed(2)}` : `挂单排队 看跌 $${wPx.toFixed(2)}`;
+        drawProbLevelLine(yProbPos, wLbl, "#2563eb", true, liveFocusSide === wSide);
+      });
+
       // Endpoint dot + horizontal guide to right axis (consistent with upper pane)
       const probColor = lastP.up_mid >= 0.5 ? pal.up : pal.down;
       ctx.save();
@@ -3097,6 +3199,43 @@ function initLiveChartInteractions() {
   const tooltip = $("chart-tooltip");
   if (!canvas || !tooltip) return;
 
+  const syncScrubPreview = (pt) => {
+    const upCard = $("card-up");
+    const dnCard = $("card-down");
+    if (!pt) {
+      if (upCard) upCard.classList.remove("is-scrubbing");
+      if (dnCard) dnCard.classList.remove("is-scrubbing");
+      if (cachedLive) updateMarket(cachedLive);
+      return;
+    }
+    const openPx = liveChartGeom?.openPx || pt.poly_spot;
+    const diffUsd = openPx > 0 ? (pt.poly_spot - openPx) : 0;
+    const diffPct = openPx > 0 ? (diffUsd / openPx) * 100 : 0;
+    const isUp = diffUsd > 0.005;
+    const isDn = diffUsd < -0.005;
+    if ($("chart-stat-poly-spot")) $("chart-stat-poly-spot").textContent = fmtUsd(pt.poly_spot);
+    const deltaPill = $("chart-delta-pill");
+    if (deltaPill) {
+      const arrow = isUp ? "▲" : isDn ? "▼" : "•";
+      const sign = isUp ? "+" : isDn ? "-" : "";
+      const pctSign = isUp ? "+" : "";
+      deltaPill.textContent = `${arrow} ${sign}$${Math.abs(diffUsd).toFixed(2)} (${pctSign}${diffPct.toFixed(3)}%)`;
+      deltaPill.className = `chart-delta-pill ${isUp ? "up" : isDn ? "down" : "flat"}`;
+    }
+    if (pt.up_mid !== null && Number.isFinite(pt.up_mid)) {
+      const uPct = `${(pt.up_mid * 100).toFixed(1)}%`;
+      const dPct = `${((1 - pt.up_mid) * 100).toFixed(1)}%`;
+      if ($("up-meta-implied")) $("up-meta-implied").textContent = uPct;
+      if ($("down-meta-implied")) $("down-meta-implied").textContent = dPct;
+      if ($("chart-stat-prob-up")) {
+        $("chart-stat-prob-up").textContent = uPct;
+        $("chart-stat-prob-up").className = pt.up_mid >= 0.5 ? "up" : "down";
+      }
+    }
+    if (upCard) upCard.classList.add("is-scrubbing");
+    if (dnCard) dnCard.classList.add("is-scrubbing");
+  };
+
   canvas.addEventListener("mousemove", (e) => {
     if (!liveChartGeom || !liveChartGeom.pts?.length) return;
     const rect = canvas.getBoundingClientRect();
@@ -3117,6 +3256,7 @@ function initLiveChartInteractions() {
       if (liveChartHoverIdx !== null) {
         liveChartHoverIdx = null;
         drawLivePriceChart(cachedLive);
+        syncScrubPreview(null);
       }
       tooltip.hidden = true;
       return;
@@ -3126,17 +3266,21 @@ function initLiveChartInteractions() {
     drawLivePriceChart(cachedLive);
 
     const pt = liveChartGeom.pts[bestIdx];
+    syncScrubPreview(pt);
+
     const openPx = liveChartGeom.openPx || pt.poly_spot;
-    const bps = openPx > 0 ? ((pt.poly_spot - openPx) / openPx) * 10000 : 0;
-    const sign = bps > 0 ? "+" : "";
+    const diffUsd = openPx > 0 ? (pt.poly_spot - openPx) : 0;
+    const sign = diffUsd > 0.005 ? "+" : diffUsd < -0.005 ? "-" : "";
+    const mm = String(Math.floor(pt.elapsed / 60)).padStart(2, "0");
+    const ss = String(Math.round(pt.elapsed % 60)).padStart(2, "0");
 
     tooltip.innerHTML = `
       <div class="tt-time" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-        <span>第 ${Math.round(pt.elapsed)} 秒切片</span>
-        <span class="${bps >= 0 ? "up" : "down"}">${sign}${bps.toFixed(1)} bps</span>
+        <span>${mm}:${ss} 切片</span>
+        <span class="${diffUsd >= 0 ? "up" : "down"}">${sign}$${Math.abs(diffUsd).toFixed(2)}</span>
       </div>
-      <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
-      <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
+      <div class="tt-row"><span>BTC 实时价格</span><b>${fmtUsd(pt.poly_spot)}</b></div>
+      <div class="tt-row"><span>看涨 / 看跌概率</span><b><span class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</span> / <span class="down">${pt.up_mid !== null ? ((1 - pt.up_mid) * 100).toFixed(1) + "%" : "--"}</span></b></div>
     `;
     tooltip.style.left = "0px";
     tooltip.hidden = false;
@@ -3153,6 +3297,7 @@ function initLiveChartInteractions() {
   canvas.addEventListener("mouseleave", () => {
     liveChartHoverIdx = null;
     tooltip.hidden = true;
+    syncScrubPreview(null);
     if (cachedLive) drawLivePriceChart(cachedLive);
   });
 
@@ -3167,6 +3312,36 @@ function initLiveChartInteractions() {
     if (!t) return;
     canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: t.clientX, clientY: t.clientY }));
   }, { passive: true });
+
+  canvas.addEventListener("touchend", () => {
+    liveChartHoverIdx = null;
+    tooltip.hidden = true;
+    syncScrubPreview(null);
+    if (cachedLive) drawLivePriceChart(cachedLive);
+  }, { passive: true });
+
+  // Bidirectional Card -> Chart Focus Sync (Hover or Tap UP/DOWN card highlights its cost/order lines)
+  document.querySelectorAll("[data-focus-side]").forEach((card) => {
+    const side = card.getAttribute("data-focus-side");
+    card.addEventListener("mouseenter", () => {
+      liveFocusSide = side;
+      card.classList.add("is-focused");
+      if (cachedLive) drawLivePriceChart(cachedLive);
+    });
+    card.addEventListener("mouseleave", () => {
+      if (liveFocusSide === side) liveFocusSide = null;
+      card.classList.remove("is-focused");
+      if (cachedLive) drawLivePriceChart(cachedLive);
+    });
+    card.addEventListener("click", () => {
+      const next = liveFocusSide === side ? null : side;
+      liveFocusSide = next;
+      document.querySelectorAll("[data-focus-side]").forEach((c) => {
+        c.classList.toggle("is-focused", c.getAttribute("data-focus-side") === next);
+      });
+      if (cachedLive) drawLivePriceChart(cachedLive);
+    });
+  });
 
   const toggleGroup = $("chart-mode-toggle");
   if (toggleGroup) {
@@ -4601,8 +4776,16 @@ function updateSmoothCountdowns() {
   if ($("overview-live-tau")) {
     setHtmlIfChanged($("overview-live-tau"), `${tau}<span class="val-unit">s</span>`);
   }
+  const elapsedPct = ((elapsed / 300) * 100).toFixed(1);
   const bar = $("overview-tau-bar");
-  if (bar) bar.style.width = `${((elapsed / 300) * 100).toFixed(1)}%`;
+  if (bar) bar.style.width = `${elapsedPct}%`;
+  const mBar = $("market-tau-bar");
+  if (mBar) mBar.style.width = `${elapsedPct}%`;
+  const roundBar = $("market-round-bar");
+  if (roundBar) {
+    roundBar.classList.toggle("is-crunch", tau <= 60 && tau > 15);
+    roundBar.classList.toggle("is-freeze", tau <= 15 && tau > 0);
+  }
 }
 
 let cachedSystemStatus = null;

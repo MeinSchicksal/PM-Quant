@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.76">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.77">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -391,13 +391,14 @@
          VIEW 2: LIVE MARKET WORKSPACE (实时工作区)
          ==================================================================== -->
     <section class="view-panel" id="view-market" hidden>
-      <!-- Ultra-Slim Round & Countdown Top Strip -->
-      <section class="panel market-command-strip slim-round-bar" aria-label="当前轮次与剩余时间">
+      <!-- Ultra-Slim Round & Countdown Top Strip with 300s Live Pulse Rail & Battle Standing -->
+      <section class="panel market-command-strip slim-round-bar" id="market-round-bar" aria-label="当前轮次与剩余时间">
         <div class="srb-left">
           <span class="srb-badge">本轮</span>
           <strong class="srb-range" id="market-time-range">--:-- ~ --:--</strong>
           <span class="srb-sep" aria-hidden="true">·</span>
           <span class="srb-tau-wrap">剩余 <strong class="srb-tau" id="market-tau">--</strong><span class="srb-unit">s</span></span>
+          <span class="srb-standing-pill" id="market-standing-pill" hidden></span>
           <span class="chart-sub-tag" id="chart-elapsed-badge" hidden>已运行 0s / 300s</span>
           <span hidden><strong id="market-spot">$0.00</strong><small id="market-open">基准 $0.00</small><strong id="market-bps">$0.00</strong><small id="market-bps-sub">+0.000%</small></span>
         </div>
@@ -408,6 +409,10 @@
             <span id="market-risk">流动性正常</span>
           </span>
           <button type="button" class="conn-help-btn mc-help-btn" id="regime-help-btn" title="查看微观风控与行情形态说明" aria-label="微观风控与形态说明">?</button>
+        </div>
+
+        <div class="srb-progress-rail" aria-hidden="true">
+          <div class="srb-progress-fill" id="market-tau-bar" style="width: 0%"></div>
         </div>
       </section>
 
@@ -469,11 +474,12 @@
           <!-- Focused Position & Expected PnL Cards (UP | DOWN) -->
           <div class="outcome-tickets-grid" aria-label="本轮多空持仓与预计收益">
             <!-- UP Ticket -->
-            <section class="panel outcome-ticket side-up" id="card-up">
+            <section class="panel outcome-ticket side-up" id="card-up" data-focus-side="UP">
               <div class="ot-head">
                 <div class="ot-title-group">
                   <span class="ot-pill up">UP</span>
                   <span class="ot-name">看涨</span>
+                  <span class="ot-lead-tag" id="up-lead-tag" hidden>领先</span>
                 </div>
                 <strong class="ot-prob-val up" id="up-meta-implied">--%</strong>
               </div>
@@ -502,11 +508,12 @@
             </section>
 
             <!-- DOWN Ticket -->
-            <section class="panel outcome-ticket side-down" id="card-down">
+            <section class="panel outcome-ticket side-down" id="card-down" data-focus-side="DOWN">
               <div class="ot-head">
                 <div class="ot-title-group">
                   <span class="ot-pill down">DOWN</span>
                   <span class="ot-name">看跌</span>
+                  <span class="ot-lead-tag" id="down-lead-tag" hidden>领先</span>
                 </div>
                 <strong class="ot-prob-val down" id="down-meta-implied">--%</strong>
               </div>
@@ -932,6 +939,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.76"></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.77"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>
