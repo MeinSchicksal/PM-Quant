@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.56">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.57">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -273,7 +273,7 @@
             <span class="badge-pill" id="equity-peak-badge">峰值 +$0.00</span>
           </div>
           <div class="equity-canvas-wrap">
-            <canvas id="equity-curve-canvas" height="220"></canvas>
+            <canvas id="equity-curve-canvas" height="240"></canvas>
             <div class="chart-tooltip" id="equity-tooltip" hidden></div>
           </div>
           <div class="curve-pace-strip" id="curve-pace-strip" aria-label="实验运行时长与收益速率">
@@ -301,63 +301,84 @@
         </section>
       </div>
 
-      <!-- Row 3: 4 Core Operational KPIs (Clean Single-Line Headers) -->
-      <section class="kpi-strip" aria-label="核心运营指标">
-        <div class="panel kpi-box">
-          <span class="kpi-box-label">有效胜率 (剔除平局)</span>
-          <strong class="kpi-box-val" id="kpi-winrate">0.0%</strong>
-          <span class="kpi-box-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
-        </div>
+      <!-- Row 3: Unified 4-Column Operational KPI Bar -->
+      <section class="panel kpi-strip-panel" aria-label="核心运营指标">
+        <div class="kpi-strip">
+          <div class="kpi-box">
+            <span class="kpi-box-label">有效胜率 (剔除平局)</span>
+            <strong class="kpi-box-val" id="kpi-winrate">0.0%</strong>
+            <span class="kpi-box-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
+          </div>
 
-        <div class="panel kpi-box">
-          <span class="kpi-box-label">单场数学期望 (均值)</span>
-          <strong class="kpi-box-val" id="kpi-avg-pnl">$0.00</strong>
-          <span class="kpi-box-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
-        </div>
+          <div class="kpi-box">
+            <span class="kpi-box-label">单场数学期望 (均值)</span>
+            <strong class="kpi-box-val" id="kpi-avg-pnl">$0.00</strong>
+            <span class="kpi-box-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
+          </div>
 
-        <div class="panel kpi-box">
-          <span class="kpi-box-label">最大回撤 (Max DD)</span>
-          <strong class="kpi-box-val" id="kpi-max-dd">$0.00</strong>
-          <span class="kpi-box-sub" id="kpi-total-fills">峰值 +$0.00 · 共 0 笔成交</span>
-        </div>
+          <div class="kpi-box">
+            <span class="kpi-box-label">最大回撤 (Max DD)</span>
+            <strong class="kpi-box-val" id="kpi-max-dd">$0.00</strong>
+            <span class="kpi-box-sub" id="kpi-total-fills">峰值 +$0.00 · 共 0 笔成交</span>
+          </div>
 
-        <div class="panel kpi-box">
-          <span class="kpi-box-label">窗口参与率与资金周转</span>
-          <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
-          <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
+          <div class="kpi-box">
+            <span class="kpi-box-label">窗口参与率与资金周转</span>
+            <strong class="kpi-box-val" id="kpi-participation-rate">0.0%</strong>
+            <span class="kpi-box-sub" id="kpi-participation-sub">成交 0 / 监测 0 场 · 周转 0.0x</span>
+          </div>
         </div>
       </section>
 
-      <!-- Row 4: Execution Structure Attribution Strip (Maker vs Taker vs Mode B) -->
-      <section class="exec-breakdown-strip" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
-        <div class="panel exec-card" id="exec-card-maker">
-          <div class="exec-card-head">
-            <span class="exec-card-title">模式 A · 首仓 Maker 挂单</span>
-            <span class="exec-card-count" id="exec-maker-cnt">0 场</span>
-          </div>
-          <div class="exec-card-body">
-            <strong class="exec-card-pnl" id="exec-maker-pnl">$0.00</strong>
-            <span class="exec-card-wr" id="exec-maker-wr">胜率 --</span>
+      <!-- Row 4: Unified Execution Structure Attribution Panel -->
+      <section class="panel exec-breakdown-panel" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
+        <div class="exec-panel-head">
+          <div class="exec-panel-title-group">
+            <h2>策略执行结构归因</h2>
+            <span class="exec-panel-hint">按首仓触发通道拆分盈亏与胜率</span>
           </div>
         </div>
-        <div class="panel exec-card" id="exec-card-taker">
-          <div class="exec-card-head">
-            <span class="exec-card-title">模式 A · 首仓 Taker 吃单</span>
-            <span class="exec-card-count" id="exec-taker-cnt">0 场</span>
+        <div class="exec-breakdown-grid">
+          <div class="exec-col" id="exec-card-maker">
+            <div class="exec-card-head">
+              <span class="exec-card-title">模式 A · 首仓 Maker 挂单</span>
+              <span class="exec-card-count" id="exec-maker-cnt">0 场</span>
+            </div>
+            <div class="exec-card-body">
+              <strong class="exec-card-pnl" id="exec-maker-pnl">$0.00</strong>
+              <span class="exec-card-wr" id="exec-maker-wr">暂无成交</span>
+            </div>
+            <div class="exec-bar-track" aria-hidden="true">
+              <div class="exec-bar-fill" id="exec-maker-bar" style="width: 0%"></div>
+            </div>
           </div>
-          <div class="exec-card-body">
-            <strong class="exec-card-pnl" id="exec-taker-pnl">$0.00</strong>
-            <span class="exec-card-wr" id="exec-taker-wr">胜率 --</span>
+
+          <div class="exec-col" id="exec-card-taker">
+            <div class="exec-card-head">
+              <span class="exec-card-title">模式 A · 首仓 Taker 吃单</span>
+              <span class="exec-card-count" id="exec-taker-cnt">0 场</span>
+            </div>
+            <div class="exec-card-body">
+              <strong class="exec-card-pnl" id="exec-taker-pnl">$0.00</strong>
+              <span class="exec-card-wr" id="exec-taker-wr">暂无成交</span>
+            </div>
+            <div class="exec-bar-track" aria-hidden="true">
+              <div class="exec-bar-fill" id="exec-taker-bar" style="width: 0%"></div>
+            </div>
           </div>
-        </div>
-        <div class="panel exec-card" id="exec-card-modeb">
-          <div class="exec-card-head">
-            <span class="exec-card-title">模式 B · 单边顺势折价</span>
-            <span class="exec-card-count" id="exec-modeb-cnt">0 场</span>
-          </div>
-          <div class="exec-card-body">
-            <strong class="exec-card-pnl" id="exec-modeb-pnl">$0.00</strong>
-            <span class="exec-card-wr" id="exec-modeb-wr">胜率 --</span>
+
+          <div class="exec-col" id="exec-card-modeb">
+            <div class="exec-card-head">
+              <span class="exec-card-title">模式 B · 单边顺势折价</span>
+              <span class="exec-card-count" id="exec-modeb-cnt">0 场</span>
+            </div>
+            <div class="exec-card-body">
+              <strong class="exec-card-pnl" id="exec-modeb-pnl">$0.00</strong>
+              <span class="exec-card-wr" id="exec-modeb-wr">暂无成交</span>
+            </div>
+            <div class="exec-bar-track" aria-hidden="true">
+              <div class="exec-bar-fill" id="exec-modeb-bar" style="width: 0%"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -998,6 +1019,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.56"></script>
+  <script src="/static/app.js?v=3.2.57"></script>
 </body>
 </html>

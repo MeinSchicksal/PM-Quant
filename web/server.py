@@ -1117,6 +1117,10 @@ class QuantHandler(BaseHTTPRequestHandler):
 
                                 total_rounds += 1
                                 st_ts = _num(w.get("start"))
+                                if st_ts <= 0:
+                                    _slug_s = str(w.get("slug") or "")
+                                    if _slug_s.rsplit("-", 1)[-1].isdigit():
+                                        st_ts = float(_slug_s.rsplit("-", 1)[-1])
                                 en_ts = _num(w.get("end")) or (st_ts + 300.0 if st_ts > 0 else 0.0)
                                 if st_ts > 0 and (first_start_ts <= 0 or st_ts < first_start_ts):
                                     first_start_ts = st_ts

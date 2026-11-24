@@ -829,8 +829,29 @@ function updateOverview(live, hist) {
   }
 
   // 实验运行时长、开始时间、今日战绩与时均/日均收益速率条（净值曲线底部）
-  const expStartTs = Number(hist.experiment_start_ts || (live && live.start) || 0);
-  const elapsedSec = Number(hist.elapsed_seconds || 0);
+  let expStartTs = Number(hist.experiment_start_ts || 0);
+  if (!(expStartTs > 0)) {
+    const curveArr = Array.isArray(hist.equity_curve) ? hist.equity_curve : [];
+    const recArr = Array.isArray(hist.records) ? hist.records : [];
+    const candidates = [];
+    curveArr.forEach((p) => { if (Number(p?.start) > 0) candidates.push(Number(p.start)); });
+    recArr.forEach((r) => {
+      const s = Number(r?.start || 0);
+      if (s > 0) candidates.push(s);
+      else if (typeof r?.slug === "string") {
+        const tail = r.slug.split("-").pop();
+        if (/^\d{9,}$/.test(tail)) candidates.push(Number(tail));
+      }
+    });
+    if (candidates.length > 0) expStartTs = Math.min(...candidates);
+    else if (live && Number(live.start) > 0) expStartTs = Number(live.start);
+  }
+  const nowSecForPace = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const isCurrentBatch = !hist.batch_id || !hist.current_batch || hist.batch_id === hist.current_batch;
+  let elapsedSec = Number(hist.elapsed_seconds || 0);
+  if (expStartTs > 0 && isCurrentBatch) {
+    elapsedSec = Math.max(elapsedSec, Math.max(0, nowSecForPace - expStartTs));
+  }
   const fmtDuration = (sec) => {
     const s = Math.max(0, Math.floor(sec));
     const days = Math.floor(s / 86400);
@@ -865,22 +886,32 @@ function updateOverview(live, hist) {
   if ($("pace-today-wl")) {
     $("pace-today-wl").textContent = `${tdW}胜 ${tdL}负`;
   }
-  const hrPnl = Number(hist.hourly_pnl || 0);
-  const dayPnl = Number(hist.daily_pnl || 0);
   const hasTrades = Number(hist.traded_rounds || hist.count || 0) > 0;
+  const elapsedH = elapsedSec / 3600;
+  const hasServerRates = hist.hourly_pnl !== undefined && hist.hourly_pnl !== null;
+  const hrPnl = hasServerRates
+    ? Number(hist.hourly_pnl || 0)
+    : (hasTrades && expStartTs > 0 ? totalPnl / Math.max(1, elapsedH) : 0);
+  const hrProjected = hasServerRates ? Boolean(hist.hourly_projected) : (elapsedH < 1);
+  const dayPnl = (hist.daily_pnl !== undefined && hist.daily_pnl !== null)
+    ? Number(hist.daily_pnl || 0)
+    : (hasTrades && expStartTs > 0 ? (elapsedH >= 24 ? totalPnl / (elapsedH / 24) : hrPnl * 24) : 0);
+  const dayProjected = (hist.daily_projected !== undefined && hist.daily_projected !== null)
+    ? Boolean(hist.daily_projected)
+    : (elapsedH < 24);
   if ($("pace-hourly-pnl")) {
     $("pace-hourly-pnl").textContent = hasTrades ? `${fmtUsd(hrPnl, true)}` : "$0.00";
     $("pace-hourly-pnl").className = `pace-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-hourly-note")) {
-    $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hist.hourly_projected ? "未满1时保守折算" : "实测每小时均收");
+    $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hrProjected ? "未满1时保守折算" : "实测每小时均收");
   }
   if ($("pace-daily-pnl")) {
     $("pace-daily-pnl").textContent = hasTrades ? `${fmtUsd(dayPnl, true)}` : "$0.00";
     $("pace-daily-pnl").className = `pace-val ${hasTrades ? (dayPnl > 1e-6 ? "up" : dayPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-daily-note")) {
-    $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (hist.daily_projected ? "按24小时折算" : "实测日均收益");
+    $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (dayProjected ? "按24小时折算" : "实测日均收益");
   }
 
   const settledBadge = $("hero-settled-count");
@@ -947,11 +978,12 @@ function updateOverview(live, hist) {
 
   // Row 4: Execution Structure Attribution (Maker / Taker / Mode B)
   const eb = hist.execution_breakdown || {};
+  const totalExecCount = ["maker", "taker", "mode_b"].reduce((acc, k) => acc + Number(eb[k]?.count || 0), 0);
   [
-    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr"],
-    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr"],
-    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr"],
-  ].forEach(([key, cardId, cntId, pnlId, wrId]) => {
+    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr", "exec-maker-bar"],
+    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr", "exec-taker-bar"],
+    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr", "exec-modeb-bar"],
+  ].forEach(([key, cardId, cntId, pnlId, wrId, barId]) => {
     const item = eb[key] || { count: 0, wins: 0, losses: 0, win_rate: 0, pnl: 0 };
     const c = Number(item.count || 0);
     const w = Number(item.wins || 0);
@@ -964,7 +996,13 @@ function updateOverview(live, hist) {
       $(pnlId).className = `exec-card-pnl ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "") : ""}`;
     }
     if ($(wrId)) {
-      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% (${w}胜${l}负)` : "暂无成交";
+      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% · ${w}胜${l}负` : "暂无成交";
+    }
+    const barEl = $(barId);
+    if (barEl) {
+      const sharePct = totalExecCount > 0 && c > 0 ? Math.max(8, (c / totalExecCount) * 100) : 0;
+      barEl.style.width = `${sharePct.toFixed(1)}%`;
+      barEl.className = `exec-bar-fill ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "flat") : ""}`;
     }
     const card = $(cardId);
     if (card) {
