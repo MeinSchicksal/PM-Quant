@@ -3013,19 +3013,22 @@ function drawLivePriceChart(live) {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Clean pill label anchored on the left side of the line
-        ctx.font = isMobile ? "700 9.5px 'JetBrains Mono', monospace" : "700 10px 'JetBrains Mono', monospace";
+        // Clean translucent glass badge anchored on the left side of the line (never obscures curve)
+        ctx.font = isMobile ? "600 9.5px 'JetBrains Mono', monospace" : "600 10px 'JetBrains Mono', monospace";
         const tw = ctx.measureText(label).width;
         const bw = tw + 10;
         const bh = 16;
         const bx = padL + 6;
-        const by = Math.max(probTop + 2, Math.min(probTop + probH - bh - 2, lyLine - bh - 2));
-        ctx.globalAlpha = emphasized ? 0.96 : 0.86;
-        ctx.fillStyle = color;
+        const by = Math.max(probTop + 2, Math.min(probTop + probH - bh - 2, lyLine - bh - 3));
+        ctx.globalAlpha = emphasized ? 0.96 : 0.88;
+        ctx.fillStyle = pal.isDark ? "rgba(15, 23, 42, 0.82)" : "rgba(255, 255, 255, 0.88)";
         ctx.beginPath();
         ctx.roundRect(bx, by, bw, bh, 4);
         ctx.fill();
-        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = color;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(label, bx + 5, by + bh / 2 + 0.5);
@@ -3036,11 +3039,11 @@ function drawLivePriceChart(live) {
       const pDnPos = live.pos_down || {};
       if (Number(pUpPos.shares || 0) > 1e-6 && Number(pUpPos.avg_px || 0) > 0) {
         const avgU = Number(pUpPos.avg_px);
-        drawProbLevelLine(avgU, `成本 看涨 $${avgU.toFixed(2)}`, pal.up, true, liveFocusSide === "UP");
+        drawProbLevelLine(avgU, `成本 $${avgU.toFixed(2)}`, pal.up, true, liveFocusSide === "UP");
       }
       if (Number(pDnPos.shares || 0) > 1e-6 && Number(pDnPos.avg_px || 0) > 0) {
         const avgD = Number(pDnPos.avg_px);
-        drawProbLevelLine(1 - avgD, `成本 看跌 $${avgD.toFixed(2)}`, pal.down, true, liveFocusSide === "DOWN");
+        drawProbLevelLine(1 - avgD, `成本 $${avgD.toFixed(2)}`, pal.down, true, liveFocusSide === "DOWN");
       }
       const wOrders = Array.isArray(live.working_orders) ? live.working_orders : [];
       wOrders.forEach((wo) => {
@@ -3048,7 +3051,7 @@ function drawLivePriceChart(live) {
         const wPx = Number(wo.price ?? wo.px ?? 0);
         if (wPx <= 0 || wPx >= 1) return;
         const yProbPos = wSide === "UP" ? wPx : (1 - wPx);
-        const wLbl = wSide === "UP" ? `挂单排队 看涨 $${wPx.toFixed(2)}` : `挂单排队 看跌 $${wPx.toFixed(2)}`;
+        const wLbl = `挂单 $${wPx.toFixed(2)}`;
         drawProbLevelLine(yProbPos, wLbl, "#2563eb", true, liveFocusSide === wSide);
       });
 
@@ -4776,7 +4779,7 @@ function renderDecisionBulletin(live) {
       const qAhead = Number(wo.queue_ahead ?? 0);
       lTag = "排队接货中";
       lCls = "is-quote";
-      narrativeText = `已在 $${wPx.toFixed(2)} 挂单买【${wSide}】，${qAhead <= 1 ? "已排到队首，随时可能成交" : `前方还剩 ${qAhead.toFixed(1)} 股排队`}`;
+      narrativeText = `已在 $${wPx.toFixed(2)} 挂单买${wSide}，${qAhead <= 1 ? "已排到队首，随时可能成交" : `前方还剩 ${qAhead.toFixed(1)} 股排队`}`;
     } else if (hasPosNow) {
       const heldUp = uSh >= dSh;
       const heldCn = heldUp ? "看涨" : "看跌";
@@ -4785,19 +4788,19 @@ function renderDecisionBulletin(live) {
       if (tauS > 0 && tauS <= 15) {
         lTag = "尾盘冲刺";
         lCls = padUsd >= 0 ? "is-buy" : "is-warn";
-        narrativeText = `最后 ${Math.round(tauS)} 秒决胜！持有 ${fmtShares(heldSh)} 股【${heldCn}】，当前${padUsd >= 0 ? `领先 +$${Math.abs(padUsd).toFixed(2)}` : `落后 -$${Math.abs(padUsd).toFixed(2)}`}，静待开奖`;
+        narrativeText = `最后 ${Math.round(tauS)} 秒决胜，持有 ${fmtShares(heldSh)} 股${heldCn}，当前${padUsd >= 0 ? `领先 +$${Math.abs(padUsd).toFixed(2)}` : `落后 -$${Math.abs(padUsd).toFixed(2)}`}，静待结算`;
       } else if (Math.abs(padUsd) < 12) {
         lTag = "贴线拉锯";
         lCls = "is-warn";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，当前紧贴开盘线拉锯（${padUsd >= 0 ? "+" : "-"}$${Math.abs(padUsd).toFixed(2)}），风控持续盯守`;
+        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，紧贴开盘线拉锯（${padUsd >= 0 ? "+" : "-"}$${Math.abs(padUsd).toFixed(2)}），风控持续盯守`;
       } else if (padUsd >= 12) {
         lTag = "持仓顺风";
         lCls = "is-buy";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，已拉开 +$${padUsd.toFixed(2)} 安全垫，目前走势占优，稳拿等结算`;
+        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，已拉开 +$${padUsd.toFixed(2)} 安全垫，走势占优，稳拿等结算`;
       } else {
         lTag = "暂时落后";
         lCls = "is-warn";
-        narrativeText = `持有 ${fmtShares(heldSh)} 股【${heldCn}】，目前暂时落后 -$${Math.abs(padUsd).toFixed(2)}，距结算还有 ${Math.round(tauS)} 秒`;
+        narrativeText = `持有 ${fmtShares(heldSh)} 股${heldCn}，暂时落后 -$${Math.abs(padUsd).toFixed(2)}，距结算还有 ${Math.round(tauS)} 秒`;
       }
     } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(curRawReason)) {
       lTag = "急震避险";
@@ -4822,8 +4825,8 @@ function renderDecisionBulletin(live) {
     const hbSec = Math.max(0, Math.round((Date.now() / 1000) - nowRef));
     const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
     if (freshEl) {
-      freshEl.textContent = hbSec <= 5 ? `${timeClock} 实时` : `${hbSec}s前`;
-      freshEl.className = `console-fresh-time ${hbSec <= 5 ? "is-live" : ""}`;
+      freshEl.textContent = hbSec <= 5 ? timeClock : `${hbSec}s前`;
+      freshEl.className = "console-fresh-time";
     }
   }
 

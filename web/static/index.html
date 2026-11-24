@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.79">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.80">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -463,17 +463,21 @@
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
             </div>
 
-            <!-- Integrated AI Co-Pilot Live Narration Footer -->
+            <!-- Integrated AI Co-Pilot Live Narration Footer (Sleek 2-Row Clean Layout) -->
             <div class="chart-verdict-bar copilot-narration-bar" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
-              <div class="cvb-left">
-                <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
-                <strong class="cvb-state" id="bulletin-status-badge">正在观察</strong>
-                <span class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，寻找划算的买入时机...</span>
+              <div class="cvb-top-row">
+                <div class="cvb-state-group">
+                  <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
+                  <strong class="cvb-state" id="bulletin-status-badge">正在观察</strong>
+                </div>
+                <div class="cvb-meta-group">
+                  <span class="console-fresh-time" id="console-fresh-time">--:--:--</span>
+                  <span class="cvb-meta-sep" aria-hidden="true">·</span>
+                  <span class="cvb-hist-text" id="bulletin-count">历史 0</span>
+                  <svg class="cvb-chev" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 5l5 5-5 5"/></svg>
+                </div>
               </div>
-              <div class="cvb-right">
-                <span class="console-fresh-time" id="console-fresh-time">--:--:--</span>
-                <span class="cvb-hist-link" id="bulletin-count">历史 0</span>
-              </div>
+              <p class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，寻找划算的买入时机...</p>
             </div>
           </section>
 
@@ -947,6 +951,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.78"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.80"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>
