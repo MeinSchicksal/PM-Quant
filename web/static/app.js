@@ -2061,21 +2061,6 @@ function updateMarket(live) {
   if ($("up-lead-tag")) $("up-lead-tag").hidden = !(openPx > 0 && upLeadingNow);
   if ($("down-lead-tag")) $("down-lead-tag").hidden = !(openPx > 0 && !upLeadingNow);
 
-  const standingPill = $("market-standing-pill");
-  if (standingPill) {
-    if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
-      const curNet = upLeadingNow ? upWinNet : dnWinNet;
-      const isWinNow = curNet >= 0;
-      standingPill.hidden = false;
-      standingPill.className = `srb-standing-pill ${isWinNow ? "up" : "down"}`;
-      standingPill.textContent = isWinNow
-        ? `目前领先 ${fmtUsd(curNet, true)}`
-        : `目前落后 ${fmtUsd(curNet, true)}`;
-    } else {
-      standingPill.hidden = true;
-    }
-  }
-
   const renderSideForecast = (elId, sideName, netVal) => {
     const el = $(elId);
     if (!el) return;
@@ -2111,13 +2096,13 @@ function updateMarket(live) {
     if (headlineEl && subEl) {
       if (upShares > 1e-6 && dnShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill up">看涨 ${fmtShares(upShares)}股</span><span class="bhv-pos-pill down">看跌 ${fmtShares(dnShares)}股</span>`;
-        subEl.textContent = `总投入 ${fmtUsd(totalCost)}`;
+        subEl.innerHTML = `<span class="bhv-sub-k">总投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(totalCost))}</strong>`;
       } else if (upShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill up">已买看涨</span><span class="bhv-pos-qty">${fmtShares(upShares)} 股</span>`;
-        subEl.textContent = `均价 ${fmtPriceCents(posUp.avg_px)} · 投入 ${fmtUsd(upCost)}`;
+        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posUp.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(upCost))}</strong>`;
       } else {
         headlineEl.innerHTML = `<span class="bhv-pos-pill down">已买看跌</span><span class="bhv-pos-qty">${fmtShares(dnShares)} 股</span>`;
-        subEl.textContent = `均价 ${fmtPriceCents(posDn.avg_px)} · 投入 ${fmtUsd(dnCost)}`;
+        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posDn.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(dnCost))}</strong>`;
       }
     }
   }
