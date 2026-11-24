@@ -1975,28 +1975,40 @@ function updateMarket(live) {
   const riskText = $("market-risk");
   if (riskPill && riskText) {
     const regKey = live.regime || live.micro_regime || "normal_oscillation";
-    const regLabel = REGIME_META[regKey]?.label?.split(" ")[0] || "流动性正常";
+    const plainRegimeMap = {
+      normal_oscillation: "平稳震荡",
+      mean_reverting: "来回震荡",
+      transitional_drift: "温和单边",
+      strong_bull: "强势上涨",
+      strong_bear: "强势下跌",
+      strong_trend: "强势单边",
+      wide_spread: "价差偏宽",
+      toxic: "剧烈波动",
+      toxic_shock: "剧烈波动",
+      late_window: "尾盘阶段",
+    };
+    const regLabel = plainRegimeMap[regKey] || (REGIME_META[regKey]?.label?.split(" ")[0] || "平稳行情");
     if (hbAge > 60) {
       riskPill.className = "status-pill status-critical";
-      riskText.textContent = "交易引擎离线";
+      riskText.textContent = "引擎离线";
     } else if (apiGuard.paused) {
       riskPill.className = "status-pill status-critical";
-      riskText.textContent = "接口变更 · 安全暂停";
+      riskText.textContent = "接口异常暂停";
     } else if (cb.active || cb.tripped) {
       riskPill.className = "status-pill status-critical";
       riskText.textContent = translateCircuitBreakerReason(cb.reason);
     } else if (hbAge > 15) {
       riskPill.className = "status-pill status-warn";
-      riskText.textContent = `${regLabel} · 心跳延迟`;
+      riskText.textContent = "心跳延迟";
     } else if (live.spot_stale || live.poly_spot_stale) {
       riskPill.className = "status-pill status-warn";
-      riskText.textContent = `${regLabel} · 单源滞后`;
+      riskText.textContent = "行情滞后";
     } else if (regKey === "toxic" || regKey === "toxic_shock") {
       riskPill.className = "status-pill status-warn";
-      riskText.textContent = `${regLabel} · 防护撤单`;
+      riskText.textContent = "剧烈波动避险";
     } else {
       riskPill.className = "status-pill status-ready";
-      riskText.textContent = `${regLabel} · 双源同步`;
+      riskText.textContent = regLabel;
     }
   }
 

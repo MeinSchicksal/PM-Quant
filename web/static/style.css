@@ -7052,8 +7052,10 @@ html, body {
 }
 
 .stage-arrow {
-  font-size: 11px;
-  color: var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--caption);
+  opacity: 0.72;
   user-select: none;
 }
 
@@ -8011,23 +8013,18 @@ html, body {
 @media (max-width: 780px) {
   .chart-signal-strip {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 6px 8px;
+    justify-content: flex-start;
+    gap: 8px;
     padding: 10px 14px;
   }
   .chart-signal-strip .css-pill {
-    order: 1;
-  }
-  .chart-signal-strip .css-clock {
-    order: 2;
-    margin-left: auto;
-    font-size: 10.5px;
+    order: initial;
   }
   .chart-signal-strip .css-msg {
-    order: 3;
-    flex: 1 0 100%;
+    order: initial;
+    flex: 1;
     font-size: 12.5px;
     white-space: normal;
   }

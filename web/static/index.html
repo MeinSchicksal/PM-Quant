@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.83">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.84">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -413,11 +413,11 @@
 
         <div class="stage-stepper" id="round-stage-stepper" aria-label="本轮所处阶段">
           <span class="stage-step is-active" data-stage="observe">观察</span>
-          <span class="stage-arrow" aria-hidden="true">›</span>
+          <span class="stage-arrow" aria-hidden="true">→</span>
           <span class="stage-step" data-stage="active" id="stage-step-active">扫描机会</span>
-          <span class="stage-arrow" aria-hidden="true">›</span>
+          <span class="stage-arrow" aria-hidden="true">→</span>
           <span class="stage-step" data-stage="freeze">尾盘锁定</span>
-          <span class="stage-arrow" aria-hidden="true">›</span>
+          <span class="stage-arrow" aria-hidden="true">→</span>
           <span class="stage-step" data-stage="settle">结算</span>
         </div>
 
@@ -466,11 +466,10 @@
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
             </div>
 
-            <!-- Crisp 1-Sentence Plain-Language Signal Strip Inside Chart -->
+            <!-- Crisp 1-Sentence Plain-Language Signal Strip Inside Chart (Zero Redundant Clock) -->
             <div class="chart-signal-strip" aria-live="polite">
               <span class="css-pill is-wait" id="bulletin-status-badge"><span class="css-dot" id="console-state-dot" aria-hidden="true"></span><span id="bulletin-status-text">开盘观察</span></span>
               <span class="css-msg" id="bulletin-latest-preview">先看前 1 分钟走势，暂不下单</span>
-              <span class="console-fresh-time css-clock" id="console-fresh-time">--:--:--</span>
             </div>
           </section>
 
@@ -944,6 +943,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.82"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.84"></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>
