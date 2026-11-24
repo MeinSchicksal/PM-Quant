@@ -6155,18 +6155,76 @@ html, body {
 }
 
 /* ==========================================================================
-   UNIFIED LIVE STRATEGY CONSOLE (CURRENT DECISION + LIVE QUEUE + TIMELINE)
+   MODERN LINEAR-STYLE LIVE STRATEGY CONSOLE (ZERO NESTED BOXES)
    ========================================================================== */
+.console-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.console-hero-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.console-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.console-state-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.console-state-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--caption);
+  box-shadow: 0 0 0 3.5px rgba(148, 163, 184, 0.22);
+}
+
+.console-state-dot.is-buy {
+  background: var(--up);
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.24);
+}
+
+.console-state-dot.is-quote {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.22);
+}
+
+.console-state-dot.is-warn {
+  background: #d97706;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.24);
+}
+
+.console-state-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
 .console-history-btn {
   display: inline-flex;
   align-items: center;
-  height: 24px;
-  padding: 0 9px;
+  height: 26px;
+  padding: 0 10px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: var(--surface-subtle);
+  background: transparent;
   color: var(--label);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -6174,39 +6232,88 @@ html, body {
 }
 
 .console-history-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--surface);
-}
-
-.console-decision-card {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 12px 13px;
-  border-radius: 11px;
+  border-color: var(--ink);
+  color: var(--ink);
   background: var(--surface-subtle);
-  border: 1px solid var(--border-soft);
 }
 
-.cdc-top {
+.console-hero-reason {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--label);
+  word-break: break-word;
+}
+
+/* Modern Segmented Filter Bar */
+.console-feed-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
 }
 
-.cdc-sub {
-  font-size: 11px;
+.console-seg-tabs {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-soft);
+  gap: 2px;
+}
+
+.console-seg-tabs .af-btn {
+  border: none;
+  border-bottom: none !important;
+  background: transparent;
   color: var(--caption);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
 }
 
-.cdc-text {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
+.console-seg-tabs .af-btn:hover {
   color: var(--ink);
-  word-break: break-word;
+}
+
+.console-seg-tabs .af-btn.active {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+/* Modern Minimal Empty State */
+#live-action-feed .action-empty.console-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 5px;
+  padding: 36px 18px;
+  border-radius: 12px;
+  background: var(--surface-subtle);
+  border: 1px dashed var(--border);
+  margin-top: 4px;
+}
+
+.ce-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--label);
+}
+
+.ce-sub {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--caption);
+  max-width: 240px;
 }
 
 /* Live Queuing Order Card */

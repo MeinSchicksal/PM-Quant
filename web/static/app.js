@@ -774,9 +774,34 @@ function translateDecisionReason(rawReason) {
     return "临近结束胜率走弱，提前卖出部分持仓减少损失";
   }
 
-  // 6. 各类风控保护与观望原因（彻底去黑话）
+  // 6. 各类风控保护与观望原因（彻底去黑话，精准解析盘口无足够净边际）
+  if (/无足够净边际|净边际不足|No positive edge|edge too small|无正期望/i.test(s)) {
+    const pm = s.match(/P\*\(?Up\)?=([\d.]+)/i);
+    const um = s.match(/Up=([\d.-]+)\/([\d.-]+)/i);
+    const dm = s.match(/Dn=([\d.-]+)\/([\d.-]+)/i);
+    if (pm) {
+      const pUp = parseFloat(pm[1]);
+      if (Number.isFinite(pUp)) {
+        const favorUp = pUp >= 0.5;
+        const winPct = Math.round((favorUp ? pUp : 1 - pUp) * 100);
+        const askPx = favorUp ? (um ? um[2] : "") : (dm ? dm[2] : "");
+        const sideTxt = favorUp ? "看涨" : "看跌";
+        if (askPx && /^[\d.]+$/.test(askPx)) {
+          return `模型估计${sideTxt}胜率约 ${winPct}%，但当前市场卖价 $${askPx} 偏贵，不够划算，继续等待`;
+        }
+        return `模型估计${sideTxt}胜率约 ${winPct}%，当前盘口价格不够划算，继续耐心等待`;
+      }
+    }
+    return "当前盘口价格不够便宜，没有明显性价比，继续耐心观望";
+  }
+  if (/极端巨震|风暴避险/i.test(s)) {
+    return "BTC 近期波动过于剧烈，已启动避险模式，暂停新下单";
+  }
   if (/Anti-toxicity|Toxic|shock|剧震/i.test(s)) {
     return "BTC 刚刚突发剧烈波动，为防误判已暂停下单并撤回挂单";
+  }
+  if (/卖墙|ask wall|wall/i.test(s)) {
+    return "盘口上方出现大额压单，为避免接盘已暂停挂单";
   }
   if (/延迟|stale|Dead-man|ms\b/i.test(s)) {
     return "行情同步略有延迟，为了交易安全暂缓出手";
@@ -802,24 +827,24 @@ function translateDecisionReason(rawReason) {
   if (/Circuit breaker|Loss streak|daily\s*(drawdown|loss)/i.test(s)) {
     return "触发账户风控保护，暂停开新仓，保护本金";
   }
-  if (/No positive edge|edge too small|净边际不足|无正期望|观望/i.test(s)) {
-    return "当前价格不够便宜，性价比一般，继续耐心观望";
+  if (/观望/i.test(s)) {
+    return "当前盘口暂无明显性价比，继续耐心观望";
   }
   if (/Strong bullish trend|Strong bearish trend|Mean-reverting|Normal oscillation|Transitional drift/i.test(s)) {
     return "正在持续跟踪实时行情与盘口价格变化...";
   }
 
-  // 7. 兜底清洗：去掉版本号、英文参数括号，保证不把代码味原文直接扔给普通用户
+  // 7. 兜底清洗：彻底去掉版本号、嵌套英文参数括号，绝不泄露半截公式乱码
   s = s
     .replace(/^v\d+\.\d+:?\s*/i, "")
-    .replace(/\([^)]*(?:P\*|SNR|bps|tau|edge|vol|disp|shock|pair_cost|限价)[^)]*\)/gi, "")
+    .replace(/\((?:[^()]|\([^()]*\))*\)/g, "")
     .replace(/\b(IOC|Maker|Taker|FIFO|MWDE|LWAA)\b/gi, "")
     .replace(/\bUp\b/g, "看涨")
     .replace(/\bDown\b/g, "看跌")
     .replace(/\s{2,}/g, " ")
     .trim();
 
-  return /[\u4e00-\u9fa5]/.test(s) ? s : "正在持续观察实时行情，寻找高性价比机会...";
+  return /[\u4e00-\u9fa5]/.test(s) ? s : "正在持续观察实时行情，寻找划算的买入价格...";
 }
 
 // ============================================================================
@@ -2249,7 +2274,11 @@ function renderActionFeed(actions, startTs = 0) {
   syncChartPinButton();
 
   if (arr.length === 0) {
-    setHtmlIfChanged(list, `<li class="action-empty">本轮暂无报单或撮合动作，策略持续监控盘口边际中...</li>`);
+    setHtmlIfChanged(list, `
+      <li class="action-empty console-empty">
+        <span class="ce-title">本轮暂未出手</span>
+        <span class="ce-sub">策略正在持续比对胜率与盘口报价，发现划算价格会自动下单</span>
+      </li>`);
     return;
   }
 
@@ -2266,10 +2295,12 @@ function renderActionFeed(actions, startTs = 0) {
   });
 
   if (filtered.length === 0) {
-    const emptyHint = liveActionFilterMode === "key"
-      ? "本轮尚无成交、挂单或撤单动作"
-      : "当前筛选条件下暂无记录";
-    setHtmlIfChanged(list, `<li class="action-empty">${emptyHint}</li>`);
+    const emptyTitle = liveActionFilterMode === "key" ? "本轮暂无成交或挂撤" : "当前筛选下暂无记录";
+    setHtmlIfChanged(list, `
+      <li class="action-empty console-empty">
+        <span class="ce-title">${emptyTitle}</span>
+        <span class="ce-sub">策略正在持续比对胜率与盘口报价，发现划算价格会自动下单</span>
+      </li>`);
     return;
   }
 
@@ -4182,19 +4213,18 @@ function renderDecisionBulletin(live) {
   const modalCountEl = $("modal-bulletin-count");
   const previewEl = $("bulletin-latest-preview");
   const statusBadgeEl = $("bulletin-status-badge");
+  const stateDotEl = $("console-state-dot");
   if (!listEl) return;
 
   ingestLiveDecisions(live);
 
   const timeline = decisionAuditLog;
   if (!timeline.length) {
-    if (countEl) countEl.textContent = "思路 0";
+    if (countEl) countEl.textContent = "历史 0";
     if (modalCountEl) modalCountEl.textContent = "0 条记录";
-    if (statusBadgeEl) {
-      statusBadgeEl.textContent = "观望中";
-      statusBadgeEl.className = "bulletin-status-pill is-wait";
-    }
-    if (previewEl) previewEl.textContent = "正在观察实时行情，等待合适的出手时机...";
+    if (statusBadgeEl) statusBadgeEl.textContent = "正在观望";
+    if (stateDotEl) stateDotEl.className = "console-state-dot is-wait";
+    if (previewEl) previewEl.textContent = "正在观察实时行情，等待划算的买入价格...";
     setHtmlIfChanged(listEl, `
       <div class="bulletin-empty">
         <div class="bulletin-empty-title">暂无策略思路记录</div>
@@ -4203,23 +4233,21 @@ function renderDecisionBulletin(live) {
     return;
   }
 
-  if (countEl) countEl.textContent = `思路 ${timeline.length}`;
+  if (countEl) countEl.textContent = `历史 ${timeline.length}`;
   if (modalCountEl) modalCountEl.textContent = `${timeline.length} 条记录`;
   const tagMap = {
     taker_buy: ["出手买入", "is-buy"],
     taker_hedge: ["锁定利润", "is-buy"],
     taker_unwind: ["风控止损", "is-warn"],
-    quote: ["排队挂单", "is-quote"],
-    wait: ["观望中", "is-wait"],
+    quote: ["挂单排队中", "is-quote"],
+    wait: ["正在观望", "is-wait"],
   };
 
   const latest = timeline[timeline.length - 1];
   if (latest) {
-    const [lTag, lCls] = tagMap[latest.action] || ["观望中", "is-wait"];
-    if (statusBadgeEl) {
-      statusBadgeEl.textContent = lTag;
-      statusBadgeEl.className = `bulletin-status-pill ${lCls}`;
-    }
+    const [lTag, lCls] = tagMap[latest.action] || ["正在观望", "is-wait"];
+    if (statusBadgeEl) statusBadgeEl.textContent = lTag;
+    if (stateDotEl) stateDotEl.className = `console-state-dot ${lCls}`;
     if (previewEl) {
       previewEl.textContent = translateDecisionReason(latest.reason);
     }
