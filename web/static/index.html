@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.75">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.76">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -391,53 +391,23 @@
          VIEW 2: LIVE MARKET WORKSPACE (实时工作区)
          ==================================================================== -->
     <section class="view-panel" id="view-market" hidden>
-      <!-- Top Live Telemetry & Countdown Strip -->
-      <section class="panel market-command-strip" aria-label="当前轮次行情状态">
-        <div class="mc-metrics">
-          <div class="mc-item">
-            <span class="mc-label">北京时间轮次</span>
-            <div class="mc-val-row">
-              <strong class="mc-val" id="market-time-range">--:-- ~ --:--</strong>
-            </div>
-          </div>
+      <!-- Ultra-Slim Round & Countdown Top Strip -->
+      <section class="panel market-command-strip slim-round-bar" aria-label="当前轮次与剩余时间">
+        <div class="srb-left">
+          <span class="srb-badge">本轮</span>
+          <strong class="srb-range" id="market-time-range">--:-- ~ --:--</strong>
+          <span class="srb-sep" aria-hidden="true">·</span>
+          <span class="srb-tau-wrap">剩余 <strong class="srb-tau" id="market-tau">--</strong><span class="srb-unit">s</span></span>
+          <span class="chart-sub-tag" id="chart-elapsed-badge" hidden>已运行 0s / 300s</span>
+          <span hidden><strong id="market-spot">$0.00</strong><small id="market-open">基准 $0.00</small><strong id="market-bps">$0.00</strong><small id="market-bps-sub">+0.000%</small></span>
+        </div>
 
-          <div class="mc-item">
-            <span class="mc-label">距离交割结算 (Tau)</span>
-            <div class="mc-val-row">
-              <strong class="mc-val mc-tau" id="market-tau">--</strong>
-              <span class="mc-unit">秒</span>
-              <span class="chart-sub-tag" id="chart-elapsed-badge">已运行 0s / 300s</span>
-            </div>
-          </div>
-
-          <div class="mc-item">
-            <span class="mc-label">Polymarket 现价 / 开盘基准</span>
-            <div class="mc-val-row">
-              <strong class="mc-val" id="market-spot">$0.00</strong>
-              <small class="mc-sub" id="market-open">基准 $0.00</small>
-            </div>
-          </div>
-
-          <div class="mc-item">
-            <span class="mc-label">相对开盘偏离幅度</span>
-            <div class="mc-val-row">
-              <strong class="mc-val" id="market-bps">$0.00</strong>
-              <small class="mc-sub" id="market-bps-sub">+0.000% · +0.0 bps</small>
-            </div>
-          </div>
-
-          <div class="mc-item mc-risk-col">
-            <span class="mc-label mc-label-with-help">
-              <span>微观风控与形态状态</span>
-              <button type="button" class="conn-help-btn mc-help-btn" id="regime-help-btn" title="查看微观风控与行情形态说明" aria-label="微观风控与形态说明">?</button>
-            </span>
-            <div class="mc-val-row">
-              <span class="status-pill status-ready" id="market-risk-pill">
-                <span class="status-dot"></span>
-                <span id="market-risk">流动性正常</span>
-              </span>
-            </div>
-          </div>
+        <div class="srb-right">
+          <span class="status-pill status-ready" id="market-risk-pill">
+            <span class="status-dot"></span>
+            <span id="market-risk">流动性正常</span>
+          </span>
+          <button type="button" class="conn-help-btn mc-help-btn" id="regime-help-btn" title="查看微观风控与行情形态说明" aria-label="微观风控与形态说明">?</button>
         </div>
       </section>
 
@@ -479,6 +449,20 @@
               <canvas id="live-price-canvas" height="510"></canvas>
               <div class="chart-live-hud" id="chart-live-hud" aria-live="polite" hidden></div>
               <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+            </div>
+
+            <!-- Integrated Live Strategy Verdict Bar Inside Chart Card -->
+            <div class="chart-verdict-bar" id="bulletin-toggle-btn" role="button" tabindex="0" title="点击查看本轮完整策略思路历史">
+              <div class="cvb-left">
+                <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
+                <strong class="cvb-state" id="bulletin-status-badge">正在观望</strong>
+                <span class="cvb-reason" id="bulletin-latest-preview">正在观察实时行情，等待划算的买入价格...</span>
+                <span class="cvb-edge-inline" id="console-edge-meter" hidden></span>
+              </div>
+              <div class="cvb-right">
+                <span class="console-fresh-time" id="console-fresh-time">--:--:--</span>
+                <span class="cvb-hist-link" id="bulletin-count">历史 0</span>
+              </div>
             </div>
           </section>
 
@@ -550,59 +534,23 @@
               </div>
             </section>
           </div>
-
-          <!-- Collapsible Secondary Orderbook Details (Out of the way by default) -->
-          <details class="panel orderbook-drawer" aria-label="盘口买一卖一与深度明细">
-            <summary class="ob-drawer-summary">
-              <span>盘口买卖报价与深度明细</span>
-              <span class="ob-drawer-hint">展开查看买一 / 卖一 / 5档</span>
-            </summary>
-            <div class="ob-drawer-body">
-              <div class="ob-drawer-row">
-                <span class="ot-pill up">UP</span>
-                <span class="ob-d-item">买一 <b class="up" id="up-bid-px">--</b> <small id="up-bid-sz">--</small></span>
-                <span class="ob-d-item">卖一 <b id="up-ask-px">--</b> <small id="up-ask-sz">--</small></span>
-                <span class="ob-d-item">价差 <b id="up-meta-spread">--</b></span>
-                <span class="ob-d-item">5档量 <b id="up-meta-depth">--</b></span>
-              </div>
-              <div class="ob-drawer-row">
-                <span class="ot-pill down">DOWN</span>
-                <span class="ob-d-item">买一 <b class="down" id="down-bid-px">--</b> <small id="down-bid-sz">--</small></span>
-                <span class="ob-d-item">卖一 <b id="down-ask-px">--</b> <small id="down-ask-sz">--</small></span>
-                <span class="ob-d-item">价差 <b id="down-meta-spread">--</b></span>
-                <span class="ob-d-item">5档量 <b id="down-meta-depth">--</b></span>
-              </div>
-            </div>
-          </details>
         </div>
 
         <div class="cockpit-feed-col">
-          <!-- Modern Linear-Style Live Strategy Console -->
+          <!-- Pure Execution & Active Queue Rail -->
           <section class="panel section-panel orders-workspace console-panel">
-            <!-- 1. Hero Live Status Header (With Live Freshness & Fair-vs-Market Comparison) -->
-            <div class="console-hero-head">
-              <div class="console-hero-top">
-                <div class="console-state-row">
-                  <span class="console-state-dot is-wait" id="console-state-dot" aria-hidden="true"></span>
-                  <h2 class="console-state-title" id="bulletin-status-badge">正在观望</h2>
-                  <span class="order-pill" id="working-order-pill" hidden></span>
-                </div>
-                <button type="button" class="console-history-btn" id="bulletin-toggle-btn" title="查看本轮完整策略思路历史">
-                  <span id="bulletin-count">历史 0</span>
-                </button>
-                <span class="badge-pill" id="live-action-count" hidden>0 笔</span>
+            <div class="console-rail-head">
+              <h2>委托与成交</h2>
+              <div class="orders-head-meta">
+                <span class="order-pill" id="working-order-pill" hidden></span>
+                <span class="badge-pill" id="live-action-count">0 笔</span>
               </div>
-              <div class="console-freshness-row">
-                <span class="console-fresh-time" id="console-fresh-time">实时同步中...</span>
-              </div>
-              <p class="console-hero-reason" id="bulletin-latest-preview">正在观察实时行情，等待划算的买入价格...</p>
-              <div class="console-edge-meter" id="console-edge-meter" hidden></div>
             </div>
 
-            <!-- 2. Active Working Orders Queue Tracker (auto-shows when queuing) -->
+            <!-- Active Working Orders Queue Tracker (auto-shows when queuing) -->
             <div id="live-working-orders-box" class="working-orders-box" hidden></div>
 
-            <!-- 3. Segmented Filter Control & Timeline Feed -->
+            <!-- Segmented Filter Control & Timeline Feed -->
             <div class="console-feed-bar">
               <div class="console-seg-tabs" id="action-feed-filter" role="tablist" aria-label="流水筛选">
                 <button type="button" class="af-btn active" data-af="key">成交/挂撤</button>
@@ -984,6 +932,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.75"></script></script></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.76"></script></script></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>
