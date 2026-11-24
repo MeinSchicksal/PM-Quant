@@ -4808,7 +4808,7 @@ html, body {
     font-size: 11px;
   }
   .canvas-container {
-    height: 270px;
+    height: 368px;
   }
 
   /* Keep UP / DOWN orderbook levels side-by-side & 3-col meta strip on mobile */
@@ -5688,102 +5688,120 @@ html, body {
   letter-spacing: 0;
 }
 
-/* Clean Position Summary Line */
-.ot-pos-line {
-  display: flex;
-  align-items: center;
-  min-height: 20px;
-}
-
-.ot-pos-empty-hint {
-  font-size: 12px;
-  color: var(--caption);
-}
-
-.ot-pos-filled {
-  display: none;
-  align-items: baseline;
+/* Prominent 3-Column Position Grid (Shares | Avg | Cost) */
+.ot-pos-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
 }
 
-.outcome-ticket.is-holding .ot-pos-empty-hint {
-  display: none;
-}
-
-.outcome-ticket.is-holding .ot-pos-filled {
+.ot-pg-cell {
   display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
-.ot-pos-sh {
+.ot-pg-k {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--caption);
+  white-space: nowrap;
+}
+
+.ot-pg-v {
   font-family: var(--font-mono);
-  font-size: 13.5px;
+  font-size: 15px;
   font-weight: 800;
-  color: var(--ink);
+  color: var(--caption);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.ot-pos-detail {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--label);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.ot-pos-detail b {
+.outcome-ticket.is-holding .ot-pg-v {
   color: var(--ink);
-  font-weight: 700;
 }
 
-/* Secondary Compact Orderbook Footer (Bid / Ask / Size / Depth) */
-.ot-book-footer {
+/* Collapsible Secondary Orderbook Drawer (Hidden by Default) */
+.panel.orderbook-drawer {
+  padding: 0;
+  overflow: hidden;
+}
+
+.ob-drawer-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  flex-wrap: wrap;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-soft);
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: background-color 0.14s ease;
+}
+
+.ob-drawer-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ob-drawer-summary:hover {
+  background: var(--surface-subtle);
+}
+
+.ob-drawer-hint {
   font-size: 11px;
+  font-weight: 500;
   color: var(--caption);
 }
 
-.ot-bf-quotes,
-.ot-bf-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
+.ob-drawer-body {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-soft);
 }
 
-.ot-bf-item {
+.ob-drawer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  color: var(--caption);
+}
+
+.ob-drawer-row:last-child {
+  border-bottom: none;
+}
+
+.ob-d-item {
   display: inline-flex;
   align-items: baseline;
-  gap: 3px;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.ot-bf-item b {
-  font-size: 11.5px;
+.ob-d-item b {
   font-weight: 700;
   color: var(--ink);
 }
 
-.ot-bf-item b.up { color: var(--up); }
-.ot-bf-item b.down { color: var(--down); }
+.ob-d-item b.up { color: var(--up); }
+.ob-d-item b.down { color: var(--down); }
 
-.ot-bf-item small {
-  font-size: 10px;
+.ob-d-item small {
+  font-size: 10.5px;
   color: var(--caption);
-}
-
-.ot-bf-meta b {
-  font-weight: 600;
-  color: var(--label);
 }
 
 /* ==========================================================================
@@ -5970,8 +5988,8 @@ html, body {
     gap: 10px;
   }
   .panel.outcome-ticket {
-    padding: 12px 12px 10px;
-    gap: 8px;
+    padding: 12px 12px 11px;
+    gap: 9px;
     border-radius: 12px;
   }
   .ot-name {
@@ -5984,33 +6002,32 @@ html, body {
     font-size: 10px;
   }
   .ot-pnl-amt {
-    font-size: 21px;
+    font-size: 22px;
   }
   .ot-pnl-amt.flat {
-    font-size: 14px;
+    font-size: 14.5px;
   }
-  .ot-pos-sh {
+  .ot-pos-grid {
+    gap: 4px;
+    padding-top: 9px;
+  }
+  .ot-pg-k {
+    font-size: 9.5px;
+  }
+  .ot-pg-v {
     font-size: 12px;
   }
-  .ot-pos-detail {
+  .ob-drawer-summary {
+    padding: 9px 13px;
+    font-size: 11.5px;
+  }
+  .ob-drawer-hint {
     font-size: 10px;
   }
-  .ot-book-footer {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    padding-top: 8px;
-    font-size: 10px;
-  }
-  .ot-bf-quotes,
-  .ot-bf-meta {
-    gap: 6px;
-  }
-  .ot-bf-item b {
-    font-size: 10.5px;
-  }
-  .ot-bf-item small {
-    display: none;
+  .ob-drawer-row {
+    padding: 9px 13px;
+    gap: 6px 10px;
+    font-size: 11px;
   }
 }
 

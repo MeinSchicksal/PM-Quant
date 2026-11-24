@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.73">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.74">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -482,8 +482,8 @@
             </div>
           </section>
 
-          <!-- Modern Outcome Cards: Hero Expected PnL & Position First, Compact Orderbook Footer -->
-          <div class="outcome-tickets-grid" aria-label="本轮多空预计收益与持仓">
+          <!-- Focused Position & Expected PnL Cards (UP | DOWN) -->
+          <div class="outcome-tickets-grid" aria-label="本轮多空持仓与预计收益">
             <!-- UP Ticket -->
             <section class="panel outcome-ticket side-up" id="card-up">
               <div class="ot-head">
@@ -496,28 +496,23 @@
 
               <!-- Hero Centerpiece: Expected Settlement PnL -->
               <div class="ot-pnl-hero" id="pnl-forecast-up">
-                <span class="ot-pnl-lbl">空仓观望</span>
-                <strong class="ot-pnl-amt flat">$0.00</strong>
+                <span class="ot-pnl-lbl">预计交割收益</span>
+                <strong class="ot-pnl-amt flat">空仓观望</strong>
               </div>
 
-              <!-- Clean Position Line -->
-              <div class="ot-pos-line">
-                <span class="ot-pos-empty-hint">未持有看涨仓位</span>
-                <div class="ot-pos-filled">
-                  <strong class="ot-pos-sh" id="up-pos-shares">0.0 股</strong>
-                  <span class="ot-pos-detail">均价 <b id="up-pos-avg">--</b> · 投入 <b id="up-pos-cost">$0.00</b></span>
+              <!-- Prominent 3-Column Position Metrics: Shares | Avg Price | Cost -->
+              <div class="ot-pos-grid">
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">买入股数</span>
+                  <strong class="ot-pg-v" id="up-pos-shares">0.0 股</strong>
                 </div>
-              </div>
-
-              <!-- Secondary Compact Orderbook Footer (Bid / Ask / Size / Depth) -->
-              <div class="ot-book-footer">
-                <div class="ot-bf-quotes">
-                  <span class="ot-bf-item">买一 <b class="up" id="up-bid-px">--</b> <small id="up-bid-sz">--</small></span>
-                  <span class="ot-bf-item">卖一 <b id="up-ask-px">--</b> <small id="up-ask-sz">--</small></span>
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">均价</span>
+                  <strong class="ot-pg-v" id="up-pos-avg">--</strong>
                 </div>
-                <div class="ot-bf-meta">
-                  <span>差 <b id="up-meta-spread">--</b></span>
-                  <span>5档 <b id="up-meta-depth">--</b></span>
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">投入</span>
+                  <strong class="ot-pg-v" id="up-pos-cost">$0.00</strong>
                 </div>
               </div>
             </section>
@@ -534,32 +529,51 @@
 
               <!-- Hero Centerpiece: Expected Settlement PnL -->
               <div class="ot-pnl-hero" id="pnl-forecast-down">
-                <span class="ot-pnl-lbl">空仓观望</span>
-                <strong class="ot-pnl-amt flat">$0.00</strong>
+                <span class="ot-pnl-lbl">预计交割收益</span>
+                <strong class="ot-pnl-amt flat">空仓观望</strong>
               </div>
 
-              <!-- Clean Position Line -->
-              <div class="ot-pos-line">
-                <span class="ot-pos-empty-hint">未持有看跌仓位</span>
-                <div class="ot-pos-filled">
-                  <strong class="ot-pos-sh" id="down-pos-shares">0.0 股</strong>
-                  <span class="ot-pos-detail">均价 <b id="down-pos-avg">--</b> · 投入 <b id="down-pos-cost">$0.00</b></span>
+              <!-- Prominent 3-Column Position Metrics: Shares | Avg Price | Cost -->
+              <div class="ot-pos-grid">
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">买入股数</span>
+                  <strong class="ot-pg-v" id="down-pos-shares">0.0 股</strong>
                 </div>
-              </div>
-
-              <!-- Secondary Compact Orderbook Footer (Bid / Ask / Size / Depth) -->
-              <div class="ot-book-footer">
-                <div class="ot-bf-quotes">
-                  <span class="ot-bf-item">买一 <b class="down" id="down-bid-px">--</b> <small id="down-bid-sz">--</small></span>
-                  <span class="ot-bf-item">卖一 <b id="down-ask-px">--</b> <small id="down-ask-sz">--</small></span>
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">均价</span>
+                  <strong class="ot-pg-v" id="down-pos-avg">--</strong>
                 </div>
-                <div class="ot-bf-meta">
-                  <span>差 <b id="down-meta-spread">--</b></span>
-                  <span>5档 <b id="down-meta-depth">--</b></span>
+                <div class="ot-pg-cell">
+                  <span class="ot-pg-k">投入</span>
+                  <strong class="ot-pg-v" id="down-pos-cost">$0.00</strong>
                 </div>
               </div>
             </section>
           </div>
+
+          <!-- Collapsible Secondary Orderbook Details (Out of the way by default) -->
+          <details class="panel orderbook-drawer" aria-label="盘口买一卖一与深度明细">
+            <summary class="ob-drawer-summary">
+              <span>盘口买卖报价与深度明细</span>
+              <span class="ob-drawer-hint">展开查看买一 / 卖一 / 5档</span>
+            </summary>
+            <div class="ob-drawer-body">
+              <div class="ob-drawer-row">
+                <span class="ot-pill up">UP</span>
+                <span class="ob-d-item">买一 <b class="up" id="up-bid-px">--</b> <small id="up-bid-sz">--</small></span>
+                <span class="ob-d-item">卖一 <b id="up-ask-px">--</b> <small id="up-ask-sz">--</small></span>
+                <span class="ob-d-item">价差 <b id="up-meta-spread">--</b></span>
+                <span class="ob-d-item">5档量 <b id="up-meta-depth">--</b></span>
+              </div>
+              <div class="ob-drawer-row">
+                <span class="ot-pill down">DOWN</span>
+                <span class="ob-d-item">买一 <b class="down" id="down-bid-px">--</b> <small id="down-bid-sz">--</small></span>
+                <span class="ob-d-item">卖一 <b id="down-ask-px">--</b> <small id="down-ask-sz">--</small></span>
+                <span class="ob-d-item">价差 <b id="down-meta-spread">--</b></span>
+                <span class="ob-d-item">5档量 <b id="down-meta-depth">--</b></span>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="cockpit-feed-col">
@@ -966,6 +980,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.73"></script></script></script></script></script></script></script></script></script></script></script>
+  <script src="/static/app.js?v=3.2.74"></script></script></script></script></script></script></script></script></script></script></script></script>
 </body>
 </html>

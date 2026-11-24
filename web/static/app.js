@@ -2450,8 +2450,8 @@ function drawLivePriceChart(live) {
   const rect = canvas.getBoundingClientRect();
   const w = Math.max(280, rect.width || 800);
   const isMobile = w < 520;
-  const minH = isMobile ? (chartViewMode === "dual" ? 305 : 220) : 360;
-  const h = Math.max(minH, rect.height || (isMobile ? 305 : 500));
+  const minH = isMobile ? (chartViewMode === "dual" ? 368 : 230) : 360;
+  const h = Math.max(minH, rect.height || (isMobile ? 368 : 500));
 
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -2487,8 +2487,8 @@ function drawLivePriceChart(live) {
   let probH = 0;
 
   if (chartViewMode === "dual") {
-    const gapBetween = isMobile ? 42 : 40;
-    priceH = Math.round(totalPlotH * 0.52);
+    const gapBetween = isMobile ? 38 : 40;
+    priceH = Math.round(totalPlotH * (isMobile ? 0.50 : 0.52));
     probTop = padT + priceH + gapBetween;
     probH = totalPlotH - priceH - gapBetween;
   } else if (chartViewMode === "prob") {
