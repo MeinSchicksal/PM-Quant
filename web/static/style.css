@@ -7804,12 +7804,103 @@ html, body {
   padding: 11px 20px;
   border-top: 1px solid var(--border-soft);
   background: var(--surface);
-  cursor: pointer;
-  transition: background-color 0.15s ease;
+  cursor: default;
 }
 
-.chart-signal-strip:hover {
+/* Inline Strategy Thoughts Timeline (Replaces Blocking Modal) */
+.inline-thoughts-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0;
+  max-height: 460px;
+  overflow-y: auto;
+}
+
+.ith-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 6px 11px 4px;
+  border-radius: 8px;
+}
+
+.ith-item.is-latest {
   background: var(--surface-subtle);
+}
+
+.ith-rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding-top: 5px;
+}
+
+.ith-rail::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  bottom: -14px;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border-soft);
+}
+
+.ith-item:last-child .ith-rail::after {
+  display: none;
+}
+
+.ith-dot {
+  position: relative;
+  z-index: 1;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--caption);
+}
+
+.ith-dot.is-buy { background: var(--up); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.20); }
+.ith-dot.is-quote { background: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18); }
+.ith-dot.is-warn { background: #d97706; }
+
+.ith-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ith-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ith-tag {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--label);
+}
+
+.ith-tag.is-buy { color: var(--up); }
+.ith-tag.is-quote { color: var(--accent); }
+.ith-tag.is-warn { color: #b45309; }
+[data-theme="dark"] .ith-tag.is-warn { color: #fbbf24; }
+
+.ith-time {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.ith-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+  word-break: break-word;
 }
 
 .css-main {

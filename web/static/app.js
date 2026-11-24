@@ -2225,11 +2225,11 @@ function updateMarket(live) {
           const askCents = Math.round(askNum * 100);
           const diffCents = fairCents - askCents;
           const gapHint = diffCents < 0
-            ? `市场偏贵 <b>${Math.abs(diffCents)}¢</b>，耐心等更划算价格`
+            ? `市场偏贵 <b>${Math.abs(diffCents)}%</b>，耐心等更划算价格`
             : diffCents < 5
-              ? `折价仅 <b>${diffCents}¢</b>（离出手线还差一点），持续紧盯`
-              : `已出现 <b>${diffCents}¢</b> 折价，准备择机出手`;
-          radarEl.innerHTML = `当前关注 <b class="${sideCls}">${sideTxt}</b>（模型估价 <b>${fairCents}¢</b> vs 卖价 <b>${askCents}¢</b>）· ${gapHint}`;
+              ? `折价仅 <b>${diffCents}%</b>，再降一点就出手`
+              : `已出现 <b>${diffCents}%</b> 折价，准备择机出手`;
+          radarEl.innerHTML = `当前关注 <b class="${sideCls}">${sideTxt}</b>（模型胜率 <b>${fairCents}%</b> vs 市场价 <b>${askCents}%</b>）· ${gapHint}`;
         } else {
           radarEl.textContent = translateDecisionReason(rawR);
         }
@@ -3473,11 +3473,22 @@ function initLiveChartInteractions() {
     actionFilter.addEventListener("click", (e) => {
       const btn = e.target.closest(".af-btn[data-af]");
       if (!btn) return;
-      liveActionFilterMode = btn.dataset.af || "all";
+      liveActionFilterMode = btn.dataset.af || "key";
       actionFilter.querySelectorAll(".af-btn").forEach((b) => {
         b.classList.toggle("active", b === btn);
       });
-      renderActionFeed(cachedLive?.actions || [], cachedLive?.start || 0);
+      const isThoughts = liveActionFilterMode === "thoughts";
+      const feedEl = $("live-action-feed");
+      const thoughtsEl = $("inline-thoughts-feed");
+      const hintEl = $("console-feed-hint");
+      if (feedEl) feedEl.hidden = isThoughts;
+      if (thoughtsEl) thoughtsEl.hidden = !isThoughts;
+      if (hintEl) hintEl.textContent = isThoughts ? "本轮实时思路" : "点击定位左图";
+      if (!isThoughts) {
+        renderActionFeed(cachedLive?.actions || [], cachedLive?.start || 0);
+      } else if (cachedLive) {
+        renderDecisionBulletin(cachedLive);
+      }
     });
   }
 
@@ -4835,19 +4846,19 @@ function renderDecisionBulletin(live) {
           if (askCents >= 92) {
             lTag = "胜负已分";
             lCls = "is-wait";
-            shortMsg = `${sideTxt}已涨到 ${askCents}¢，太贵不追，等下一轮`;
+            shortMsg = `${sideTxt}已涨到 ${askCents}%，太贵不追，等下一轮`;
           } else if (diffCents < 0) {
             lTag = "暂不追高";
             lCls = "is-wait";
-            shortMsg = `${sideTxt}胜算更大，但卖价贵了 ${Math.abs(diffCents)}¢，等回落`;
+            shortMsg = `${sideTxt}胜算更大，但目前价格偏贵 ${Math.abs(diffCents)}%，等回落`;
           } else if (diffCents < 5) {
             lTag = "紧盯出手";
             lCls = "is-quote";
-            shortMsg = `${sideTxt}已便宜 ${diffCents}¢，再降一点就出手`;
+            shortMsg = `${sideTxt}已有 ${diffCents}% 折价，再降一点就出手`;
           } else {
             lTag = "机会出现";
             lCls = "is-buy";
-            shortMsg = `${sideTxt}便宜了 ${diffCents}¢，准备择机买入`;
+            shortMsg = `${sideTxt}出现 ${diffCents}% 折价，准备择机买入`;
           }
         }
       }
@@ -4870,7 +4881,7 @@ function renderDecisionBulletin(live) {
     const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
       hour12: false, timeZone: "Asia/Shanghai"
     }) : "--:--:--";
-    const [tagLabel, tagCls] = tagMap[item.action] || ["观望中", "is-wait"];
+    const [tagLabel, tagCls] = tagMap[item.action] || ["观察中", "is-wait"];
     const text = translateDecisionReason(item.reason);
     const latestCls = idx === 0 ? " is-latest" : "";
     return `
@@ -4883,6 +4894,41 @@ function renderDecisionBulletin(live) {
       </div>`;
   }).join("");
   setHtmlIfChanged(listEl, rows);
+
+  // Inline Strategy Thought Timeline in Right Rail (Zero Modal Blocking)
+  const inlineThoughtsEl = $("inline-thoughts-feed");
+  if (inlineThoughtsEl) {
+    const curSlugT = live?.slug || "";
+    const curRoundItems = curSlugT ? timeline.filter((it) => !it.slug || it.slug === curSlugT) : timeline;
+    const displayItems = (curRoundItems.length ? curRoundItems : timeline).slice(-30).reverse();
+    if (!displayItems.length) {
+      setHtmlIfChanged(inlineThoughtsEl, `
+        <div class="console-empty">
+          <span class="ce-title">暂无思路记录</span>
+          <span class="ce-sub">策略每次判断变化都会实时记录在这里</span>
+        </div>`);
+    } else {
+      const inlineHtml = displayItems.map((item, idx) => {
+        const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Shanghai"
+        }) : "--:--:--";
+        const [tagLabel, tagCls] = tagMap[item.action] || ["观察中", "is-wait"];
+        const text = translateDecisionReason(item.reason);
+        return `
+          <div class="ith-item ${idx === 0 ? "is-latest" : ""}">
+            <span class="ith-rail" aria-hidden="true"><span class="ith-dot ${tagCls}"></span></span>
+            <div class="ith-body">
+              <div class="ith-top">
+                <span class="ith-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
+                <span class="ith-time">${ts}</span>
+              </div>
+              <div class="ith-text">${escapeHtml(text)}</div>
+            </div>
+          </div>`;
+      }).join("");
+      setHtmlIfChanged(inlineThoughtsEl, inlineHtml);
+    }
+  }
 }
 
 let stableServerOffsetMs = null;
