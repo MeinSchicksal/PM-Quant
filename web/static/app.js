@@ -687,94 +687,139 @@ function translateCircuitBreakerReason(rawReason) {
 }
 
 function translateDecisionReason(rawReason) {
-  if (!rawReason) return "持续监控双边盘口赔率与预言机偏离度...";
+  if (!rawReason) return "正在观察实时行情，等待合适的出手时机...";
   let s = String(rawReason).trim();
+  const dirCn = (d) => (/^up$/i.test(String(d || "")) ? "看涨" : /^down$/i.test(String(d || "")) ? "看跌" : String(d || ""));
+  const pctStr = (v) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return "";
+    return n <= 1.0 ? `${Math.round(n * 100)}%` : `${Math.round(n)}%`;
+  };
+  const edgePct = (v) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return "";
+    return `${(Math.abs(n) * 100).toFixed(1)}%`;
+  };
 
-  // v2.4 / v2.3 English reason translations (concise Chinese financial phrasing)
   let m;
+  // 1. 持仓等待结算
   if ((m = s.match(/Holding\s+([\d.]+)\s+(Up|Down)\s+@\s*([\d.]+)\s+to settlement\s*\(lead=([\d.+-]+)bps\)/i))) {
-    return `持仓等待交割：持有 ${m[1]} 股 ${m[2]}（均价 $${m[3]}，客观领先 ${m[4]} bps）`;
+    const lead = parseFloat(m[4]);
+    const status = lead > 0.5 ? "目前走势占优，静待结算" : lead < -0.5 ? "当前略有落后，等待到期结果" : "走势胶着，等待到期结算";
+    return `已持有 ${m[1]} 股${dirCn(m[2])}（均价 $${m[3]}），${status}`;
   }
   if ((m = s.match(/Holding\s+([\d.]+)\s+(Up|Down)\s+@\s*([\d.]+)\s+to settlement/i))) {
-    return `持仓等待交割：持有 ${m[1]} 股 ${m[2]}（均价 $${m[3]}）`;
-  }
-  if ((m = s.match(/Observation period\s*\(tau\s*([\d.]+)s/i))) {
-    return `开盘观察蓄势期（剩余 ${Math.round(parseFloat(m[1]))}s）：前 60 秒只采集基差与波动率，暂不开仓`;
-  }
-  if ((m = s.match(/Tail freeze\s*\(tau\s*([\d.]+)s/i))) {
-    return `尾盘冻结（剩余 ${Math.round(parseFloat(m[1]))}s）：最后 15 秒停止新开仓并撤回未成挂单，持有到期`;
-  }
-  if ((m = s.match(/Anti-toxicity spot shock\s*\(([\d.]+)\s*bps\)/i))) {
-    return `现货突发急剧跳变（${m[1]} bps），防毒流保护已紧急撤回在途挂单`;
-  }
-  if (s.includes("Inconsistent book snapshot")) {
-    return "双边盘口瞬时异步交叉或价差异常，跳过本轮防止误判";
-  }
-  if (s.includes("Incomplete orderbook")) {
-    return "盘口买卖档位不完整（单边空盘），暂停报单等待流动性恢复";
-  }
-  if (s.includes("Waiting for official strike")) {
-    return "正在等待官方开盘基准价与稳态基差校准完成...";
-  }
-  if (s.includes("Spot price stale") || s.includes("Dead-man switch")) {
-    return "行情流延迟或断流触发死人开关保护，已撤单并暂停开仓";
-  }
-  if (s.includes("Max entries per window")) {
-    return "本轮已达到单窗开仓上限，锁定仓位等待结算";
-  }
-  if (s.includes("Fully hedged pair") || s.includes("Max position reached")) {
-    return "已达本轮最大持仓或双边配平，静待到期交割";
-  }
-  if (s.includes("Insufficient capital")) {
-    return "账户可用资金不足，暂停开新仓";
-  }
-  if (s.includes("Circuit breaker active")) {
-    return "风控熔断器生效中（触发单日回撤或连亏冷却），暂停新开第一腿";
-  }
-  if (/Loss streak cooling|Loss streak:|daily\s*(drawdown|loss)/i.test(s)) {
-    return translateCircuitBreakerReason(s);
-  }
-  if ((m = s.match(/Deep Arbitrage lock:\s*pair_cost=([\d.]+)\s*<=\s*[\d.]+,\s*take hedge @ ([\d.]+)/i))) {
-    return `双边深度套利锁仓：配对成本 $${m[1]}，立即吃单对冲 @ $${m[2]}`;
+    return `已持有 ${m[1]} 股${dirCn(m[2])}（均价 $${m[3]}），安心等待到期结算`;
   }
 
-  // Legacy mixed-English normalization
+  // 2. 开盘观察 / 尾盘冻结
+  if ((m = s.match(/Observation period\s*\(tau\s*([\d.]+)s/i)) || /开盘观察|warmup/i.test(s)) {
+    const left = m ? `（还剩 ${Math.round(parseFloat(m[1]))} 秒）` : "";
+    return `开盘前 60 秒先观察价格走势，暂不下单${left}`;
+  }
+  if ((m = s.match(/Tail freeze\s*\(tau\s*([\d.]+)s/i)) || /尾盘冻结|cutoff|tau too low|Late window/i.test(s)) {
+    return "临近本轮结束，停止新下单，已有持仓安心等待结算";
+  }
+
+  // 3. 模式 B：单边顺势折价
+  if (/模式B|MODE_B/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+ask=\$?([\d.]+)/i);
+    const pm = s.match(/P\*=([\d.]+)/i);
+    if (sm) {
+      const pTxt = pm ? `胜率约 ${pctStr(pm[1])}，` : "";
+      return `高确定性顺势机会：看好${dirCn(sm[1])}（${pTxt}市场价 $${sm[2]}），直接出手买入`;
+    }
+    return "发现高胜率顺势折价机会，果断出手买入";
+  }
+
+  // 4. 净边际挂单 / 吃单（最核心的开仓动作）
+  if (/净边际挂单|Maker/i.test(s) && /bid=\$?([\d.]+)/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+bid=\$?([\d.]+)/i);
+    const pm = s.match(/P\*=([\d.]+)/i);
+    const em = s.match(/净边际=([+-]?[\d.]+)/i);
+    if (sm) {
+      const pTxt = pm ? `预计胜率 ${pctStr(pm[1])}，` : "";
+      const eTxt = em ? `，比公允价便宜 ${edgePct(em[1])}` : "";
+      return `看好${dirCn(sm[1])}：${pTxt}以 $${sm[2]} 挂单排队买入${eTxt}`;
+    }
+  }
+  if (/净边际吃单|IOC/i.test(s) && /ask=\$?([\d.]+)/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+ask=\$?([\d.]+)/i);
+    const pm = s.match(/P\*=([\d.]+)/i);
+    const em = s.match(/净边际=([+-]?[\d.]+)/i);
+    if (sm) {
+      const pTxt = pm ? `预计胜率 ${pctStr(pm[1])}，` : "";
+      const eTxt = em ? `，比公允价便宜 ${edgePct(em[1])}` : "";
+      return `看好${dirCn(sm[1])}：${pTxt}市场价 $${sm[2]} 很划算${eTxt}，直接买入`;
+    }
+  }
+
+  // 5. 顺势加仓 / 反买保护 / 锁利 / 尾盘止损
+  if (/顺势确认加仓/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
+    return sm
+      ? `走势符合预期，${dirCn(sm[1])}优势扩大，以 $${sm[2]} 顺势加仓`
+      : "走势符合预期，优势扩大，顺势加仓";
+  }
+  if (/不对劲反买|反买/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
+    return sm
+      ? `行情出现反转苗头，以 $${sm[2]} 买入${dirCn(sm[1])}做反向保护`
+      : "行情出现反转苗头，买入反方向做风险保护";
+  }
+  if (/Deep Arbitrage|黑天鹅锁利|Arbitrage\s+lock|Trailing\s+Pair\s+Lock/i.test(s)) {
+    return "发现双边套利机会，买入另一侧提前锁定无风险利润";
+  }
+  if (/Defensive\s+Salvage|尾盘防守回收/i.test(s)) {
+    return "临近结束胜率走弱，提前卖出部分持仓减少损失";
+  }
+
+  // 6. 各类风控保护与观望原因（彻底去黑话）
+  if (/Anti-toxicity|Toxic|shock|剧震/i.test(s)) {
+    return "BTC 刚刚突发剧烈波动，为防误判已暂停下单并撤回挂单";
+  }
+  if (/延迟|stale|Dead-man|ms\b/i.test(s)) {
+    return "行情同步略有延迟，为了交易安全暂缓出手";
+  }
+  if (/outside balanced entry zone|价格不在区间|极端/i.test(s)) {
+    return "当前盘口价格已非常极端（胜负基本已分），不追高，保持观望";
+  }
+  if (/spread too wide|价差/i.test(s)) {
+    return "买卖价差太大，此时买入不划算，继续观望";
+  }
+  if (/Inconsistent book|Incomplete orderbook|空盘/i.test(s)) {
+    return "市场挂单深度不足，暂停下单等待流动性恢复";
+  }
+  if (/Waiting for official strike|strike price unavailable/i.test(s)) {
+    return "正在等待本轮官方开盘价确认...";
+  }
+  if (/Max entries|Fully hedged|Max position|Max capital|budget/i.test(s)) {
+    return "本轮仓位已达到安全上限，拿好现有持仓等待结算";
+  }
+  if (/Insufficient capital/i.test(s)) {
+    return "可用资金不足，暂停开新仓";
+  }
+  if (/Circuit breaker|Loss streak|daily\s*(drawdown|loss)/i.test(s)) {
+    return "触发账户风控保护，暂停开新仓，保护本金";
+  }
+  if (/No positive edge|edge too small|净边际不足|无正期望|观望/i.test(s)) {
+    return "当前价格不够便宜，性价比一般，继续耐心观望";
+  }
+  if (/Strong bullish trend|Strong bearish trend|Mean-reverting|Normal oscillation|Transitional drift/i.test(s)) {
+    return "正在持续跟踪实时行情与盘口价格变化...";
+  }
+
+  // 7. 兜底清洗：去掉版本号、英文参数括号，保证不把代码味原文直接扔给普通用户
   s = s
-    .replace(/LWAA\s+Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
-    .replace(/MWDE\s+Maker\s+Absorption\s*:/gi, "顺势被动挂单：")
-    .replace(/LWAA\s+Taker\s+Absorption\s*:/gi, "主动吃单吸筹：")
-    .replace(/MWDE\s+Taker\s+Absorption\s*:/gi, "顺势主动吃单：")
-    .replace(/Post-Shock\s+Consensus\s*:/gi, "剧震共识跟随：")
-    .replace(/Trailing\s+Pair\s+Lock\s*:/gi, "动态追踪锁利：")
-    .replace(/Defensive\s+Salvage\s*:/gi, "尾盘防守回收：")
-    .replace(/v2\.4\s+MWDE\s+Taker\s*:/gi, "双轨折价吃单：")
-    .replace(/v2\.4\s+MWDE\s+Maker\s*:/gi, "双轨折价挂单：")
-    .replace(/v2\.4\s+LWAA\s+Taker\s+IOC\s*:/gi, "单侧确信IOC吃单：")
-    .replace(/v2\.4\s+LWAA\s+Maker\s*:/gi, "单侧确信挂单：")
-    .replace(/Arbitrage\s+lock\s*:/gi, "双边套利锁仓：")
-    .replace(/Defensive\s+salvage\s*:/gi, "尾盘防守回收：")
-    .replace(/Maker\s+Absorption\s*:/gi, "被动做市吸筹：")
-    .replace(/Taker\s+Absorption\s*:/gi, "主动吃单吸筹：")
-    .replace(/^v\d+\.\d+:?\s*/i, "");
+    .replace(/^v\d+\.\d+:?\s*/i, "")
+    .replace(/\([^)]*(?:P\*|SNR|bps|tau|edge|vol|disp|shock|pair_cost|限价)[^)]*\)/gi, "")
+    .replace(/\b(IOC|Maker|Taker|FIFO|MWDE|LWAA)\b/gi, "")
+    .replace(/\bUp\b/g, "看涨")
+    .replace(/\bDown\b/g, "看跌")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 
-  if (/[\u4e00-\u9fa5]/.test(s)) return s;
-
-  if (s.includes("Waiting for warmup") || s.includes("warmup")) {
-    return "开盘冷静期观察中，等待价格基准稳定";
-  }
-  if (s.includes("No positive edge") || s.includes("edge too small")) {
-    return "当前盘口隐含赔率无正期望边际，保持观望";
-  }
-  if (s.includes("cutoff") || s.includes("tau too low")) {
-    return "临近交割窗口期，停止新开单以规避尾盘伽马风险";
-  }
-  if (s.includes("Circuit breaker") || s.includes("stale")) {
-    return "数据源延迟或价差触发微观风控保护，暂停报单";
-  }
-  if (s.includes("Max capital") || s.includes("budget")) {
-    return "本轮风险敞口已达上限，不再追加裸头寸";
-  }
-  return s;
+  return /[\u4e00-\u9fa5]/.test(s) ? s : "正在持续观察实时行情，寻找高性价比机会...";
 }
 
 // ============================================================================
@@ -4133,57 +4178,64 @@ function renderDecisionBulletin(live) {
   const countEl = $("bulletin-count");
   const modalCountEl = $("modal-bulletin-count");
   const previewEl = $("bulletin-latest-preview");
+  const statusBadgeEl = $("bulletin-status-badge");
   if (!listEl) return;
 
   ingestLiveDecisions(live);
 
   const timeline = decisionAuditLog;
   if (!timeline.length) {
-    if (countEl) countEl.textContent = "0 条";
+    if (countEl) countEl.textContent = "记录 0";
     if (modalCountEl) modalCountEl.textContent = "0 条记录";
-    if (previewEl) previewEl.textContent = "等待策略研判记录...";
+    if (statusBadgeEl) {
+      statusBadgeEl.textContent = "观望中";
+      statusBadgeEl.className = "bulletin-status-pill is-wait";
+    }
+    if (previewEl) previewEl.textContent = "正在观察实时行情，等待合适的出手时机...";
     setHtmlIfChanged(listEl, `
       <div class="bulletin-empty">
-        <div class="bulletin-empty-title">暂无策略研判记录</div>
-        <div class="bulletin-empty-sub">策略引擎每次产生关键研判、开仓、挂单或撤单决策时，将按时间顺序永久追加记录在此</div>
+        <div class="bulletin-empty-title">暂无策略思路记录</div>
+        <div class="bulletin-empty-sub">每次策略判断出新的买入、挂单或风控保护动作时，都会用通俗语言记录在这里</div>
       </div>`);
     return;
   }
 
-  if (countEl) countEl.textContent = `${timeline.length} 条`;
+  if (countEl) countEl.textContent = `记录 ${timeline.length}`;
   if (modalCountEl) modalCountEl.textContent = `${timeline.length} 条记录`;
   const tagMap = {
-    taker_buy: ["吃单", "tag-taker"],
-    taker_hedge: ["锁仓", "tag-taker"],
-    taker_unwind: ["防守", "tag-warn"],
-    quote: ["挂单", "tag-quote"],
-    wait: ["研判", "tag-hold"],
+    taker_buy: ["出手买入", "is-buy"],
+    taker_hedge: ["锁定利润", "is-buy"],
+    taker_unwind: ["风控止损", "is-warn"],
+    quote: ["排队挂单", "is-quote"],
+    wait: ["观望中", "is-wait"],
   };
 
   const latest = timeline[timeline.length - 1];
-  if (previewEl && latest) {
-    const lts = latest.t ? new Date(Number(latest.t) * 1000).toLocaleTimeString("zh-CN", {
-      hour12: false, timeZone: "Asia/Shanghai"
-    }) : "--:--:--";
-    const ltau = latest.tau_s != null ? `剩${Math.max(0, Math.round(Number(latest.tau_s)))}s` : "";
-    const [lTag] = tagMap[latest.action] || ["状态"];
-    previewEl.textContent = `[${lts}${ltau ? " · " + ltau : ""}] [${lTag}] ${translateDecisionReason(latest.reason)}`;
+  if (latest) {
+    const [lTag, lCls] = tagMap[latest.action] || ["观望中", "is-wait"];
+    if (statusBadgeEl) {
+      statusBadgeEl.textContent = lTag;
+      statusBadgeEl.className = `bulletin-status-pill ${lCls}`;
+    }
+    if (previewEl) {
+      previewEl.textContent = translateDecisionReason(latest.reason);
+    }
   }
 
   const rows = [...timeline].reverse().map((item, idx) => {
     const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
       hour12: false, timeZone: "Asia/Shanghai"
     }) : "--:--:--";
-    const winTxt = item.winRange ? `${item.winRange} · ` : "";
-    const tauTxt = item.tau_s != null ? `剩${Math.max(0, Math.round(Number(item.tau_s)))}s` : "";
-    const [tagLabel, tagCls] = tagMap[item.action] || ["状态", "tag-hold"];
+    const [tagLabel, tagCls] = tagMap[item.action] || ["观望中", "is-wait"];
     const text = translateDecisionReason(item.reason);
     const latestCls = idx === 0 ? " is-latest" : "";
     return `
-      <div class="bulletin-row${latestCls}">
-        <span class="bulletin-time">[${ts} · ${winTxt}${tauTxt}]</span>
-        <span class="bulletin-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
-        <span class="bulletin-text">${escapeHtml(text)}</span>
+      <div class="bulletin-card${latestCls}">
+        <div class="bulletin-card-top">
+          <span class="bulletin-status-pill ${tagCls}">${escapeHtml(tagLabel)}</span>
+          <span class="bulletin-card-time">${ts}</span>
+        </div>
+        <div class="bulletin-card-text">${escapeHtml(text)}</div>
       </div>`;
   }).join("");
   setHtmlIfChanged(listEl, rows);

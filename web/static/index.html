@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.66">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.67">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -441,16 +441,18 @@
         </div>
       </section>
 
-      <!-- Compact Single-Line Strategy Decision Ticker -->
-      <section class="panel decision-bulletin-panel" aria-label="策略研判记录">
+      <!-- Plain-Language Live Strategy Assistant Bar -->
+      <section class="panel decision-bulletin-panel" aria-label="策略实时思路">
         <div class="bulletin-bar" id="bulletin-toggle-btn" role="button" tabindex="0">
           <div class="bulletin-bar-left">
-            <span class="bulletin-live-dot" aria-hidden="true"></span>
-            <span class="bulletin-label">研判记录</span>
-            <span class="bulletin-latest-preview" id="bulletin-latest-preview">等待策略研判记录...</span>
+            <span class="bulletin-status-pill is-wait" id="bulletin-status-badge">观望中</span>
+            <span class="bulletin-latest-preview" id="bulletin-latest-preview">正在观察实时行情，等待合适的出手时机...</span>
           </div>
           <div class="bulletin-bar-right">
-            <span class="badge-pill" id="bulletin-count">0 条</span>
+            <span class="bulletin-more-link" id="bulletin-count">记录 0</span>
+            <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M7 5l5 5-5 5"/>
+            </svg>
           </div>
         </div>
       </section>
@@ -901,7 +903,7 @@
     <div class="modal-dialog modal-dialog-bulletin" role="dialog" aria-modal="true" aria-labelledby="decision-timeline-title">
       <div class="modal-header">
         <div class="modal-header-left">
-          <h2 class="modal-title" id="decision-timeline-title">策略研判与决策记录</h2>
+          <h2 class="modal-title" id="decision-timeline-title">策略思路记录</h2>
           <span class="badge-pill" id="modal-bulletin-count">0 条记录</span>
         </div>
         <button type="button" class="modal-close-btn bulletin-close-btn" id="decision-timeline-close-btn" aria-label="关闭弹窗">
@@ -986,6 +988,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.65"></script></script></script></script>
+  <script src="/static/app.js?v=3.2.67"></script></script></script></script></script>
 </body>
 </html>
