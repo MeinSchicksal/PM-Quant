@@ -148,7 +148,7 @@ function getPalette() {
 
 let currentPage = "overview";
 let chartViewMode = "dual"; // "dual" | "price" | "prob"
-let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss" | "mode_b"
+let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss"
 let historyTodayOnly = false;
 let _lastNotifiedSettledSlug = null;
 let cachedLive = null;
@@ -1861,17 +1861,15 @@ function renderHistoryTable(hist) {
     if (historyFilterMode === "traded") return r.traded;
     if (historyFilterMode === "win") return r.pnl > 1e-6;
     if (historyFilterMode === "loss") return r.pnl < -1e-6;
-    if (historyFilterMode === "mode_b") return r.entry_mode === "mode_b";
     return true;
   });
 
   const visible = filtered.slice(0, _historyRenderCap);
   if (countEl) {
-    const capNote = totalServerRounds > allRecords.length ? `（已载入近 ${allRecords.length} 场）` : "";
-    const isFiltered = historyFilterMode !== "all" || historyTodayOnly;
-    const statHtml = !isFiltered
-      ? `共 <strong>${totalServerRounds}</strong> 场${capNote}`
-      : `已筛选 <strong>${filtered.length}</strong> / ${allRecords.length} 场${capNote}`;
+    const isNarrowed = filtered.length !== allRecords.length;
+    const statHtml = isNarrowed
+      ? `${filtered.length} / ${totalServerRounds} 场`
+      : `${totalServerRounds} 场`;
     setHtmlIfChanged(countEl, statHtml);
   }
 
@@ -5636,8 +5634,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initInteractions();
   initEquityCurveInteractions();
   initLiveChartInteractions();
-  updateWallClock();
-  setInterval(updateWallClock, 1000);
   setInterval(updateSmoothCountdowns, 250);
 
   document.addEventListener("visibilitychange", () => {
