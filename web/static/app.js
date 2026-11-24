@@ -5000,6 +5000,10 @@ function updateSmoothCountdowns() {
     el.classList.toggle("is-active", idx === curStageIdx);
     el.classList.toggle("is-done", idx >= 0 && idx < curStageIdx);
   });
+  document.querySelectorAll("#round-stage-stepper .stage-line").forEach((ln) => {
+    const lIdx = Number(ln.getAttribute("data-line"));
+    ln.classList.toggle("is-done", Number.isFinite(lIdx) && lIdx < curStageIdx);
+  });
 }
 
 let cachedSystemStatus = null;

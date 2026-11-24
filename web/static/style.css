@@ -7017,18 +7017,52 @@ html, body {
 .stage-stepper {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   margin-left: 6px;
 }
 
 .stage-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
   font-weight: 500;
   color: var(--caption);
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: color 0.2s ease, background-color 0.2s ease;
+}
+
+.stage-step.is-active::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+#market-round-bar.is-crunch .stage-step.is-active::before {
+  background: #d97706;
+}
+
+#market-round-bar.is-freeze .stage-step.is-active::before {
+  background: var(--down);
+}
+
+.stage-line {
+  width: 18px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--border);
+  opacity: 0.7;
+  transition: background-color 0.25s ease, opacity 0.25s ease;
+}
+
+.stage-line.is-done {
+  background: var(--accent);
+  opacity: 0.55;
 }
 
 .stage-step.is-done {
@@ -8104,6 +8138,12 @@ html, body {
     padding-top: 7px;
     border-top: 1px dashed var(--border-soft);
     justify-content: space-between;
+    gap: 6px;
+  }
+  #view-market .stage-round-bar .stage-line {
+    flex: 1;
+    width: auto;
+    min-width: 10px;
   }
   .srb-range {
     font-size: 13px;
