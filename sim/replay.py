@@ -199,11 +199,29 @@ def replay_window(
         poly_open_provisional=(open_px <= 0),
     )
 
-    # Timeline: every recorded book update in either token, restricted to the
-    # window. One tick per book update keeps the replay at recording cadence.
-    times = [float(e.get("t", 0.0)) for e in events_up if start <= float(e.get("t", 0.0)) <= end]
-    times += [float(e.get("t", 0.0)) for e in events_dn if start <= float(e.get("t", 0.0)) <= end]
-    times = sorted(set(times))
+    # Timeline: every recorded book update in either token, plus significant spot moves (>= $1)
+    # after the first book snapshot so quiet-book spot breakouts wake replay just like live WS.
+    book_times = [float(e.get("t", 0.0)) for e in events_up if start <= float(e.get("t", 0.0)) <= end]
+    book_times += [float(e.get("t", 0.0)) for e in events_dn if start <= float(e.get("t", 0.0)) <= end]
+    times = sorted(set(book_times))
+    if times:
+        first_book_t = times[0]
+        wake_delta = float(config.PARAMS.get("SPOT_WAKE_DELTA_USD", 1.0))
+        last_sp_px = None
+        last_sp_t = first_book_t
+        extra_spot_times = []
+        for sr in spot_rows:
+            st = float(sr.get("t", 0.0) or 0.0)
+            spx = float(sr.get("price") or 0.0)
+            if not (first_book_t <= st <= end) or spx <= 0:
+                continue
+            if last_sp_px is None or (abs(spx - last_sp_px) >= wake_delta and (st - last_sp_t) >= 0.05):
+                if last_sp_px is not None:
+                    extra_spot_times.append(st)
+                last_sp_px = spx
+                last_sp_t = st
+        if extra_spot_times:
+            times = sorted(set(times + extra_spot_times))
 
     book_up = OrderBook()
     book_dn = OrderBook()
@@ -319,7 +337,7 @@ def replay_window(
 
     runner.close_window(close_px=close_px, official_winner=winner,
                         winner_source="ledger")
-    rec = runner.last_record
+    rec = getattr(runner, "last_record", None) or {}
     return {
         "slug": slug,
         "replayed": True,

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.90">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.91">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -21,7 +21,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v3.0</span>
+      <span class="brand-version" id="page-version">v3.2</span>
     </div>
 
     <div class="sidebar-top">
@@ -315,35 +315,35 @@
           <div class="bento-panel-head">
             <div>
               <h2>策略执行归因</h2>
-              <span class="bento-panel-sub">按首仓触发通道拆分 · 点击行可直达场次复盘</span>
+              <span class="bento-panel-sub">按整场控仓结构拆分 · 点击行可直达场次复盘</span>
             </div>
             <span class="bento-meta-text" id="kpi-total-fills">共 0 笔成交</span>
           </div>
 
           <div class="exec-table" role="table" aria-label="执行通道盈亏明细">
             <div class="exec-table-head" role="row">
-              <span>执行通道</span>
+              <span>执行结构</span>
               <span class="num">场次</span>
               <span class="num">胜率</span>
               <span class="num">净盈亏</span>
             </div>
             <button type="button" class="exec-table-row" id="exec-card-maker" data-jump-exec="maker">
-              <span class="exec-ch-name">模式 A · 首仓 Maker 挂单</span>
+              <span class="exec-ch-name">单边 · 首仓 Maker 挂单</span>
               <span class="exec-ch-cnt num" id="exec-maker-cnt">0 场</span>
               <span class="exec-ch-wr num" id="exec-maker-wr">--</span>
               <strong class="exec-card-pnl num" id="exec-maker-pnl">$0.00</strong>
             </button>
             <button type="button" class="exec-table-row" id="exec-card-taker" data-jump-exec="taker">
-              <span class="exec-ch-name">模式 A · 首仓 Taker 吃单</span>
+              <span class="exec-ch-name">单边 · Taker 吃单（含加仓）</span>
               <span class="exec-ch-cnt num" id="exec-taker-cnt">0 场</span>
               <span class="exec-ch-wr num" id="exec-taker-wr">--</span>
               <strong class="exec-card-pnl num" id="exec-taker-pnl">$0.00</strong>
             </button>
-            <button type="button" class="exec-table-row" id="exec-card-modeb" data-jump-exec="mode_b">
-              <span class="exec-ch-name">模式 B · 单边顺势折价</span>
-              <span class="exec-ch-cnt num" id="exec-modeb-cnt">0 场</span>
-              <span class="exec-ch-wr num" id="exec-modeb-wr">--</span>
-              <strong class="exec-card-pnl num" id="exec-modeb-pnl">$0.00</strong>
+            <button type="button" class="exec-table-row" id="exec-card-flip" data-jump-exec="flip">
+              <span class="exec-ch-name">双边 · 反转吃单调仓</span>
+              <span class="exec-ch-cnt num" id="exec-flip-cnt">0 场</span>
+              <span class="exec-ch-wr num" id="exec-flip-wr">--</span>
+              <strong class="exec-card-pnl num" id="exec-flip-pnl">$0.00</strong>
             </button>
           </div>
         </section>
@@ -594,6 +594,9 @@
               <button type="button" class="filter-btn" data-filter="traded">已成交</button>
               <button type="button" class="filter-btn" data-filter="win">盈利</button>
               <button type="button" class="filter-btn" data-filter="loss">亏损</button>
+              <button type="button" class="filter-btn" data-filter="taker">单边吃单</button>
+              <button type="button" class="filter-btn" data-filter="maker">首仓挂单</button>
+              <button type="button" class="filter-btn" data-filter="flip">双边调仓</button>
             </div>
             <button type="button" class="filter-today-btn" id="history-today-toggle" aria-pressed="false" title="仅筛选今日 (北京时间 UTC+8) 场次">仅看今日</button>
           </div>
@@ -768,7 +771,7 @@
             </div>
             <div class="guide-item">
               <span class="guide-metric">信号-交易所差</span>
-              <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示链路延迟同步；<strong>黄色（&gt; +100ms）</strong>说明现货链路往返偏慢。注意：<strong>生产环境强烈默认使用 <code>binance</code></strong>（全球 BTC 定价中心），切到 Kraken 等二线小所虽 ping 低但价格发现往往慢 1~5 秒，反而极易引发 Maker 逆向选择。</div>
+              <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示链路延迟同步；<strong>黄色（&gt; +100ms）</strong>说明现货链路往返偏慢。注意：优先选用高流动性主所（如欧美低延迟节点用 <code>coinbase</code>，全球定价中心用 <code>binance</code>），慎用 Kraken 等薄盘口小所，以免价格发现失真引发逆向选择。</div>
             </div>
             <div class="guide-item">
               <span class="guide-metric">Brier (模型 / 盘口)</span>
@@ -833,7 +836,7 @@
           <div class="guide-list">
             <div class="guide-item">
               <span class="guide-tag tag-ok">双源同步</span>
-              <div class="guide-desc">Binance 实时现货与 Chainlink TWAP 均在线且已对齐稳态基差，估值最精准。</div>
+              <div class="guide-desc">实时现货源（Coinbase / Binance）与 Chainlink TWAP 均在线且已对齐稳态基差，估值最精准。</div>
             </div>
             <div class="guide-item">
               <span class="guide-tag tag-bad">风控熔断</span>
@@ -937,6 +940,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.90"></script>
+  <script src="/static/app.js?v=3.2.91"></script>
 </body>
 </html>

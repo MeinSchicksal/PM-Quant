@@ -272,7 +272,10 @@ def _plan_inventory_management(
             urgent=True,
         )
 
-    max_shares_cap = lot_size * int(params.get("MAX_LOTS", 1))
+    max_lots_total = int(params.get("MAX_LOTS", 2))
+    max_shares_cap = lot_size * max_lots_total
+    max_net_lots = int(params.get("MAX_NET_LOTS", max_lots_total))
+    max_net_shares_cap = lot_size * max_net_lots
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
     anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
     vel_bps = abs(float(getattr(spot, "velocity_bps", 0.0) or 0.0))
@@ -286,11 +289,11 @@ def _plan_inventory_management(
         or bool(getattr(spot, "is_stale", False))
     )
 
-    # v2.9 Secondary Entry:
-    #   (A) Confirmed Pyramid Add on winning unhedged Leg-1 (requires calm spot + full cooldown)
-    #   (B) Dynamic Adverse-Move Flip at ANY valid opposite price [$0.01, $0.96] when held thesis
-    #       looks genuinely wrong (not blocked by mild spot velocity/storm guards, shorter cooldown,
-    #       strictly positive post-fee edge, max window exposure still capped at MAX_LOTS).
+    # Secondary Entry (v3.2 unified probabilistic inventory control):
+    #   (1) Leading-Side Multi-Buy Add: scale in 1-lot increments on the winning/leading side
+    #       without waiting for expensive 70%+ odds traps (Taker IOC).
+    #   (2) Confirmed Reversal Rebalance (Flip): cut/shift wrong exposure via Taker IOC ONLY when
+    #       opposite side confirms clear probability leadership + positive standalone EV (never passive Maker).
     max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 240.0)))
     sec_cooldown = float(params.get("SECONDARY_ENTRY_COOLDOWN_S", 15.0))
     flip_cooldown = float(params.get("FLIP_COOLDOWN_S", 5.0))
@@ -301,7 +304,11 @@ def _plan_inventory_management(
     committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
     window_budget = float(params.get("MAX_WINDOW_LOSS_USD", 10.0))
     max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
+    max_taker_spread = float(params.get("MAX_TAKER_SPREAD", max_book_spread))
     max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
+    vel_signed_inv = float(getattr(spot, "velocity_bps", 0.0) or 0.0)
+    max_adverse_spot = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
+    adverse_thresh = min(anti_toxic_bps, max_adverse_spot) if max_adverse_spot > 0.0 else anti_toxic_bps
 
     if (
         held_shares >= lot_size - 1e-4
@@ -318,14 +325,13 @@ def _plan_inventory_management(
                 and (bd < ad)
             )
 
-        # 1) Confirmed Pyramid Add on winning unhedged Leg-1 (Taker-only by default)
+        # 1) Leading-Side Multi-Buy Add (Taker-only by default)
         pyr_min_tau = float(params.get("PYRAMID_MIN_TAU_S", 35.0))
-        pyr_max_spread = float(params.get("PYRAMID_MAX_SPREAD", max_book_spread))
+        pyr_max_spread = float(params.get("PYRAMID_MAX_SPREAD", max_taker_spread))
         pyr_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
-        vel_signed_inv = float(getattr(spot, "velocity_bps", 0.0) or 0.0)
         adverse_held_shock = (
-            (held_side == "Up" and vel_signed_inv <= -anti_toxic_bps)
-            or (held_side == "Down" and vel_signed_inv >= anti_toxic_bps)
+            (held_side == "Up" and vel_signed_inv <= -adverse_thresh)
+            or (held_side == "Down" and vel_signed_inv >= adverse_thresh)
             or (bool(getattr(spot, "is_toxic_shock", False)) and abs(vel_signed_inv) < 1e-9)
         )
         pyr_taker_ok = (
@@ -333,18 +339,19 @@ def _plan_inventory_management(
             and (not spot_is_stale)
             and (not adverse_held_shock)
         ) if bool(params.get("DIRECTIONAL_ANTI_TOXICITY", True)) else (not is_toxic_or_stale)
-        # 模式 B 高价仓位（均价 > $0.75）严禁二次加仓，防止赢小亏大下的双倍尾险
         mode_b_pyramid_blocked = (
             bool(params.get("DRIFT_MODE_B_DISABLE_PYRAMID", True))
             and held_basis > float(params.get("DRIFT_MODE_B_MIN_PRICE", 0.75)) - 1e-6
         )
+        allow_add_after_flip = bool(params.get("PYRAMID_ALLOW_AFTER_FLIP", False))
         if (
             books_ok
             and pyr_taker_ok
             and pyr_cooldown_ok
             and not mode_b_pyramid_blocked
             and bool(params.get("ENABLE_PYRAMID_ADD", False))
-            and opp_shares < 1e-4
+            and (allow_add_after_flip or opp_shares < 1e-4)
+            and held_shares < max_net_shares_cap - 1e-4
             and held_total_shares < max_shares_cap - 1e-4
             and pyr_min_tau <= tau_s <= float(params.get("PYRAMID_MAX_TAU_S", 180.0))
             and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.70))
@@ -354,6 +361,7 @@ def _plan_inventory_management(
             p_max_px = float(params.get("PYRAMID_MAX_PRICE", 0.82))
             p_tk_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", 0.055))
             p_mk_edge = float(params.get("PYRAMID_MIN_MAKER_EDGE", 0.06))
+            use_dyn_pyr_edge = bool(params.get("PYRAMID_USE_DYNAMIC_EDGE", False))
             ask = held_book.best_ask
             if ask is not None and p_min_px <= ask <= p_max_px:
                 vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(held_book, lot_size)
@@ -362,14 +370,19 @@ def _plan_inventory_management(
                     fee = taker_fee_per_share(eff_ask, fee_rate)
                     need_cash = lot_size * (eff_ask + fee)
                     tk_edge = p_fair_held - (eff_ask + fee)
+                    req_pyr_edge = (
+                        required_entry_edge(eff_ask, tau_s, p_tk_edge, params)
+                        if use_dyn_pyr_edge
+                        else p_tk_edge
+                    )
                     if (
-                        tk_edge >= p_tk_edge
+                        tk_edge >= req_pyr_edge - 1e-9
                         and available_cap + 1e-9 >= need_cash
                         and committed + need_cash <= window_budget + 1e-9
                     ):
                         ioc_lim = _compute_ioc_buy_limit(
                             eff_ask, p_fair_held, p_tk_edge, tau_s, fee_rate, params,
-                            p_max_px, use_dynamic_edge=False, min_sweep_px=vis_worst,
+                            p_max_px, use_dynamic_edge=use_dyn_pyr_edge, min_sweep_px=vis_worst,
                         )
                         return Decision(
                             action="taker_buy",
@@ -378,7 +391,7 @@ def _plan_inventory_management(
                             size=lot_size,
                             utility=round(tk_edge, 4),
                             limit_price=ioc_lim,
-                            reason=f"v2.9 顺势确认加仓 IOC: {held_side} ask=${eff_ask:.2f} (限价=${ioc_lim:.2f}, P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
+                            reason=f"顺势概率优势加仓 IOC: {held_side} ask=${eff_ask:.2f} (限价=${ioc_lim:.2f}, P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
                         )
             bid = held_book.best_bid
             mk_cap = min(p_max_px, 0.78)
@@ -408,17 +421,31 @@ def _plan_inventory_management(
                         reason=f"v2.9 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
                     )
 
-        # 2) Dynamic Sub-$1.00 Pair-Lock Flip:
-        #    Acts when held leg weakens (P*_held <= FLIP_MAX_HELD_PROB), opposite leg has
-        #    positive net edge, AND total paired cost `held_basis + opp_px + fee <= FLIP_MAX_PAIR_COST`
-        #    (default $0.98 < $1.00). Never executes >$1.00 guaranteed-loss stop-loss pairs!
+        # 2) Confirmed Reversal Rebalance / Flip:
+        #    When held leg weakens (P*_held <= FLIP_MAX_HELD_PROB) and opposite leg confirms clear
+        #    leadership (P*_opp >= FLIP_MIN_OPP_PROB) with positive standalone post-fee EV, execute
+        #    Taker IOC rebalance (never passive Maker opposite quotes when FLIP_ALLOW_MAKER=False).
         p_opp = 1.0 - p_fair_held
         flip_max_spread = float(params.get("FLIP_MAX_SPREAD", 0.12))
-        flip_max_pair = float(params.get("FLIP_MAX_PAIR_COST", 0.98))
+        flip_max_pair = float(params.get("FLIP_MAX_PAIR_COST", 2.00))
+        flips_used = int(params.get("FLIPS_USED", 0) or 0)
+        max_flips = int(params.get("MAX_FLIPS_PER_WINDOW", 2))
+        flip_allow_maker = bool(params.get("FLIP_ALLOW_MAKER", False))
+        flip_allow_multi = bool(params.get("FLIP_ALLOW_MULTI", True))
+        adverse_opp_shock = (
+            (opp_side == "Up" and vel_signed_inv <= -adverse_thresh)
+            or (opp_side == "Down" and vel_signed_inv >= adverse_thresh)
+        )
+        flip_spot_ok = (
+            (not spot_is_stale)
+            and (not adverse_opp_shock)
+        ) if bool(params.get("DIRECTIONAL_ANTI_TOXICITY", True)) else (not spot_is_stale)
         if (
             bool(params.get("ENABLE_REVERSAL_FLIP", False))
             and flip_cooldown_ok
-            and opp_shares < 1e-4
+            and flip_spot_ok
+            and flips_used < max_flips
+            and (flip_allow_multi or opp_shares < 1e-4)
             and opp_book_valid
             and dual_books_consistent
             and p_fair_held <= float(params.get("FLIP_MAX_HELD_PROB", 0.42))
@@ -447,7 +474,8 @@ def _plan_inventory_management(
                         ioc_lim = _compute_ioc_buy_limit(
                             eff_ask, p_opp, f_tk_edge, tau_s, fee_rate, params,
                             f_max_px, use_dynamic_edge=False,
-                            max_pair_cost=flip_max_pair, held_basis=held_basis,
+                            max_pair_cost=flip_max_pair if flip_max_pair < 1.5 else None,
+                            held_basis=held_basis,
                             min_sweep_px=vis_worst,
                         )
                         return Decision(
@@ -457,11 +485,12 @@ def _plan_inventory_management(
                             size=lot_size,
                             utility=round(tk_edge, 4),
                             limit_price=ioc_lim,
-                            reason=f"v2.9 动态不对劲反买 IOC: {opp_side} ask=${eff_ask:.2f} (配对成本=${pair_cost:.3f}<=${flip_max_pair:.2f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
+                            reason=f"动态不对劲反买 IOC: {opp_side} ask=${eff_ask:.2f} (配对成本=${pair_cost:.3f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
                         )
             bid = opp_book.best_bid
             if (
-                not is_toxic_or_stale
+                flip_allow_maker
+                and not is_toxic_or_stale
                 and not _has_heavy_ask_wall(opp_book, params)
                 and quote_attempts < max_quote_attempts
                 and bid is not None
@@ -483,12 +512,12 @@ def _plan_inventory_management(
                         price=mk_px,
                         size=lot_size,
                         utility=round(mk_edge, 4),
-                        reason=f"v2.9 动态不对劲反买 Maker: {opp_side} bid=${mk_px:.2f} (配对成本=${pair_cost_mk:.3f}<=${flip_max_pair:.2f}, 对侧P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
+                        reason=f"动态不对劲反买 Maker: {opp_side} bid=${mk_px:.2f} (配对成本=${pair_cost_mk:.3f}, 对侧P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
                     )
 
     should_pull = (
         (held_shares >= lot_size - 1e-4)
-        or (held_shares >= max_shares_cap - 1e-4)
+        or (held_shares >= max_net_shares_cap - 1e-4)
         or (entries_count >= max_entries and held_shares >= min_order_sh - 1e-4)
         or is_toxic_or_stale
     )
@@ -534,8 +563,11 @@ def plan_decision(
     if tau_s < min_tau:
         return _wait(f"v2.3: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
 
-    # 4. Inventory State: Black-Swan Lock / Optional Deep Arb / Tail Salvage / v2.6 Secondary Entry
-    if abs(net_gap) >= 1e-4:
+    # 4. Inventory State: manage open position >= 1 full lot, OR protect active partial Maker order
+    #    (if remaining < 1 lot with NO active working order, do NOT deadlock the rest of the window).
+    min_order_sh_top = max(float(params.get("LOT_SIZE", 5.0)), float(params.get("MIN_ORDER_SHARES", 5.0)))
+    has_working_orders = bool(params.get("HAS_WORKING_ORDERS", True))
+    if abs(net_gap) >= min_order_sh_top - 1e-4 or (abs(net_gap) >= 1e-4 and has_working_orders):
         held_side: Side = "Up" if net_gap > 0 else "Down"
         opp_side: Side = "Down" if held_side == "Up" else "Up"
         return _plan_inventory_management(
@@ -560,7 +592,12 @@ def plan_decision(
         cb_msg = circuit_breaker_reason or params.get("CIRCUIT_BREAKER_REASON", "Active")
         return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
 
-    if u_shares > 1e-4 and d_shares > 1e-4 and abs(net_gap) < 1e-4:
+    if (
+        not bool(params.get("ALLOW_REENTRY_AFTER_PAIR", True))
+        and u_shares > 1e-4
+        and d_shares > 1e-4
+        and abs(net_gap) < 1e-4
+    ):
         return _wait(
             f"v2.3: Max position reached & fully hedged pair (UP {u_shares:.0f} / DN {d_shares:.0f}), holding to settlement",
             urgent=True,
@@ -570,6 +607,11 @@ def plan_decision(
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
     if entries_count >= max_entries:
         return _wait(f"Max entries per window reached ({entries_count}/{max_entries}), waiting for next window", urgent=True)
+
+    reentry_cd = float(params.get("REENTRY_COOLDOWN_S", 0.0) or 0.0)
+    elapsed_flat = params.get("SECONDS_SINCE_LAST_ENTRY")
+    if entries_count > 0 and reentry_cd > 0.0 and elapsed_flat is not None and float(elapsed_flat) < reentry_cd - 1e-6:
+        return _wait(f"波段再入场冷却 ({float(elapsed_flat):.1f}s < {reentry_cd:.1f}s)", urgent=False)
 
     max_lots = int(params.get("MAX_LOTS", 1))
     lot_size = float(params.get("LOT_SIZE", 5.0))
@@ -642,6 +684,7 @@ def plan_decision(
     min_maker_edge = float(params.get("MIN_MAKER_EDGE", params.get("LWAA_MIN_EDGE", 0.05)))
     min_taker_edge = float(params.get("MIN_TAKER_EDGE", 0.09))
     max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
+    max_taker_spread = float(params.get("MAX_TAKER_SPREAD", max_book_spread))
     max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
     enable_maker = bool(params.get("ENABLE_MAKER_ENTRY", True))
 
@@ -649,18 +692,47 @@ def plan_decision(
     best_maker = None
     wall_blocked_msg = None
     budget_blocked_msg = None
+    knife_blocked_msg = None
+    knife_urgent = False
+
+    enable_book_drop = bool(params.get("ENABLE_BOOK_DROP_GUARD", False))
+    book_drop_max = float(params.get("BOOK_DROP_GUARD_MAX", 0.03))
+    max_adverse_spot_bps = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
-        if p_side < min_prob or tb.spread > max_book_spread + 1e-6:
+        if p_side < min_prob:
             continue
 
-        # Directional toxicity: block Taker if spot is violently moving AGAINST this side
-        adverse_shock = (
-            (side == "Up" and vel_signed <= -anti_toxic_bps)
-            or (side == "Down" and vel_signed >= anti_toxic_bps)
+        # v3.1 Pre-trade knife-drop guard (zero look-ahead): block fresh Leg-1 entry
+        # when target-side Polymarket mid just dropped sharply over the past ~5s.
+        if enable_book_drop and book_drop_max > 0.0:
+            mom_key = "BOOK_MOM_UP" if side == "Up" else "BOOK_MOM_DOWN"
+            side_mkt_mom = params.get(mom_key)
+            if side_mkt_mom is not None and float(side_mkt_mom) <= -book_drop_max - 1e-9:
+                knife_blocked_msg = (
+                    f"v3.1: 盘口急砸防接飞刀 ({side} 近5s变动{float(side_mkt_mom):+.3f} <= -${book_drop_max:.2f})"
+                )
+                knife_urgent = True
+                continue
+
+        # Directional toxicity: block entry if spot is moving sharply AGAINST this side
+        adverse_spot_thresh = (
+            min(anti_toxic_bps, max_adverse_spot_bps)
+            if max_adverse_spot_bps > 0.0
+            else anti_toxic_bps
         )
+        adverse_shock = (
+            (side == "Up" and vel_signed <= -adverse_spot_thresh)
+            or (side == "Down" and vel_signed >= adverse_spot_thresh)
+        )
+        if adverse_shock:
+            knife_blocked_msg = (
+                f"v3.1: 现货逆向急跌防接飞刀 ({side}, 现货速度={vel_signed:+.1f} bps)"
+            )
+            continue
+
         ask = tb.best_ask
-        if ask is not None and not adverse_shock and min_entry_px <= ask <= max_entry_px:
+        if ask is not None and min_entry_px <= ask <= max_entry_px and tb.spread <= max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
@@ -686,6 +758,7 @@ def plan_decision(
         if (
             enable_maker
             and not is_shock_any
+            and tb.spread <= max_book_spread + 1e-6
             and quote_attempts < max_quote_attempts
             and bid is not None
             and min_entry_px <= bid <= max_entry_px
@@ -790,6 +863,9 @@ def plan_decision(
                 limit_price=ioc_lim,
                 reason=f"v3.0 模式B·单边顺势折价 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
             )
+
+    if knife_blocked_msg:
+        return _wait(knife_blocked_msg, urgent=knife_urgent)
 
     if budget_blocked_msg:
         return _wait(budget_blocked_msg, urgent=True)

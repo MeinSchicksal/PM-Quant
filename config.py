@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v3.0).
+"""PM-Quant Configuration & Single Source of Truth (v3.2).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v3.0"
+VERSION = "v3.2"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -25,13 +25,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Core Physical & Economic Parameters (v3.0: Mode A Balanced + Mode B Skewed-Drift V1b + Hold-to-Settlement + Honest Sim)
+# Core Physical & Economic Parameters (v3.1: Equal-Weight Mode A + Sub-$1 Flip + Pre-Trade Knife-Drop Guard + HWM Circuit Breaker)
 PARAMS = {
     # 1. Discrete Physical & Lot Constraints
     "LOT_SIZE": 5.0,                  # Exchange minimum order unit (lots must be integer multiples)
     "MIN_ORDER_SHARES": 5.0,          # Hard Polymarket CLOB rule: every placed order must be >= 5.0 shares
     "MIN_LOTS": 1,                    # Minimum entry lots (1 lot = 5 shares)
-    "MAX_LOTS": 2,                    # Up to 2 lots (10 shares) max exposure (v2.9 baseline)
+    "MAX_LOTS": 10,                   # High-frequency window cap per side (50 shares across multi-round trades)
+    "MAX_NET_LOTS": 2,                # Max net directional exposure |Up - Down| = 2 lots (10 shares) — cuts MaxDD by 33% while keeping full rolling flexibility
     "INITIAL_CAPITAL_USD": 100.0,     # Paper account starting bankroll
     # Calibrated dynamic wire+engine latency: tracks real measured Polymarket RTT/2 +
     # signing/CLOB matching overhead (110ms) with a conservative 150ms floor and +-15%
@@ -50,69 +51,81 @@ PARAMS = {
     "QUEUE_CANCEL_CONSERVATIVE_MULT": 1.03,  # Conservative 3% buffer on physical L2 depth cap (never looser than reality)
     "BOOK_CONSISTENCY_TOLERANCE": 0.015,     # Allow 1-tick async WS frame jitter across Up/Down streams (still blocks arb/cross)
 
-    # 2. Strict Asian TWAP Net-Edge Engine (v2.9 Strategy Baseline Restored)
-    "ENABLE_MAKER_ENTRY": True,       # Restored v2.9 baseline: Maker + Taker dual execution
-    "DIRECTIONAL_ANTI_TOXICITY": False,  # Restored v2.9 baseline: symmetric spot-shock guard
+    # 2. v3.2 Unlocked Probabilistic Multi-Buy Engine (Taker-First + No Profit-Lock Ceiling)
+    "ENABLE_MAKER_ENTRY": True,       # Keep short-lived Maker fallback when Taker edge isn't met & spot is calm
+    "DIRECTIONAL_ANTI_TOXICITY": True,# Only block adverse moves; ALLOW Taker IOC in the direction of spot momentum!
     "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)
-    "ENTRY_MAX_TAU_S": 270.0,         # Entry active window: tau in [15s, 270s]
-    "ENTRY_MIN_PROB": 0.52,           # Only bet sides with modelled win probability P* >= 52%
-    "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets for fresh Leg-1 entries
-    "ENTRY_MAX_PRICE": 0.80,          # Allow high-confidence Leg-1 up to $0.80 when net edge remains strictly positive
-    "MIN_MAKER_EDGE": 0.05,           # Minimum base edge for zero-fee Maker bids at flat/cheap prices (px <= $0.54)
+    "ENTRY_MAX_TAU_S": 285.0,         # Entry active window: start 15s after open (tau in [15s, 285s])
+    "ENTRY_MIN_PROB": 0.53,           # Bet leading probability side (P* >= 53%)
+    "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets
+    "ENTRY_MAX_PRICE": 0.74,          # Avoid >$0.74 low-payoff high-price traps ("概率越高赚的也少")
+    "MIN_MAKER_EDGE": 0.045,          # Base edge for zero-fee Maker bids
     "MIN_HOLD_MAKER_EDGE": 0.015,     # Pull resting Maker quote if live edge decays below 1.5%
-    "MIN_TAKER_EDGE": 0.065,          # Minimum base net edge after fee for Taker IOC at flat/cheap prices (px <= $0.54)
-    # Odds-Skew & Early-Window Dynamic Edge Premium (v2.9 baseline):
-    "PRICE_EDGE_PIVOT": 0.54,         # No extra price premium at or below $0.54 (golden launch zone)
-    "PRICE_EDGE_SLOPE": 0.18,         # +1.8% required edge per +$0.10 above $0.54
-    "EARLY_TAU_PIVOT_S": 180.0,       # No extra time premium once tau <= 180s
-    "EARLY_TAU_MAX_PREMIUM": 0.012,   # Smoothly adds up to +1.2% required edge across tau in (180s, 270s]
+    "MIN_TAKER_EDGE": 0.035,          # Unlocked Taker IOC net-edge threshold (after fee) for timely execution
+    # Mild Odds-Skew Guard (no early-tau penalty):
+    "PRICE_EDGE_PIVOT": 0.55,         # No extra price premium at or below $0.55
+    "PRICE_EDGE_SLOPE": 0.05,         # Mild +0.5% required edge per +$0.10 above $0.55
+    "EARLY_TAU_PIVOT_S": 180.0,
+    "EARLY_TAU_MAX_PREMIUM": 0.0,     # Remove early-window time penalty
     "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
     "MAKER_MIN_WALL_SHARES": 200.0,
     "MAX_ENTRY_VOL_BPS": 75.0,        # Extreme liquidation cascade storm guard (pause new entries when 5m vol > 75 bps)
     "MAX_QUOTE_ATTEMPTS": 99,         # Unrestricted maker quote attempts per window (protected by 2.5s requote cooldown)
     "MIN_REQUOTE_AGE_S": 2.5,         # Minimum order age (s) before allowing price-chase requote
     "MAX_BID_RETREAT_CANCEL": 0.029,  # Cancel resting quote if market best_bid retreats >= 3 ticks ($0.03)
-    "MAX_QUEUE_WAIT_S": 15.0,         # Passive queue waiting timeout (s) before cancelling (extended if near queue head)
-    "QUEUE_HEAD_PROTECT_SHARES": 25.0,# Protect resting Maker quote past 15s if remaining queue_ahead <= 25 shares at best_bid
-    "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s Binance spot move >= 2.5 bps
+    "MAX_QUEUE_WAIT_S": 8.0,          # Shorter Maker queue wait (8s) so stale quotes don't hang
+    "QUEUE_HEAD_PROTECT_SHARES": 25.0,# Protect resting Maker quote if remaining queue_ahead <= 25 shares at best_bid
+    "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s spot move >= 2.5 bps
+    # Pre-trade knife-drop guard (zero look-ahead):
+    "ENABLE_BOOK_DROP_GUARD": False,  # 默认关闭：单看盘口跌3¢不结合现货方向易误杀正常折价好单，保留开关备研
+    "BOOK_DROP_GUARD_WINDOW_S": 5.0,  # 盘口急砸回望窗口（秒）
+    "BOOK_DROP_GUARD_MAX": 0.03,      # 5s 内盘口跌幅 >= $0.03 触发阈值
+    "ENTRY_MAX_ADVERSE_SPOT_BPS": 1.5,# 方向性防接飞刀：现货 2-3s 已反向急跌超 1.5 bps 时禁止逆势开仓
     "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
     # 2b. Mode B: Skewed-Drift High-Certainty Taker IOC (V1b, zero-impact fallback after Mode A)
-    # 仅在模式 A（均衡震荡主策略）空仓观望且盘口进入单边高确定性折价区时激活，单笔 5 股严禁二次加仓
-    "ENABLE_DRIFT_MODE_B": True,
+    # 已关闭：高价负赔率（$0.75-$0.88 赢小亏大）在低波震荡日易放大尾部回撤，回归等权稳健执行
+    "ENABLE_DRIFT_MODE_B": False,
     "DRIFT_MODE_B_MIN_PRICE": 0.75,   # 仅覆盖高于 $0.75 的单边顺势区，与模式 A 零重叠
     "DRIFT_MODE_B_MAX_PRICE": 0.88,   # 高于 $0.88 赔率严重恶化，自动归入模式 C 避险
     "DRIFT_MODE_B_MIN_PROB": 0.80,    # 严格高确定性门槛，彻底封死逆势抄底
     "DRIFT_MODE_B_MIN_EDGE": 0.05,    # V1b 稳健净边际：100ms/500ms/700ms 样本内外 6 象限全胜
     "DRIFT_MODE_B_DISABLE_PYRAMID": True,  # 持有模式 B 高价仓位后严禁二次加仓，锁死单轮尾险
 
-    # 3. Position Management (v2.9 Baseline Restored: Pyramid + Sub-$1.00 Pair-Lock Flip, Black-Swan Lock OFF)
-    "ENABLE_ARBITRAGE_HEDGE": False,  # Generic wide pair-lock stays off (preserves $1.00 convexity)
+    # 3. Position Management (v3.2: No Profit-Lock Ceiling + High-Freq EV Scaling + Taker-Only Confirmed Flip)
+    "ENABLE_ARBITRAGE_HEDGE": False,  # 严格关闭锁利阈值，保留赢家腿奔向 $1.00 的完整赔率凸性
     "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
-    "ENABLE_BLACKSWAN_LOCK": False,   # Disabled — cross-sample proof (local & London both ~-$0.105/lock drag)
+    "ENABLE_BLACKSWAN_LOCK": False,   # 严格关闭锁利阈值，不把多次小赢拿去换一次亏损
     "BLACKSWAN_LOCK_MAX_OPP_ASK": 0.06,
     "BLACKSWAN_LOCK_MAX_PAIR_COST": 0.85,
-    "ENABLE_PYRAMID_ADD": True,       # Add 2nd lot on confirmed winner (Taker-only, P* >= 0.70, tau in [35s, 180s])
-    "PYRAMID_ALLOW_MAKER": False,     # Ban passive Maker pyramid bids to eliminate reversal knife-catching
-    "SECONDARY_ENTRY_COOLDOWN_S": 8.0,# 8s confirmation cooldown after Leg-1 fill before allowing pyramid add
-    "PYRAMID_MAX_TAU_S": 180.0,
-    "PYRAMID_MIN_TAU_S": 35.0,
-    "PYRAMID_MIN_PROB": 0.70,
-    "PYRAMID_MIN_PRICE": 0.35,
-    "PYRAMID_MAX_PRICE": 0.82,
-    "PYRAMID_MAX_SPREAD": 0.09,
-    "PYRAMID_MIN_MAKER_EDGE": 0.06,
-    "PYRAMID_MIN_TAKER_EDGE": 0.055,
-    "ENABLE_REVERSAL_FLIP": True,     # Sub-$1.00 dynamic pair-lock flip (v2.9 baseline)
-    "FLIP_COOLDOWN_S": 5.0,
+    "ALLOW_REENTRY_AFTER_PAIR": True, # 净敞口归零后允许同窗继续滚动开新轮
+    "REENTRY_COOLDOWN_S": 4.0,        # 净敞口归零后再入场冷却 4s
+    "ENABLE_PYRAMID_ADD": True,       # 开启同侧概率优势分批加仓（每笔 5 股，受 MAX_NET_LOTS 约束）
+    "PYRAMID_ALLOW_AFTER_FLIP": True, # 调仓后重新确立优势仍可继续分批加仓
+    "PYRAMID_ALLOW_MAKER": False,     # 加仓仅使用 Taker IOC，不挂被动单
+    "PYRAMID_USE_DYNAMIC_EDGE": True, # 与开仓使用统一动态净边际标准
+    "SECONDARY_ENTRY_COOLDOWN_S": 4.0,# 高频分批加仓冷却 4s
+    "PYRAMID_MAX_TAU_S": 285.0,
+    "PYRAMID_MIN_TAU_S": 20.0,
+    "PYRAMID_MIN_PROB": 0.54,         # 解开 70% 高价限制：领先侧 P* >= 54% 且跑赢盘口即可分批上车
+    "PYRAMID_MIN_PRICE": 0.20,
+    "PYRAMID_MAX_PRICE": 0.74,
+    "PYRAMID_MAX_SPREAD": 0.10,
+    "PYRAMID_MIN_MAKER_EDGE": 0.05,
+    "PYRAMID_MIN_TAKER_EDGE": 0.035,
+    "ENABLE_REVERSAL_FLIP": True,     # 确认反转后纯 Taker 调仓
+    "FLIP_ALLOW_MAKER": False,        # 严禁一反转就挂对面被动 Maker 单！仅确认后吃单调仓
+    "FLIP_ALLOW_MULTI": True,
+    "MAX_FLIPS_PER_WINDOW": 2,        # 单窗最多允许 2 次确认反转调仓，防锯齿无限横跳
+    "FLIP_COOLDOWN_S": 8.0,           # 反转冷却 8s，滤掉瞬间假摔噪音
     "FLIP_MAX_HELD_PROB": 0.42,
-    "FLIP_MIN_OPP_PROB": 0.58,
-    "FLIP_MAX_PAIR_COST": 0.98,
-    "FLIP_MIN_PRICE": 0.01,
-    "FLIP_MAX_PRICE": 0.96,
-    "FLIP_MAX_SPREAD": 0.12,
+    "FLIP_MIN_OPP_PROB": 0.58,        # 对侧确立 58%+ 胜率领先才触发反转调仓
+    "FLIP_MAX_PAIR_COST": 2.00,       # 解开 $0.98 配对死锁，按新侧自身独立正 EV 决定是否止血/搬家
+    "FLIP_MIN_PRICE": 0.20,
+    "FLIP_MAX_PRICE": 0.74,
+    "FLIP_MAX_SPREAD": 0.10,
     "FLIP_MIN_MAKER_EDGE": 0.045,
-    "FLIP_MIN_TAKER_EDGE": 0.040,
+    "FLIP_MIN_TAKER_EDGE": 0.035,
     "ALLOW_TAKER_UNWIND": False,      # 严格禁止任何卖出，买入后一律持有至到期结算
     "DEFENSIVE_SALVAGE_ENABLE": False,# 关闭尾盘残值卖出，严守买入即持有至结算原则
     "DEFENSIVE_SALVAGE_TAU_S": 30.0,  # Trigger only when tau <= 30s
@@ -126,16 +139,16 @@ PARAMS = {
     "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
     "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
-    # 现货 WebSocket 数据源: 生产强烈默认 binance (全球 BTC 定价中心)；备选 coinbase / okx / kraken / auto（慎用小所）
-    "SPOT_WS_PROVIDER": os.environ.get("PM_SPOT_WS_PROVIDER", "binance").strip().lower() or "binance",
+    # 现货 WebSocket 数据源: 当前切换为 coinbase (BTC/USD) 进行实测验证；支持环境变量 PM_SPOT_WS_PROVIDER 覆盖 (binance / coinbase / okx / kraken / auto)
+    "SPOT_WS_PROVIDER": os.environ.get("PM_SPOT_WS_PROVIDER", "coinbase").strip().lower() or "coinbase",
     "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated empirical 5-min BTC std floor (~14 bps); prevents Phi(d) saturation
 
-    # 5. Lifecycle & Account-Level Watchdog Boundaries (Circuit Breaker Disabled per User Request)
+    # 5. Lifecycle & Account-Level Watchdog Boundaries (纸面验证阶段关闭熔断，完整暴露策略原生下限)
     "ENABLE_CIRCUIT_BREAKER": False,
-    "MAX_ENTRIES_PER_WINDOW": 2,
-    "MAX_WINDOW_LOSS_USD": 100.00,    # Unrestricted per-window cost envelope (v2.9 baseline)
-    "MAX_DAILY_DRAWDOWN_USD": 100.00,
-    "LOSS_STREAK_COOLING": 999999,
+    "MAX_ENTRIES_PER_WINDOW": 10,     # 解开同窗 2 次开仓上限，允许高频多轮控仓
+    "MAX_WINDOW_LOSS_USD": 100.00,    # 纸面验证不设额外预算截断
+    "MAX_DAILY_DRAWDOWN_USD": 100.00, # 熔断关闭，不拦截当日回撤
+    "LOSS_STREAK_COOLING": 999999,    # 关闭连亏冷却
     "COOLING_ROUNDS": 0,
     "DEADMAN_TIMEOUT_S": 3.0,
 
@@ -147,16 +160,17 @@ PARAMS = {
     "SNR_RANGE_CONFIDENT": 1.0,
     "MAX_RANGE_DISPLACEMENT_BPS": 8.0,
     "MAX_ORDERBOOK_SPREAD": 0.06,
+    "MAX_TAKER_SPREAD": 0.10,
     "ALLOW_INCREASED_RANGE_SIZE": False,
     "MIN_MARKET_MID_BALANCED": 0.42,
     "MAX_MARKET_MID_BALANCED": 0.58,
 
     # Compatibility keys for stress/replay overrides
     "LWAA_MIN_TAU_S": 15.0,
-    "LWAA_MAX_TAU_S": 270.0,
-    "LWAA_MIN_PROB": 0.52,
-    "LWAA_MIN_EDGE": 0.05,
-    "LWAA_MAX_ENTRY_PRICE": 0.80,
+    "LWAA_MAX_TAU_S": 285.0,
+    "LWAA_MIN_PROB": 0.53,
+    "LWAA_MIN_EDGE": 0.045,
+    "LWAA_MAX_ENTRY_PRICE": 0.74,
 
     # 7. Data Retention & Disk-Full Auto-Guard (summary.jsonl is NEVER deleted)
     "RECORD_RAW_MARKET": True,          # Master toggle for raw data/1_market recording (auto-paused if disk critical)
@@ -183,7 +197,8 @@ def validate_params(params=None):
     lot_size = p["LOT_SIZE"]
     budget = p["MAX_WINDOW_LOSS_USD"]
     min_lot_cost = lot_size * max_px * p["MIN_LOTS"]
-    max_pair_cost = lot_size * p["MAX_LOTS"] * 1.00
+    net_lots = int(p.get("MAX_NET_LOTS", p["MAX_LOTS"]))
+    max_pair_cost = lot_size * net_lots * 1.00
     if budget + 1e-9 < min_lot_cost:
         errors.append(
             f"MAX_WINDOW_LOSS_USD={budget:.2f} cannot fund one minimum lot at "
@@ -192,8 +207,8 @@ def validate_params(params=None):
         )
     if budget + 1e-9 < max_pair_cost:
         errors.append(
-            f"MAX_WINDOW_LOSS_USD={budget:.2f} cannot cover a fully paired "
-            f"{lot_size * p['MAX_LOTS']:.0f}-share position (${max_pair_cost:.2f})"
+            f"MAX_WINDOW_LOSS_USD={budget:.2f} cannot cover max net directional "
+            f"{lot_size * net_lots:.0f}-share exposure (${max_pair_cost:.2f})"
         )
     if p["MAX_DAILY_DRAWDOWN_USD"] > p["INITIAL_CAPITAL_USD"]:
         errors.append(

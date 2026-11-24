@@ -31,14 +31,15 @@ class TestV210DriftModeB(unittest.TestCase):
     def setUp(self):
         self.params = dict(config.PARAMS)
         self.params.update(
+            ENABLE_DRIFT_MODE_B=True,
             AVAILABLE_CAPITAL=100.0,
             COMMITTED_WINDOW_COST=0.0,
             BASIS_READY=True,
             REQUIRE_STRIKE_AND_BASIS=True,
         )
 
-    def test_v1b_defaults_enabled_in_config(self):
-        self.assertTrue(config.PARAMS["ENABLE_DRIFT_MODE_B"])
+    def test_v1b_defaults_disabled_in_config(self):
+        self.assertFalse(config.PARAMS["ENABLE_DRIFT_MODE_B"])
         self.assertAlmostEqual(config.PARAMS["DRIFT_MODE_B_MIN_PRICE"], 0.75)
         self.assertAlmostEqual(config.PARAMS["DRIFT_MODE_B_MAX_PRICE"], 0.88)
         self.assertAlmostEqual(config.PARAMS["DRIFT_MODE_B_MIN_PROB"], 0.80)
@@ -113,7 +114,7 @@ class TestV210DriftModeB(unittest.TestCase):
 
     def test_mode_b_position_forbids_pyramid_add(self):
         # Already holding 5 shares of Up bought via Mode B at $0.82 -> pyramid add MUST be blocked
-        p = dict(self.params, SECONDS_SINCE_LAST_ENTRY=30.0)
+        p = dict(self.params, ENABLE_PYRAMID_ADD=True, SECONDS_SINCE_LAST_ENTRY=30.0)
         dec = plan_decision(
             pos_up=Position(shares=5.0, cash=4.10),
             pos_down=Position(),

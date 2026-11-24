@@ -88,6 +88,7 @@ class PipelineDriver:
         # jobs (open-price calibration & next-window prewarm) so slow tasks never starve rollover.
         self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_slow")
         self._fast_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_fast")
+        self._taker_book_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_taker_book")
         self._reconcile_future = None
         self._open_calib_future = None
         self._prewarm_future = None
@@ -163,7 +164,7 @@ class PipelineDriver:
             self.feed.close()
         except Exception:
             pass
-        for ex_attr in ("_bg_executor", "_fast_bg_executor"):
+        for ex_attr in ("_bg_executor", "_fast_bg_executor", "_taker_book_executor"):
             ex = getattr(self, ex_attr, None)
             if ex is not None:
                 try:
@@ -706,8 +707,7 @@ class PipelineDriver:
                             pass
 
                     def _delayed_book(_side_name: str):
-                        # Taker IOC 延迟到站核验优先并发直连实时 HTTP REST 盘口（线程独立 Session + 单次快失败），
-                        # 彻底杜绝读到代理/TCP 积压旧 WS 帧或阻塞主循环。
+                        # 非阻塞异步拉取到达时刻真实双边盘口：主循环零阻塞等待，完成瞬间通过 _wake_event 0ms 唤醒收割。
                         def _one(tok_key: str, label: str):
                             tok = active_tokens.get(tok_key)
                             if not tok:
@@ -716,17 +716,25 @@ class PipelineDriver:
                             if rest_bk is not None and (rest_bk.best_bid is not None or rest_bk.best_ask is not None):
                                 return rest_bk
                             return self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
-                        f_du = self.feed._executor.submit(_one, "token_up", "Up")
-                        f_dd = self.feed._executor.submit(_one, "token_down", "Down")
-                        try:
-                            r_u = f_du.result(timeout=2.2)
-                        except Exception:
-                            r_u = None
-                        try:
-                            r_d = f_dd.result(timeout=2.2)
-                        except Exception:
-                            r_d = None
-                        return (r_u, r_d)
+
+                        def _fetch_both():
+                            f_du = self._taker_book_executor.submit(_one, "token_up", "Up")
+                            f_dd = self._taker_book_executor.submit(_one, "token_down", "Down")
+                            try:
+                                r_u = f_du.result(timeout=0.75)
+                            except Exception:
+                                tok_u = active_tokens.get("token_up")
+                                r_u = self.book_ws.get_order_book(tok_u, max_age_s=1.5, require_recent_msg=True) if tok_u else None
+                            try:
+                                r_d = f_dd.result(timeout=0.75)
+                            except Exception:
+                                tok_d = active_tokens.get("token_down")
+                                r_d = self.book_ws.get_order_book(tok_d, max_age_s=1.5, require_recent_msg=True) if tok_d else None
+                            return (r_u, r_d)
+
+                        fut = self._taker_book_executor.submit(_fetch_both)
+                        fut.add_done_callback(lambda _f: self._wake_event.set())
+                        return fut
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)
@@ -800,8 +808,11 @@ class PipelineDriver:
                 min_interval_s = 0.02
                 max_interval_s = 0.20
                 if getattr(self.runner, "pending_takers", None):
-                    next_due = min(float(pt["arrive_at"]) for pt in self.runner.pending_takers)
-                    max_interval_s = min(max_interval_s, max(0.01, next_due - time.time()))
+                    if any(pt.get("book_future") is not None for pt in self.runner.pending_takers):
+                        max_interval_s = min(max_interval_s, 0.05)
+                    else:
+                        next_due = min(float(pt["arrive_at"]) for pt in self.runner.pending_takers)
+                        max_interval_s = min(max_interval_s, max(0.01, next_due - time.time()))
                 elapsed = time.monotonic() - loop_mono
                 if elapsed < min_interval_s:
                     time.sleep(min_interval_s - elapsed)

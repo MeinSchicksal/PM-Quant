@@ -71,6 +71,8 @@ class MarketFeed:
         self._last_binance_px = 0.0
         self._last_binance_t = 0.0
         self._last_spot_source = "binance_vision"
+        self._last_spot_currency = ""
+        self._spot_continuity_t = 0.0
         self._thread_local = threading.local()
         self._net_lock = threading.Lock()
         self._poly_lock = threading.Lock()
@@ -260,8 +262,19 @@ class MarketFeed:
         return None
 
     def _test_connectivity(self):
-        """Verify whether direct connection or proxy works best for both spot & CLOB."""
-        spot_test = "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"
+        """Verify whether direct connection or proxy works best for active spot provider & CLOB."""
+        spot_ws = getattr(self, "_spot_ws", None)
+        prov = str(
+            getattr(spot_ws, "active_provider", None)
+            or config.PARAMS.get("SPOT_WS_PROVIDER", "binance")
+            or "binance"
+        ).strip().lower()
+        spot_url_map = {
+            "coinbase": "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+            "kraken": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+            "okx": "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",
+        }
+        spot_test = spot_url_map.get(prov, "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT")
         clob_test = "https://clob.polymarket.com/time"
         # Prefer direct connection if both endpoints succeed without proxy (lowest latency)
         try:
@@ -473,14 +486,57 @@ class MarketFeed:
             if prev_settlement and prev_settlement[1] > 0:
                 poly_open = float(prev_settlement[1])
 
-        # 2. Spot Open Anchor: 若启用了非 Binance 现货源（如 Kraken/Coinbase BTC/USD），
-        # 在开窗 12 秒内优先取同源现货作为开盘锚点，避免把 BTC/USD 现价与 BTC/USDT K 线混算。
+        # 2. Spot Open Anchor: 若启用了非 Binance 现货源（如 Coinbase/Kraken BTC/USD），
+        # 优先取同源现货 WS 或同源历史 K 线作为开盘锚点，避免将 BTC/USD 现价与 BTC/USDT K 线混算。
         spot_ws = getattr(self, "_spot_ws", None)
-        active_prov = str(getattr(spot_ws, "active_provider", "binance") or "binance")
+        active_prov = str(
+            getattr(spot_ws, "active_provider", None)
+            or config.PARAMS.get("SPOT_WS_PROVIDER", "binance")
+            or "binance"
+        ).strip().lower()
         if spot_ws is not None and active_prov != "binance" and abs(time.time() - start_t) <= 12.0:
             ws_sample = spot_ws.get_latest(max_age_s=3.0)
             if ws_sample is not None and ws_sample[0] > 0:
                 binance_open = float(ws_sample[0])
+
+        if binance_open <= 0 and active_prov == "coinbase":
+            try:
+                iso_s = datetime.datetime.fromtimestamp(start_t, datetime.timezone.utc).isoformat()
+                iso_e = datetime.datetime.fromtimestamp(start_t + 60.0, datetime.timezone.utc).isoformat()
+                c_resp = self.session.get(
+                    "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+                    params={"start": iso_s, "end": iso_e, "granularity": 60},
+                    timeout=(1.2, 1.8),
+                )
+                if c_resp.status_code == 200:
+                    candles = c_resp.json()
+                    if isinstance(candles, list) and candles:
+                        # Coinbase returns [[bucket_ts, low, high, open, close, volume], ...]
+                        candles_sorted = sorted(
+                            [c for c in candles if isinstance(c, (list, tuple)) and len(c) >= 4],
+                            key=lambda c: abs(float(c[0]) - start_t),
+                        )
+                        if candles_sorted and abs(float(candles_sorted[0][0]) - start_t) <= 120.0:
+                            c_open = float(candles_sorted[0][3] or 0.0)
+                            if c_open > 0:
+                                binance_open = c_open
+            except Exception:
+                pass
+            if binance_open <= 0 and abs(time.time() - start_t) <= 15.0:
+                try:
+                    t_resp = self.session.get(
+                        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+                        timeout=(1.0, 1.5),
+                    )
+                    if t_resp.status_code == 200:
+                        td = t_resp.json()
+                        cb_b = float(td.get("bid", 0.0) or 0.0)
+                        cb_a = float(td.get("ask", 0.0) or 0.0)
+                        cb_px = (cb_b + cb_a) * 0.5 if (cb_b > 0 and cb_a > 0) else float(td.get("price", 0.0) or 0.0)
+                        if cb_px > 0:
+                            binance_open = cb_px
+                except Exception:
+                    pass
 
         # 默认/降级：Binance Spot 5m Kline Open (prefer data-api.binance.vision to bypass HTTP 451 geo-blocks)
         if binance_open <= 0:
@@ -517,8 +573,9 @@ class MarketFeed:
                 "start_t": start_t, "open_price": poly_open
             })
         if binance_open > 0:
+            spot_src_tag = f"{active_prov}_spot" if active_prov != "binance" else "binance_spot"
             self.record_raw_event("oracle", {
-                "t": time.time(), "kind": "window_open", "source": "binance_spot",
+                "t": time.time(), "kind": "window_open", "source": spot_src_tag,
                 "start_t": start_t, "open_price": binance_open
             })
 
@@ -703,25 +760,42 @@ class MarketFeed:
                         pass
                 self._worker_sessions.clear()
 
+    @staticmethod
+    def _spot_currency_of(source: str) -> str:
+        """Identify spot quote currency ('USD' vs 'USDT') to avoid false jumps across failover."""
+        s = str(source or "").strip().lower()
+        if "coinbase" in s or "kraken" in s:
+            return "USD"
+        if "binance" in s or "okx" in s:
+            return "USDT"
+        return ""
+
     def _fetch_live_spot_price(self, sess: requests.Session = None) -> Tuple[Optional[float], str, float, int]:
-        """Fetch live BTC spot price with same-provider priority and multi-source failover.
+        """Fetch live BTC spot price with same-currency (USD/USDT) failover priority.
 
         Returns:
             (price, source_name, latency_ms, byte_count) or (None, 'stale', 0.0, 0)
         """
         http = sess or self.session
-        active_prov = str(getattr(getattr(self, "_spot_ws", None), "active_provider", "binance") or "binance")
+        spot_ws = getattr(self, "_spot_ws", None)
+        active_prov = str(
+            getattr(spot_ws, "active_provider", None)
+            or config.PARAMS.get("SPOT_WS_PROVIDER", "binance")
+            or "binance"
+        ).strip().lower()
         base_endpoints = [
             ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
             ("binance_com", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
             ("okx", "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"),
         ]
-        # 若 WS 使用非 Binance 源（如 Kraken/Coinbase BTC-USD），断连回退 REST 时优先同源接口，
-        # 避免瞬时切换至 BTC/USDT 引入虚假 USD/USDT 基差跳变。
+        cb_ep = ("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker")
+        kr_ep = ("kraken", "https://api.kraken.com/0/public/Ticker?pair=XBTUSD")
+        # 若主源为 BTC/USD（Coinbase / Kraken），REST 降级优先互备同币种 USD 源，
+        # 仅在双 USD 源均不可用时才降级至 USDT 源，防止瞬时混入 USD/USDT 溢价跳变。
         if active_prov == "kraken":
-            endpoints = [("kraken", "https://api.kraken.com/0/public/Ticker?pair=XBTUSD")] + base_endpoints
+            endpoints = [kr_ep, cb_ep] + base_endpoints
         elif active_prov == "coinbase":
-            endpoints = [("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker")] + base_endpoints
+            endpoints = [cb_ep, kr_ep] + base_endpoints
         elif active_prov == "okx":
             endpoints = [("okx", "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT")] + base_endpoints[:2]
         else:
@@ -780,6 +854,13 @@ class MarketFeed:
         if live_px is not None and live_px > 0:
             current_px = live_px
             self._consecutive_spot_fails = 0
+            cur_ccy = self._spot_currency_of(src)
+            prev_ccy = getattr(self, "_last_spot_currency", "")
+            if cur_ccy and prev_ccy and cur_ccy != prev_ccy:
+                # 计价币种在 USD <-> USDT 间切换时，重置连续性基准时刻，防止把交易所溢价差误算成瞬时价格跳变
+                self._spot_continuity_t = spot_ts
+            if cur_ccy:
+                self._last_spot_currency = cur_ccy
             self._last_binance_px = current_px
             self._last_binance_t = spot_ts
             self._last_spot_source = src
@@ -800,10 +881,13 @@ class MarketFeed:
             spot_ts = float(getattr(self, "_last_binance_t", 0.0) or 0.0)
             src = "stale"
 
-        # Calculate 2-3s rapid shift velocity in bps
+        # Calculate 2-3s rapid shift velocity in bps (never span across a USD<->USDT currency failover)
         velocity_3s = 0.0
-        if current_px > 0:
+        cont_t = float(getattr(self, "_spot_continuity_t", 0.0) or 0.0)
+        if current_px > 0 and not is_stale:
             for old_t, old_px in reversed(self.spot_history):
+                if old_t < cont_t - 1e-9:
+                    break
                 if (t - old_t) >= 2.0:
                     if old_px > 0:
                         velocity_3s = ((current_px - old_px) / old_px) * 10000.0

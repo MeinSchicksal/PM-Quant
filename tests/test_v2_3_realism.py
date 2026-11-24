@@ -241,7 +241,7 @@ class TestV23Realism(unittest.TestCase):
         # 1. Wide spread (0.36 / 0.46 -> spread = 0.10 > 0.06): do not quote Maker into vacuum
         b_up = OrderBook(bids=[(0.54, 20.0)], asks=[(0.64, 20.0)])
         b_dn_wide = OrderBook(bids=[(0.36, 20.0)], asks=[(0.46, 20.0)])
-        dec_wide = plan_decision(Position(0, 0), Position(0, 0), b_up, b_dn_wide, sp, 180.0, config.PARAMS)
+        dec_wide = plan_decision(Position(0, 0), Position(0, 0), b_up, b_dn_wide, sp, 180.0, dict(config.PARAMS, MAX_TAKER_SPREAD=0.06))
         self.assertEqual(dec_wide.action, "wait")
 
         # 2. Zero-noise chop (+0.5 bps < 1.5 bps) in MWDE is filtered out

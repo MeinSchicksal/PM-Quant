@@ -44,7 +44,7 @@ class TestPolicyAndMatcherHardening(unittest.TestCase):
         b_up_wall = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 300.0)], source_t=1200.0, received_at=1200.0)
         b_dn = _book(0.49, 0.51)
         spot = SpotState(timestamp=1200.0, price=65030.0, open_price=65000.0, realized_vol_bps=16.0)
-        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
+        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05, MIN_TAKER_EDGE=0.065)
         dec = plan_decision(Position(0, 0), Position(0, 0), b_up_wall, b_dn, spot, tau_s=120.0, params=p_mk, p_fair=0.56)
         self.assertEqual(dec.action, "wait")
         self.assertTrue(dec.urgent_cancel, "Heavy ask wall must urgently pull existing resting maker bids")

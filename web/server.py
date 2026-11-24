@@ -286,9 +286,11 @@ _ENTRY_MODE_MAX_ENTRIES = 2000
 
 
 def _infer_entry_mode(ledger_dir: Path, record: dict):
-    """返回该轮首仓触发模式（mode_b / maker / taker），旧记录通过缓存仅解压一次 detail 文件。"""
+    """返回该轮执行控仓模式（flip / maker / taker / legacy mode_b），旧记录通过缓存仅解压一次 detail 文件。"""
+    if _num(record.get("pos_up")) > 1e-6 and _num(record.get("pos_down")) > 1e-6:
+        return "flip"
     existing = record.get("entry_mode")
-    if existing in ("mode_b", "maker", "taker"):
+    if existing in ("flip", "mode_b", "maker", "taker"):
         return existing
     slug = str(record.get("slug") or "")
     if not slug:
@@ -303,9 +305,12 @@ def _infer_entry_mode(ledger_dir: Path, record: dict):
         detail = _read_detail(ledger_dir, slug)
         fills = (detail or {}).get("fills") or []
         if fills:
+            filled_sides = {f.get("side") for f in fills if f.get("side") in ("Up", "Down")}
             f0 = fills[0]
             r0 = str(f0.get("reason") or "")
-            if "模式B" in r0 or "[MODE_B]" in r0:
+            if len(filled_sides) >= 2:
+                mode = "flip"
+            elif "模式B" in r0 or "[MODE_B]" in r0:
                 mode = "mode_b"
             elif str(f0.get("kind") or "").lower() == "maker":
                 mode = "maker"
@@ -1096,7 +1101,7 @@ class QuantHandler(BaseHTTPRequestHandler):
                 exec_breakdown = {
                     "maker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
                     "taker": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
-                    "mode_b": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                    "flip": {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0},
                 }
 
                 if summary_file.exists():
@@ -1151,7 +1156,8 @@ class QuantHandler(BaseHTTPRequestHandler):
                                     e_mode = _infer_entry_mode(ledger_dir, w)
                                     if e_mode:
                                         w["entry_mode"] = e_mode
-                                        eb = exec_breakdown.get(e_mode)
+                                        eb_key = "taker" if e_mode == "mode_b" else e_mode
+                                        eb = exec_breakdown.get(eb_key)
                                         if eb is not None:
                                             eb["count"] += 1
                                             eb["pnl"] = round(eb["pnl"] + pnl, 4)

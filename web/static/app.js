@@ -148,7 +148,7 @@ function getPalette() {
 
 let currentPage = "overview";
 let chartViewMode = "dual"; // "dual" | "price" | "prob"
-let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss"
+let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss" | "maker" | "taker" | "flip"
 let historyTodayOnly = false;
 let _lastNotifiedSettledSlug = null;
 let cachedLive = null;
@@ -754,18 +754,21 @@ function translateDecisionReason(rawReason) {
     }
   }
 
-  // 5. 顺势加仓 / 反买保护 / 锁利 / 尾盘止损
-  if (/顺势确认加仓/i.test(s)) {
+  // 5. 顺势加仓 / 反转调仓 / 再入场冷却 / 锁利 / 尾盘止损
+  if (/顺势确认加仓|顺势概率优势加仓/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
     return sm
-      ? `走势符合预期，${dirCn(sm[1])}优势扩大，以 $${sm[2]} 顺势加仓`
-      : "走势符合预期，优势扩大，顺势加仓";
+      ? `走势占优且赔率划算，以 $${sm[2]} 顺势加仓买入${dirCn(sm[1])}`
+      : "走势占优且赔率划算，顺势加仓买入";
   }
   if (/不对劲反买|反买/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
     return sm
-      ? `行情出现反转苗头，以 $${sm[2]} 买入${dirCn(sm[1])}做反向保护`
-      : "行情出现反转苗头，买入反方向做风险保护";
+      ? `行情确认反转，以 $${sm[2]} 吃单买入${dirCn(sm[1])}做方向调仓`
+      : "行情确认反转，吃单买入反方向做仓位调整";
+  }
+  if (/波段再入场冷却/i.test(s)) {
+    return "刚完成对冲调仓，短冷却 4 秒后重新观察领先方向";
   }
   if (/Deep Arbitrage|黑天鹅锁利|Arbitrage\s+lock|Trailing\s+Pair\s+Lock/i.test(s)) {
     return "发现双边套利机会，买入另一侧提前锁定无风险利润";
@@ -1095,7 +1098,7 @@ function updateOverview(live, hist) {
   [
     ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr"],
     ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr"],
-    ["mode_b", "exec-card-modeb", "exec-modeb-cnt", "exec-modeb-pnl", "exec-modeb-wr"],
+    ["flip", "exec-card-flip", "exec-flip-cnt", "exec-flip-pnl", "exec-flip-wr"],
   ].forEach(([key, cardId, cntId, pnlId, wrId]) => {
     const item = eb[key] || { count: 0, wins: 0, losses: 0, win_rate: 0, pnl: 0 };
     const c = Number(item.count || 0);
@@ -1488,11 +1491,9 @@ function initEquityCurveInteractions() {
   document.querySelectorAll("[data-jump-exec]").forEach((row) => {
     row.addEventListener("click", () => {
       const mode = row.getAttribute("data-jump-exec");
-      const targetFilter = mode === "mode_b" ? "mode_b" : "traded";
-      if (typeof currentHistoryFilter !== "undefined") {
-        currentHistoryFilter = targetFilter;
-      }
-      document.querySelectorAll("#history-filter-tabs .seg-btn").forEach((b) => {
+      const targetFilter = ["maker", "taker", "flip"].includes(mode) ? mode : "traded";
+      historyFilterMode = targetFilter;
+      document.querySelectorAll("#history-filter-group .filter-btn").forEach((b) => {
         b.classList.toggle("active", b.getAttribute("data-filter") === targetFilter);
       });
       window.location.hash = "#history";
@@ -1796,6 +1797,7 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
     tail_freeze: "尾盘",
   };
   const modeMetaMap = {
+    flip: ["调仓", "tag-mode-b"],
     mode_b: ["模式B", "tag-mode-b"],
     taker: ["Taker", "tag-taker"],
     maker: ["Maker", "tag-maker"],
@@ -1861,6 +1863,9 @@ function renderHistoryTable(hist) {
     if (historyFilterMode === "traded") return r.traded;
     if (historyFilterMode === "win") return r.pnl > 1e-6;
     if (historyFilterMode === "loss") return r.pnl < -1e-6;
+    if (historyFilterMode === "flip") return r.traded && (r.entry_mode === "flip" || (r.up_shares > 1e-6 && r.down_shares > 1e-6));
+    if (historyFilterMode === "taker") return r.traded && (r.entry_mode === "taker" || r.entry_mode === "mode_b");
+    if (historyFilterMode === "maker") return r.traded && r.entry_mode === "maker";
     return true;
   });
 
@@ -3927,8 +3932,8 @@ function renderModalDetailContent(winData, rec) {
           <span><i class="legend-dot twap"></i>Chainlink 60s TWAP</span>
           <span><i class="legend-dot open-ref"></i>开盘基准</span>
           <span><i class="legend-dot up-prob"></i>UP 盘口隐含 (%)</span>
-          <button type="button" class="modal-legend-toggle ${modalShowDeBasisSpot ? "is-active" : ""}" id="modal-toggle-spot" title="叠加按开盘去基差对齐的 Binance 现货走势">
-            <i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加 Binance 现货" : "叠加 Binance 现货"}
+          <button type="button" class="modal-legend-toggle ${modalShowDeBasisSpot ? "is-active" : ""}" id="modal-toggle-spot" title="叠加按开盘去基差对齐的实时现货走势">
+            <i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加实时现货" : "叠加实时现货"}
           </button>
         </div>
       </div>
@@ -4003,7 +4008,7 @@ function renderModalDetailContent(winData, rec) {
       toggleSpotBtn.addEventListener("click", () => {
         modalShowDeBasisSpot = !modalShowDeBasisSpot;
         toggleSpotBtn.classList.toggle("is-active", modalShowDeBasisSpot);
-        toggleSpotBtn.innerHTML = `<i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加 Binance 现货(去基差)" : "叠加 Binance 现货(去基差)"}`;
+        toggleSpotBtn.innerHTML = `<i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加实时现货(去基差)" : "叠加实时现货(去基差)"}`;
         drawModalHistoryChart(winData, rec);
       });
     }
@@ -4516,7 +4521,7 @@ function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
     </div>
     ${actionBanner}
     <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
-    <div class="tt-row"><span>Binance 实时现货</span><b>${fmtUsd(pt.spot)}${basisDiff !== null ? ` (${basisDiff >= 0 ? "+" : ""}$${basisDiff.toFixed(1)})` : ""}</b></div>
+    <div class="tt-row"><span>${escapeHtml(String(cachedLive?.spot_source || "现货").replace(/_ws$/i, "").toUpperCase())} 实时现货</span><b>${fmtUsd(pt.spot)}${basisDiff !== null ? ` (${basisDiff >= 0 ? "+" : ""}$${basisDiff.toFixed(1)})` : ""}</b></div>
     <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
   `;
   tooltip.style.left = "0px";

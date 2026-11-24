@@ -100,16 +100,22 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
         self.assertEqual(dec.side, "Down")
 
     def test_fully_hedged_pair_holds_to_settlement(self):
-        """Balanced Up/Down pair holds cleanly for $1.00 redemption."""
+        """Balanced Up/Down pair holds when reentry disabled, and can trade again when edge exists."""
         pos_up = Position(shares=5.0, cash=2.10)
         pos_dn = Position(shares=5.0, cash=1.80)
         book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.65, 50.0)])
         book_dn = OrderBook(bids=[(0.30, 50.0)], asks=[(0.35, 50.0)])
         spot = SpotState(timestamp=1200.0, price=75000.0, open_price=75000.0)
 
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=100.0, params=self.params)
-        self.assertEqual(dec.action, "wait")
-        self.assertIn("fully hedged pair", dec.reason.lower())
+        dec_lock = plan_decision(
+            pos_up, pos_dn, book_up, book_dn, spot, tau_s=100.0,
+            params=dict(self.params, ALLOW_REENTRY_AFTER_PAIR=False),
+        )
+        self.assertEqual(dec_lock.action, "wait")
+        self.assertIn("fully hedged pair", dec_lock.reason.lower())
+
+        dec_coin = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=100.0, params=self.params)
+        self.assertEqual(dec_coin.action, "wait")
 
     def test_asian_twap_estimator_and_objective_side_alignment(self):
         """estimate_p_fair reflects basis-adjusted cl_est + realized 60s TWAP, driving determine_objective_side."""

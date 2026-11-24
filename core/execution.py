@@ -65,6 +65,9 @@ def plan_order_actions(
     min_hold_maker_edge: Optional[float] = None,
     queue_ahead_map: Optional[dict] = None,
     queue_head_protect_shares: float = 25.0,
+    mkt_mom_up: Optional[float] = None,
+    mkt_mom_down: Optional[float] = None,
+    book_drop_guard_max: Optional[float] = None,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
@@ -94,6 +97,12 @@ def plan_order_actions(
                     o.cancel_reason = "急剧变盘/紧急避险撤单"
                     to_cancel.append(o)
                     continue
+                if o.purpose != "hedge" and book_drop_guard_max is not None and float(book_drop_guard_max) > 0.0:
+                    side_mom = mkt_mom_up if o.side == "Up" else mkt_mom_down
+                    if side_mom is not None and float(side_mom) <= -float(book_drop_guard_max) - 1e-9:
+                        o.cancel_reason = f"盘口急砸防毒撤单({o.side} 5s变动{float(side_mom):+.3f})"
+                        to_cancel.append(o)
+                        continue
                 if o.purpose != "hedge" and preferred_side is not None and o.side != preferred_side:
                     o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
                     to_cancel.append(o)

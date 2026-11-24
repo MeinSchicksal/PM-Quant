@@ -38,7 +38,7 @@ SPOT_WS_PROVIDERS: Dict[str, Dict[str, Any]] = {
     },
     "coinbase": {
         "urls": ("wss://ws-feed.exchange.coinbase.com",),
-        "subscribe": {"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["ticker"]},
+        "subscribe": {"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["ticker", "heartbeat"]},
         "source": "coinbase_ws",
         "label": "Coinbase (BTC/USD, US/CF)",
     },
@@ -200,6 +200,7 @@ class BinanceSpotWSClient:
         self._price: float = 0.0
         self._last_wake_px: float = 0.0
         self._updated_t: float = 0.0
+        self._last_heartbeat_t: float = 0.0
         self._last_pong_t: float = 0.0
         self._source: str = SPOT_WS_PROVIDERS[self.active_provider]["source"]
         self.rtt_ms: float = 0.0
@@ -245,7 +246,12 @@ class BinanceSpotWSClient:
             px = (bid + ask) * 0.5
         elif payload.get("p") is not None or payload.get("c") is not None:
             px = _safe_float(payload.get("p") or payload.get("c"), 0.0)
-        # 2. Coinbase Exchange ticker
+        # 2. Coinbase Exchange ticker / heartbeat
+        elif payload.get("type") == "heartbeat":
+            ts = time.time() if now is None else float(now)
+            with self._lock:
+                self._last_heartbeat_t = ts
+            return False
         elif payload.get("type") == "ticker":
             cb_bid = _safe_float(payload.get("best_bid"), 0.0)
             cb_ask = _safe_float(payload.get("best_ask"), 0.0)
@@ -292,14 +298,21 @@ class BinanceSpotWSClient:
         return True
 
     def get_latest(self, max_age_s: float = 2.0, now: Optional[float] = None) -> Optional[Tuple[float, float, str]]:
-        """Return (price, updated_ts, source) if fresh, else None."""
+        """Return (price, updated_ts, source) if fresh (or live heartbeat on quiet book), else None."""
         t = time.time() if now is None else float(now)
         with self._lock:
             if self._price <= 0.0 or self._updated_t <= 0.0:
                 return None
-            if (t - self._updated_t) > max_age_s:
-                return None
-            return self._price, self._updated_t, self._source
+            if (t - self._updated_t) <= max_age_s:
+                return self._price, self._updated_t, self._source
+            if (
+                self.connected
+                and self._last_heartbeat_t > 0.0
+                and (t - self._last_heartbeat_t) <= max_age_s
+                and (t - self._updated_t) <= self.idle_reconnect_s
+            ):
+                return self._price, t, self._source
+            return None
 
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -374,6 +387,7 @@ class BinanceSpotWSClient:
                         _ws_ping_rtt_loop(ws, _on_rtt, interval_s=5.0)
                     )
                     last_activity_t = time.monotonic()
+                    prev_hb_t = self._last_heartbeat_t
                     try:
                         while self.running and not self._reconnect_flag:
                             try:
@@ -388,9 +402,12 @@ class BinanceSpotWSClient:
                                 except Exception:
                                     accepted = False
 
-                            if accepted:
+                            hb_advanced = self._last_heartbeat_t > prev_hb_t
+                            if hb_advanced:
+                                prev_hb_t = self._last_heartbeat_t
+                            if accepted or hb_advanced:
                                 last_activity_t = time.monotonic()
-                                if consec_fails > 0 and (last_activity_t - connected_at) >= 30.0:
+                                if accepted and consec_fails > 0 and (last_activity_t - connected_at) >= 30.0:
                                     consec_fails = 0
                             elif (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
                                 raise TimeoutError(

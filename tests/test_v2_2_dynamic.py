@@ -81,7 +81,7 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.42, 20.0)], asks=[(0.44, 20.0)])
         spot = SpotState(timestamp=1100.0, price=75030.0, open_price=75000.0, velocity_bps=3.0)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=180.0, params=self.params)
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=180.0, params=dict(self.params, DIRECTIONAL_ANTI_TOXICITY=False))
         self.assertEqual(dec.action, "wait")
         self.assertTrue(dec.urgent_cancel)
         self.assertIn("Anti-toxicity", dec.reason)

@@ -36,6 +36,7 @@ class CircuitBreaker:
         self.cooling_rounds = cooling_rounds
 
         self.daily_pnl = 0.0
+        self.daily_peak = 0.0
         self.consecutive_losses = 0
         self.cooling_rounds_left = 0
         self.is_tripped = False
@@ -52,8 +53,13 @@ class CircuitBreaker:
         if today != self.current_day:
             self.current_day = today
             self.daily_pnl = 0.0
+            self.daily_peak = 0.0
             self.is_tripped = False
             self.trip_reason = ""
+
+    def current_drawdown(self) -> float:
+        """Return current intraday drawdown from today's high-water mark (>= 0)."""
+        return max(0.0, self.daily_peak - self.daily_pnl)
 
     def record_round_result(self, net_pnl: float, traded: bool, ts: float = None):
         """Update circuit breaker metrics upon completion of a trading window."""
@@ -68,6 +74,8 @@ class CircuitBreaker:
             return
 
         self.daily_pnl += net_pnl
+        if self.daily_pnl > self.daily_peak:
+            self.daily_peak = self.daily_pnl
 
         # Track consecutive loss streak
         if net_pnl < -1e-4:
@@ -80,10 +88,15 @@ class CircuitBreaker:
             if self.cooling_rounds_left > 0:
                 self.cooling_rounds_left -= 1
 
-        # Check account-level daily drawdown limit
-        if self.daily_pnl <= -self.max_daily_drawdown_usd:
+        # Check account-level intraday high-water-mark drawdown limit
+        peak_dd = self.current_drawdown()
+        if peak_dd >= self.max_daily_drawdown_usd - 1e-9:
             self.is_tripped = True
-            self.trip_reason = f"Daily drawdown ${abs(self.daily_pnl):.2f} exceeded limit ${self.max_daily_drawdown_usd:.2f}"
+            self.trip_reason = (
+                f"Daily drawdown ${peak_dd:.2f} "
+                f"(peak ${self.daily_peak:+.2f} -> ${self.daily_pnl:+.2f}) "
+                f"exceeded limit ${self.max_daily_drawdown_usd:.2f}"
+            )
 
     def is_active(self, ts: float = None) -> Tuple[bool, str]:
         """Check whether circuit breaker watchdog is currently active.
@@ -94,8 +107,9 @@ class CircuitBreaker:
         if not self.enabled:
             return False, "Disabled (熔断器已禁用)"
         self._check_day_rollover(ts)
-        if self.is_tripped or self.daily_pnl <= -self.max_daily_drawdown_usd:
-            reason = self.trip_reason or f"Daily drawdown limit reached (-${abs(self.daily_pnl):.2f})"
+        peak_dd = self.current_drawdown()
+        if self.is_tripped or peak_dd >= self.max_daily_drawdown_usd - 1e-9:
+            reason = self.trip_reason or f"Daily drawdown limit reached (-${peak_dd:.2f})"
             return True, reason
         if self.cooling_rounds_left > 0:
             return True, f"Loss streak cooling ({self.cooling_rounds_left} rounds remaining)"
@@ -103,12 +117,15 @@ class CircuitBreaker:
 
     def get_status(self, ts: float = None) -> Dict[str, Any]:
         """Return serialized status for live journal and dashboard."""
+        peak_dd = self.current_drawdown()
         if not self.enabled:
             return {
                 "active": False,
                 "reason": "Disabled (已取消熔断)",
                 "status": "DISABLED",
                 "daily_pnl": round(self.daily_pnl, 4),
+                "daily_peak": round(self.daily_peak, 4),
+                "daily_drawdown": round(peak_dd, 4),
                 "is_tripped": False,
                 "cooling_rounds_left": 0,
                 "consecutive_losses": self.consecutive_losses,
@@ -116,12 +133,15 @@ class CircuitBreaker:
                 "loss_streak_cooling": self.loss_streak_cooling
             }
         active, reason = self.is_active(ts)
+        peak_dd = self.current_drawdown()
         status_tag = "TRIPPED" if self.is_tripped else ("COOLING" if self.cooling_rounds_left > 0 else "NORMAL")
         return {
             "status": status_tag,
             "active": active,
             "reason": reason,
             "daily_pnl": round(self.daily_pnl, 4),
+            "daily_peak": round(self.daily_peak, 4),
+            "daily_drawdown": round(peak_dd, 4),
             "consecutive_losses": self.consecutive_losses,
             "cooling_rounds_left": self.cooling_rounds_left,
             "max_daily_drawdown_usd": self.max_daily_drawdown_usd,
@@ -131,6 +151,7 @@ class CircuitBreaker:
     def load_from_summary(self, summary_records: List[Dict[str, Any]]):
         """Restore circuit breaker state chronologically from historical summary lines."""
         self.daily_pnl = 0.0
+        self.daily_peak = 0.0
         self.consecutive_losses = 0
         self.cooling_rounds_left = 0
         self.is_tripped = False

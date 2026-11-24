@@ -373,7 +373,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=150.0, params=p_pyr, p_fair=0.72, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Up")
-        self.assertIn("顺势确认加仓", dec.reason)
+        self.assertIn("加仓", dec.reason)
 
     def test_reversal_flip_triggers_when_leg1_collapses_and_opp_has_edge(self):
         import config
@@ -384,7 +384,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.51, 50.0, 0.53, 50.0)
         b_dn = _book(0.46, 50.0, 0.48, 50.0)  # pair_cost = 0.48 + 0.48 + 0.0175 = 0.9775 <= 0.98 (< $1.00)
         spot = SpotState(timestamp=1180.0, price=64910.0, open_price=65000.0, realized_vol_bps=14.0)
-        p_flip = dict(config.PARAMS, ENABLE_REVERSAL_FLIP=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2)
+        p_flip = dict(config.PARAMS, ENABLE_REVERSAL_FLIP=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2, FLIP_MAX_PAIR_COST=0.98)
         dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=120.0, params=p_flip, p_fair=0.25, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Down")
@@ -480,7 +480,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.41, 50.0, 0.43, 50.0)
         b_dn = _book(0.57, 50.0, 0.59, 50.0)
         spot = SpotState(timestamp=1160.0, price=64920.0, open_price=65000.0, realized_vol_bps=14.0)
-        p = dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=30.0)
+        p = dict(config.PARAMS, MAX_LOTS=2, MAX_NET_LOTS=2, SECONDS_SINCE_LAST_ENTRY=30.0)
         dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=140.0, params=p, p_fair=0.20, entries_count=1)
         self.assertEqual(dec.action, "wait")
 
@@ -591,10 +591,13 @@ class TestV26PolicyUpgrades(unittest.TestCase):
             MAX_LOTS=2,
             MAX_ENTRIES_PER_WINDOW=2,
             PYRAMID_MIN_PROB=0.70,
+            PYRAMID_MIN_TAU_S=35.0,
+            PYRAMID_MIN_TAKER_EDGE=0.055,
+            PYRAMID_USE_DYNAMIC_EDGE=False,
             SECONDS_SINCE_LAST_ENTRY=30.0,
         )
 
-        # A: Taker edge insufficient (0.72 - 0.68 - fee < 0.065) -> must NOT hang passive Maker pyramid bid
+        # A: Taker edge insufficient (0.72 - 0.68 - fee < 0.055) -> must NOT hang passive Maker pyramid bid
         b_up_tight = _book(0.66, 50.0, 0.68, 50.0)
         dec_a = plan_decision(pos_up, pos_dn, b_up_tight, b_dn_tight, spot, tau_s=80.0, params=params, p_fair=0.72, entries_count=1)
         self.assertEqual(dec_a.action, "wait")
@@ -608,11 +611,11 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         dec_c = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=25.0, params=params, p_fair=0.74, entries_count=1)
         self.assertEqual(dec_c.action, "wait")
 
-        # D: p_fair >= 0.70, tau >= 45s, Taker edge >= 0.065 -> executes Taker pyramid add
+        # D: p_fair >= 0.70, tau >= 45s, Taker edge >= 0.055 -> executes Taker pyramid add
         dec_d = plan_decision(pos_up, pos_dn, b_up_cheap, b_dn_cheap, spot, tau_s=80.0, params=params, p_fair=0.74, entries_count=1)
         self.assertEqual(dec_d.action, "taker_buy")
         self.assertEqual(dec_d.side, "Up")
-        self.assertIn("顺势确认加仓", dec_d.reason)
+        self.assertIn("加仓", dec_d.reason)
 
     def test_v28_heavy_ask_wall_blocks_maker_but_allows_taker(self):
         import config
@@ -624,7 +627,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_dn = _book(0.49, 50.0, 0.51, 50.0)
         spot = SpotState(timestamp=1200.0, price=65030.0, open_price=65000.0, realized_vol_bps=16.0)
 
-        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05)
+        p_mk = dict(config.PARAMS, ENABLE_MAKER_ENTRY=True, MIN_MAKER_EDGE=0.05, MIN_TAKER_EDGE=0.065)
         # Edge enough for Maker (0.56 - 0.49 = 0.07) but not Taker (0.56 - 0.50 - 0.0175 = 0.0425 < 0.070)
         dec_mk = plan_decision(pos_empty, pos_empty, b_up_wall, b_dn, spot, tau_s=120.0, params=p_mk, p_fair=0.56)
         self.assertEqual(dec_mk.action, "wait")

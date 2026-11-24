@@ -20,8 +20,8 @@ def _book(bid_px, bid_sz, ask_px, ask_sz, t=1200.0):
 
 class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
     def test_v29_version_and_calibrated_defaults(self):
-        self.assertEqual(config.VERSION, "v3.0")
-        self.assertEqual(config.BATCH_ID, "v3.0")
+        self.assertEqual(config.VERSION, "v3.2")
+        self.assertEqual(config.BATCH_ID, "v3.2")
         self.assertFalse(config.PARAMS["ENABLE_BLACKSWAN_LOCK"])
         self.assertAlmostEqual(config.PARAMS["LATENCY_S"], 0.18, places=4)
         self.assertAlmostEqual(config.PARAMS["CANCEL_LATENCY_S"], 0.18, places=4)
@@ -65,13 +65,16 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         b_dn = _book(0.52, 50.0, 0.54, 50.0)
         spot_fast = SpotState(
             timestamp=1210.0, price=64850.0, open_price=65000.0,
-            velocity_bps=4.0, realized_vol_bps=85.0,
+            velocity_bps=-4.0, realized_vol_bps=85.0,
         )
         p_fast = dict(
             config.PARAMS,
             ENABLE_REVERSAL_FLIP=True,
             MAX_LOTS=2,
             MAX_ENTRIES_PER_WINDOW=2,
+            FLIP_MAX_PAIR_COST=0.98,
+            FLIP_MAX_PRICE=0.74,
+            FLIP_COOLDOWN_S=5.0,
             SECONDS_SINCE_LAST_ENTRY=6.0,
         )
         dec_flip = plan_decision(
@@ -82,7 +85,7 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         self.assertEqual(dec_flip.side, "Down")
         self.assertAlmostEqual(dec_flip.price, 0.54, places=4)
         self.assertIn("动态不对劲反买", dec_flip.reason)
-        self.assertIn("配对成本=$0.977<=$0.98", dec_flip.reason)
+        self.assertIn("配对成本=$0.977", dec_flip.reason)
 
         # 2. The exact 13:50 live mistake (Held Down @ $0.42, opposite Up ask=$0.76 -> pair_cost = $1.21 > $1.00):
         #    Even if P*(Up)=0.88 gives apparent +10.7% edge on Up, pairing above $1.00 locks in a guaranteed loss (-$1.05)
@@ -148,14 +151,14 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
             self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
             self.assertAlmostEqual(runner.fills[-1]["price"], 0.46, places=4)
 
-        # Case B: +1c upward slippage erodes thin edge below MIN_TAKER_EDGE (0.070 -> 0.060 < 0.065) -> rejected
+        # Case B: +1c upward slippage erodes thin edge below MIN_TAKER_EDGE (0.040 -> 0.030 < 0.035) -> rejected
         with tempfile.TemporaryDirectory() as tmp:
             runner = PaperRunner(ledger_dir=tmp)
             runner.start_window("btc-updown-5m-1000", 1000.0, 1300.0, 75000.0, binance_open_px=75000.0)
             b_up = _book(0.43, 20.0, 0.45, 20.0, t=1200.0)
             b_dn = _book(0.54, 20.0, 0.56, 20.0, t=1200.0)
             sp = SpotState(timestamp=1200.0, price=75080.0, open_price=75000.0, binance_open_price=75000.0, basis_ema=0.0)
-            dec_thin = Decision(action="taker_buy", side="Up", price=0.45, size=5.0, utility=0.070, reason="v2.9 净边际吃单 IOC")
+            dec_thin = Decision(action="taker_buy", side="Up", price=0.45, size=5.0, utility=0.040, reason="v2.9 净边际吃单 IOC")
             delayed_up = _book(0.44, 20.0, 0.46, 20.0, t=1200.12)
             delayed_dn = _book(0.53, 20.0, 0.55, 20.0, t=1200.12)
             with patch("runtime.runner.plan_decision", return_value=dec_thin), patch("runtime.runner.time.sleep"):
