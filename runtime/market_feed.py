@@ -581,11 +581,17 @@ class MarketFeed:
 
         return poly_open, binance_open
 
-    def fetch_window_settlement_price(self, start_t: float) -> Optional[Tuple[float, float, str]]:
+    def fetch_window_settlement_price(
+        self,
+        start_t: float,
+        sess: requests.Session = None,
+        timeout=(1.2, 2.0),
+    ) -> Optional[Tuple[float, float, str]]:
         """Fetch official settlement open, close, and winner from Polymarket's crypto-price API."""
+        http = sess or self.session
         try:
             poly_url = "https://polymarket.com/api/crypto/crypto-price"
-            resp = self.session.get(poly_url, params=self._poly_twap_params(start_t, include_end=True), timeout=(1.2, 2.0))
+            resp = http.get(poly_url, params=self._poly_twap_params(start_t, include_end=True), timeout=timeout)
             if resp.status_code == 200:
                 body = resp.json()
                 if body.get("completed") and body.get("closePrice") is not None:
@@ -1203,16 +1209,23 @@ class MarketFeed:
             _finalize_book(dn_book, dn_lat, dn_bytes, dn_ev, "Down"),
         )
 
-    def verify_official_settlement(self, slug: str) -> Optional[dict]:
+    def verify_official_settlement(
+        self,
+        slug: str,
+        sess: requests.Session = None,
+        timeout=4.0,
+        quiet: bool = False,
+    ) -> Optional[dict]:
         """Query Gamma API to obtain officially resolved outcome truth.
         
         Returns:
             dict with 'winner' ('Up' or 'Down'), 'payouts', 'verified': True
             or None if market is not yet resolved by UMA/Chainlink.
         """
+        http = sess or self.session
         url = f"https://gamma-api.polymarket.com/events?slug={slug}"
         try:
-            resp = self.session.get(url, timeout=4.0)
+            resp = http.get(url, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
                 if data and "markets" in data[0] and data[0]["markets"]:
@@ -1243,6 +1256,7 @@ class MarketFeed:
                             self.record_raw_event("settlements", res)
                             return res
         except Exception as e:
-            print(f"[MarketFeed] Settlement verification notice ({slug}): {e}")
+            if not quiet:
+                print(f"[MarketFeed] Settlement verification notice ({slug}): {e}")
 
         return None

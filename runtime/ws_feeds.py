@@ -171,7 +171,50 @@ async def _ws_ping_rtt_loop(ws, on_rtt, interval_s: float = 5.0):
         await asyncio.sleep(interval_s)
 
 
-class BinanceSpotWSClient:
+class _BaseWSClient:
+    """Shared asyncio event-loop lifecycle for background WebSocket clients."""
+
+    def stop(self):
+        """Stop background WebSocket client cleanly."""
+        self.running = False
+        self.connected = False
+        loop = self._loop
+        if loop and loop.is_running():
+            try:
+                def _cancel_worker():
+                    if self._worker_task is not None and not self._worker_task.done():
+                        self._worker_task.cancel()
+                loop.call_soon_threadsafe(_cancel_worker)
+            except Exception:
+                pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.5)
+
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        _install_ws_loop_exception_filter(self._loop)
+        try:
+            self._worker_task = self._loop.create_task(self._ws_worker())
+            self._loop.run_until_complete(self._worker_task)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            self._worker_task = None
+            self._loop.close()
+
+
+class BinanceSpotWSClient(_BaseWSClient):
     """Real-time BTC Spot WebSocket client supporting Binance / Kraken / Coinbase / OKX / auto."""
 
     def __init__(
@@ -218,21 +261,6 @@ class BinanceSpotWSClient:
     def force_reconnect(self):
         """Request an immediate clean reconnect (e.g. after proxy route failover)."""
         self._reconnect_flag = True
-
-    def stop(self):
-        self.running = False
-        self.connected = False
-        loop = self._loop
-        if loop and loop.is_running():
-            try:
-                def _cancel_worker():
-                    if self._worker_task is not None and not self._worker_task.done():
-                        self._worker_task.cancel()
-                loop.call_soon_threadsafe(_cancel_worker)
-            except Exception:
-                pass
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.5)
 
     def apply_message(self, payload: Dict[str, Any], now: Optional[float] = None) -> bool:
         """Parse one BTC spot ticker JSON object (Binance / Kraken v2 / Coinbase / OKX) and update latest mid."""
@@ -313,29 +341,6 @@ class BinanceSpotWSClient:
             ):
                 return self._price, t, self._source
             return None
-
-    def _run_loop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        _install_ws_loop_exception_filter(self._loop)
-        try:
-            self._worker_task = self._loop.create_task(self._ws_worker())
-            self._loop.run_until_complete(self._worker_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        finally:
-            try:
-                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
-            self._worker_task = None
-            self._loop.close()
 
     async def _ws_worker(self):
         import websockets
@@ -443,7 +448,7 @@ class BinanceSpotWSClient:
                     await asyncio.sleep(_ws_reconnect_backoff(consec_fails, self.last_error, base_s=1.5, cap_s=30.0))
 
 
-class PolymarketBookWSClient:
+class PolymarketBookWSClient(_BaseWSClient):
     """Real-time Polymarket CLOB L2 orderbook WebSocket client."""
 
     def __init__(
@@ -638,21 +643,6 @@ class PolymarketBookWSClient:
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="PolyBookWS")
         self._thread.start()
 
-    def stop(self):
-        self.running = False
-        self.connected = False
-        loop = self._loop
-        if loop and loop.is_running():
-            try:
-                def _cancel_worker():
-                    if self._worker_task is not None and not self._worker_task.done():
-                        self._worker_task.cancel()
-                loop.call_soon_threadsafe(_cancel_worker)
-            except Exception:
-                pass
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.5)
-
     def apply_message(self, data: Any, now: Optional[float] = None) -> bool:
         """Apply a Polymarket CLOB WS book snapshot, price_change, or last_trade_price message."""
         ts = time.time() if now is None else float(now)
@@ -846,29 +836,6 @@ class PolymarketBookWSClient:
             source_t=eff_t,
             received_at=eff_t,
         )
-
-    def _run_loop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        _install_ws_loop_exception_filter(self._loop)
-        try:
-            self._worker_task = self._loop.create_task(self._ws_worker())
-            self._loop.run_until_complete(self._worker_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        finally:
-            try:
-                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
-            self._worker_task = None
-            self._loop.close()
 
     async def _ws_worker(self):
         import websockets

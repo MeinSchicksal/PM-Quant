@@ -8,7 +8,6 @@ import sys
 import json
 import time
 import signal
-import datetime
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -415,39 +414,17 @@ class PipelineDriver:
                             ev = {"slug": p_slug, "polled": True, "poll_t": now_w}
 
                             # Query Gamma only if not already confirmed
-                            official = None
-                            if not item.get("gamma_confirmed"):
-                                try:
-                                    r = sess.get(f"https://gamma-api.polymarket.com/events?slug={p_slug}", timeout=(1.5, 2.5))
-                                    if r.status_code == 200:
-                                        d = r.json()
-                                        if d and d[0].get("markets"):
-                                            m = d[0]["markets"][0]
-                                            if m.get("closed") is True or m.get("umaResolutionStatus") == "resolved":
-                                                outcomes = json.loads(m["outcomes"]) if isinstance(m.get("outcomes"), str) else m.get("outcomes", [])
-                                                oprices = json.loads(m["outcomePrices"]) if isinstance(m.get("outcomePrices"), str) else m.get("outcomePrices", [])
-                                                payouts = [float(p) for p in oprices]
-                                                if len(payouts) == 2 and sorted(payouts) == [0.0, 1.0]:
-                                                    official = {"slug": p_slug, "winner": outcomes[payouts.index(1.0)], "payouts": payouts, "condition_id": m.get("conditionId"), "verified": True, "resolved_at": time.time()}
-                                                    self.feed.record_raw_event("settlements", official)
-                                except Exception:
-                                    pass
+                            official = (
+                                self.feed.verify_official_settlement(p_slug, sess=sess, timeout=(1.5, 2.5), quiet=True)
+                                if not item.get("gamma_confirmed")
+                                else None
+                            )
 
                             official_poly = item.get("twap_prices")
                             if not official_poly:
-                                try:
-                                    iso_s = datetime.datetime.fromtimestamp(p_start, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-                                    iso_e = datetime.datetime.fromtimestamp(p_start + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-                                    r2 = sess.get("https://polymarket.com/api/crypto/crypto-price", params={"symbol": "BTC", "eventStartTime": iso_s, "variant": "fiveminute", "endDate": iso_e, "twapEnabled": "true", "twapLookbackSeconds": "60"}, timeout=(1.5, 2.5))
-                                    if r2.status_code == 200:
-                                        b2 = r2.json()
-                                        if b2.get("completed") and b2.get("closePrice") is not None:
-                                            o_px = float(b2.get("openPrice", 0) or 0)
-                                            c_px = float(b2.get("closePrice", 0) or 0)
-                                            if o_px > 0 and c_px > 0:
-                                                official_poly = (o_px, c_px, "Up" if c_px >= o_px else "Down")
-                                except Exception:
-                                    pass
+                                official_poly = self.feed.fetch_window_settlement_price(
+                                    p_start, sess=sess, timeout=(1.5, 2.5)
+                                )
                                 if official_poly:
                                     ev["twap_prices"] = official_poly
 
@@ -600,21 +577,12 @@ class PipelineDriver:
                     if loop_mono - getattr(self, "_last_open_check_mono", 0.0) >= 1.0:
                         self._last_open_check_mono = loop_mono
                         def _bg_calib(target_slug=slug, target_start=start_t):
-                            iso_start = datetime.datetime.fromtimestamp(target_start, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-                            iso_end = datetime.datetime.fromtimestamp(target_start + 300, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                             sess = self.feed._get_worker_session()
                             try:
                                 poly_resp = sess.get(
                                     "https://polymarket.com/api/crypto/crypto-price",
-                                    params={
-                                        "symbol": "BTC",
-                                        "eventStartTime": iso_start,
-                                        "variant": "fiveminute",
-                                        "endDate": iso_end,
-                                        "twapEnabled": "true",
-                                        "twapLookbackSeconds": "60"
-                                    },
-                                    timeout=2.5
+                                    params=self.feed._poly_twap_params(target_start, include_end=True),
+                                    timeout=2.5,
                                 )
                                 if poly_resp.status_code == 200:
                                     body = poly_resp.json()

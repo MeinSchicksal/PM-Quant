@@ -1,6 +1,6 @@
-"""PM-Quant Supervisor & Version Sealing.
+"""PM-Quant Version Sealing.
 
-Manages background services, health monitoring, PID tracking, and version sealing.
+Packages reproducible code snapshots and parameter manifests for ledger archiving.
 """
 import sys
 import json
@@ -13,17 +13,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
-
-PID_FILE = config.RUNTIME_DIR / "services.pid.json"
-
-
-def get_status() -> dict:
-    if not PID_FILE.exists():
-        return {}
-    try:
-        return json.loads(PID_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
 
 
 def seal_batch():
@@ -64,19 +53,11 @@ def seal_batch():
 
 
 def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     if cmd == "seal":
         seal_batch()
-    elif cmd == "status":
-        st = get_status()
-        print(f"PM-Quant Status ({config.VERSION}):")
-        if not st:
-            print("  No active services registered.")
-        else:
-            for k, v in st.items():
-                print(f"  {k:12s}: PID {v.get('pid')} (started {v.get('started')})")
-    elif cmd == "help":
-        print("Usage: python runtime/supervisor.py [status|seal|help]")
+    else:
+        print("Usage: python runtime/supervisor.py [seal|help]")
 
 
 if __name__ == "__main__":

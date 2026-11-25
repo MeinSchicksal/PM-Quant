@@ -47,7 +47,6 @@ PARAMS = {
     "LATENCY_JITTER_PCT": 0.15,
     "TAKER_FEE_RATE": 0.07,           # Conservative crypto taker fee coefficient: rate * p * (1-p); makers pay zero
     "TAKER_IOC_SLIPPAGE_TICKS": 0.02, # Pre-submission IOC limit cap above signal ask (+$0.02), bounded by exact net edge
-    "TAKER_MAX_ADVERSE_DROP": 0.05,   # Legacy compatibility key (post-arrival look-ahead reject is permanently removed)
     "QUEUE_CANCEL_CONSERVATIVE_MULT": 1.03,  # Conservative 3% buffer on physical L2 depth cap (never looser than reality)
     "BOOK_CONSISTENCY_TOLERANCE": 0.015,     # Allow 1-tick async WS frame jitter across Up/Down streams (still blocks arb/cross)
 
@@ -81,7 +80,6 @@ PARAMS = {
     "BOOK_DROP_GUARD_WINDOW_S": 5.0,  # 盘口急砸回望窗口（秒）
     "BOOK_DROP_GUARD_MAX": 0.03,      # 5s 内盘口跌幅 >= $0.03 触发阈值
     "ENTRY_MAX_ADVERSE_SPOT_BPS": 1.5,# 方向性防接飞刀：现货 2-3s 已反向急跌超 1.5 bps 时禁止逆势开仓
-    "STRIKE_WAIT_S": 15.0,            # Require confirmed window strike & basis warmup before opening
 
     # 2b. Mode B: Skewed-Drift High-Certainty Taker IOC (V1b, zero-impact fallback after Mode A)
     # 已关闭：高价负赔率（$0.75-$0.88 赢小亏大）在低波震荡日易放大尾部回撤，回归等权稳健执行
@@ -136,7 +134,6 @@ PARAMS = {
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
     "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
     "TAKER_REAL_DELAY_CHECK": True,   # Wait wire latency and match natively on live post-delay book (no post-arrival reject)
-    "SPOT_MAX_AGE_S": 3.0,            # Treat spot feed older than 3s as stale -> trips dead-man switch
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
     "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
     # 现货 WebSocket 数据源: 当前切换为 coinbase (BTC/USD) 进行实测验证；支持环境变量 PM_SPOT_WS_PROVIDER 覆盖 (binance / coinbase / okx / kraken / auto)

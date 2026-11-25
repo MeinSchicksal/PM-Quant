@@ -410,51 +410,17 @@ function initNavigation() {
 }
 
 // ============================================================================
-// REAL-TIME BEIJING WALL CLOCK
-// ============================================================================
-function updateWallClock() {
-  const now = new Date();
-  const timeFmt = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  const dateFmt = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const weekFmt = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    weekday: "short",
-  });
-
-  const timeEl = $("current-time");
-  const dateEl = $("current-date");
-  const weekEl = $("current-weekday");
-
-  if (timeEl) timeEl.textContent = timeFmt.format(now);
-  if (dateEl) dateEl.textContent = dateFmt.format(now);
-  if (weekEl) weekEl.textContent = weekFmt.format(now);
-}
-
-// ============================================================================
 // TELEMETRY & NETWORK BAR
 // ============================================================================
 function updateNetworkTelemetry(live) {
   const net = (live && live.network) || {};
   const cb = (live && live.circuit_breaker) || {};
 
-  const kbpsEl = $("side-net-kbps");
   const latEl = $("side-net-latency");
   const modalLatEl = $("modal-net-latency");
-  const totalEl = $("side-net-total");
   const netCountEl = $("net-count");
   const modalNetCountEl = $("modal-net-count");
 
-  const rxKbps = net.downstream_kbps ?? net.rx_kbps ?? net.kbps ?? 0;
   const polyMs = Number(net.poly_latency_ms ?? 0);
   const binMs = Number(net.binance_latency_ms ?? 0);
   const tradesMs = Number(net.trades_latency_ms ?? 0);
@@ -463,11 +429,9 @@ function updateNetworkTelemetry(live) {
   const realRtts = [polyMs, binMs, tradesMs, clMs].filter((x) => x > 0);
   const rttMs = realRtts.length > 0 ? realRtts.reduce((a, b) => a + b, 0) / realRtts.length : 0;
 
-  if (kbpsEl) kbpsEl.textContent = `${Number(rxKbps || 0).toFixed(1)} KB/s`;
   const rttDisplay = rttMs ? `${Math.round(rttMs)} ms` : "-- ms";
   if (latEl) latEl.textContent = rttDisplay;
   if (modalLatEl) modalLatEl.textContent = rttDisplay;
-  if (totalEl) totalEl.textContent = `${Number(net.total_mb || 0).toFixed(2)} MB`;
 
   const sigDiffEl = $("side-net-sig-diff");
   const modalSigDiffEl = $("modal-net-sig-diff");
@@ -978,9 +942,6 @@ function updateOverview(live, hist) {
     $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (dayProjected ? "按24h推算" : "实测日均");
   }
 
-  const settledBadge = $("hero-settled-count");
-  if (settledBadge) settledBadge.textContent = `${totalRounds} 场已结算`;
-
   const brierTargets = [$("side-brier-score"), $("modal-brier-score")];
   {
     const bCnt = Number(hist.brier_count || 0);
@@ -1334,9 +1295,6 @@ function updateOverview(live, hist) {
 
   // Render Cumulative Equity Curve
   drawEquityCurve(hist);
-
-  // Render Regime Attribution Table
-  renderRegimeAttribution(hist.regime_stats, tradedRounds, totalRounds);
 }
 
 // ============================================================================
@@ -1703,152 +1661,6 @@ function initEquityCurveInteractions() {
     const hit = findNearestIdx(t.clientX);
     if (hit) renderTooltipAt(hit.bestIdx);
   }, { passive: true });
-}
-
-// ============================================================================
-// REGIME ATTRIBUTION MATRIX (SUPPORTS DICT OR ARRAY FROM /api/history)
-// ============================================================================
-function renderRegimeAttribution(regimeStats, tradedRounds = 0, totalRounds = 0) {
-  const tbody = $("regime-attribution-tbody");
-  const badge = $("regime-sample-badge");
-  const covEl = $("regime-coverage");
-  if (!tbody) return;
-
-  if (!regimeStats || typeof regimeStats !== "object") {
-    tbody.innerHTML = `<tr><td colspan="6" class="action-empty">暂无归因样本数据</td></tr>`;
-    return;
-  }
-
-  // Convert dictionary { [regime]: { rounds, traded, wins, losses, flats, net_pnl, mean, ci_low, ci_high, sample_ok } } to sorted array
-  let rows = [];
-  if (Array.isArray(regimeStats.rows)) {
-    rows = regimeStats.rows;
-  } else {
-    const order = [
-      "range_bound",
-      "normal_oscillation",
-      "skewed_drift",
-      "strong_trend",
-      "wide_spread",
-      "toxic_shock",
-      "tail_freeze",
-      "legacy",
-    ];
-    const keys = Object.keys(regimeStats).filter((k) => {
-      const b = regimeStats[k];
-      return b && (Number(b.traded || 0) > 0 || k !== "unlabeled");
-    });
-    keys.sort((a, b) => {
-      const ia = order.indexOf(a);
-      const ib = order.indexOf(b);
-      if (ia !== -1 && ib !== -1) return ia - ib;
-      if (ia !== -1) return -1;
-      if (ib !== -1) return 1;
-      return a.localeCompare(b);
-    });
-
-    rows = keys.map((k) => {
-      const b = regimeStats[k] || {};
-      const n = Number(b.traded || 0);
-      const wins = Number(b.wins || 0);
-      const losses = Number(b.losses || 0);
-      const flats = Number(b.flats || 0);
-      const decisive = wins + losses;
-      const meta = REGIME_META[k] || { label: k, desc: "" };
-      return {
-        regime: k,
-        label: meta.label,
-        desc: meta.desc,
-        rounds: Number(b.rounds || n),
-        n,
-        wins,
-        losses,
-        flats,
-        win_rate_pct: decisive > 0 ? (wins / decisive) * 100 : null,
-        total_pnl: Number(b.net_pnl || 0),
-        mean_pnl: Number(b.mean || 0),
-        ci95_low: n >= 2 ? Number(b.ci_low || 0) : null,
-        ci95_high: n >= 2 ? Number(b.ci_high || 0) : null,
-        low_sample: !b.sample_ok,
-      };
-    });
-  }
-
-  if (rows.length === 0) {
-    setHtmlIfChanged(tbody, `<tr><td colspan="6" class="action-empty">暂无已成交形态归因数据</td></tr>`);
-    return;
-  }
-
-  const legacyRow = rows.find((r) => r.regime === "legacy");
-  const legacyCount = legacyRow ? legacyRow.n : 0;
-  const attributedCount = Math.max(0, tradedRounds - legacyCount);
-
-  if (badge) {
-    badge.textContent = `实时归因 ${attributedCount} 场 · 共 ${tradedRounds} 成交场`;
-  }
-
-  setHtmlIfChanged(tbody, rows
-    .map((r) => {
-      const n = Number(r.n || 0);
-      const totalPnl = Number(r.total_pnl || 0);
-      const meanPnl = Number(r.mean_pnl || 0);
-      const wr =
-        r.win_rate_pct !== null && r.win_rate_pct !== undefined
-          ? `${Number(r.win_rate_pct).toFixed(1)}%`
-          : "--";
-      const ciStr =
-        r.ci95_low !== null && r.ci95_high !== null
-          ? `[${fmtUsd(r.ci95_low, true)}, ${fmtUsd(r.ci95_high, true)}]`
-          : "样本不足 (n<2)";
-
-      const lowSampleTag =
-        r.low_sample && n > 0
-          ? `<span class="regime-sample-tag">样本 n&lt;30</span>`
-          : "";
-
-      return `
-        <tr>
-          <td class="regime-name-cell">
-            <div class="regime-name-top">
-              <strong>${escapeHtml(r.label || r.regime)}</strong>
-              ${lowSampleTag}
-            </div>
-            ${r.desc ? `<small>${escapeHtml(r.desc)}</small>` : ""}
-          </td>
-          <td class="num">
-            <div class="n-cell">
-              <strong>${n} 场成交</strong>
-              <span class="n-sub">共出现 ${r.rounds || n} 窗</span>
-            </div>
-          </td>
-          <td class="num">
-            <div class="n-cell">
-              <strong>${wr}</strong>
-              <span class="n-sub">${r.wins}胜 · ${r.losses}负 · ${r.flats}平</span>
-            </div>
-          </td>
-          <td class="num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}" style="font-weight:700">
-            ${n > 0 ? fmtUsd(totalPnl, true) : "$0.00"}
-          </td>
-          <td class="num ${meanPnl > 0 ? "up" : meanPnl < 0 ? "down" : ""}">
-            ${n > 0 ? fmtUsd(meanPnl, true) : "--"}
-          </td>
-          <td class="num ci-cell">${ciStr}</td>
-        </tr>
-      `;
-    })
-    .join(""));
-
-  if (covEl) {
-    covEl.hidden = false;
-    setHtmlIfChanged(covEl, `
-      <span class="coverage-label">归因覆盖率说明：</span>
-      <span class="coverage-chip">监测总窗口 <b>${totalRounds}</b></span>
-      <span class="coverage-chip">已成交窗口 <b>${tradedRounds}</b></span>
-      <span class="coverage-chip">携带开仓实时形态标签 <b>${attributedCount}</b></span>
-      ${legacyCount > 0 ? `<span class="coverage-chip">早期未标注历史成交 <b>${legacyCount}</b></span>` : ""}
-    `);
-  }
 }
 
 // ============================================================================
@@ -2241,19 +2053,6 @@ function updateMarket(live) {
     if (val >= 1000) return `${(val / 1000).toFixed(1)}k`;
     return fmtShares(val);
   };
-  const fmtBookVol = (v) =>
-    v !== null && v !== undefined && Number.isFinite(Number(v)) ? `${fmtCompactShares(v)} 股` : "-- 股";
-
-  if ($("up-bid-px")) $("up-bid-px").textContent = fmtPriceCents(upBid);
-  if ($("up-ask-px")) $("up-ask-px").textContent = fmtPriceCents(upAsk);
-  if ($("up-bid-sz")) {
-    $("up-bid-sz").textContent = fmtBookVol(upBidSz);
-    $("up-bid-sz").title = upBidSz !== null ? `${fmtShares(upBidSz)} 股` : "";
-  }
-  if ($("up-ask-sz")) {
-    $("up-ask-sz").textContent = fmtBookVol(upAskSz);
-    $("up-ask-sz").title = upAskSz !== null ? `${fmtShares(upAskSz)} 股` : "";
-  }
 
   const upMid =
     upBid && upAsk ? (Number(upBid) + Number(upAsk)) / 2 : Number(live.poly_up ?? upBid ?? upAsk ?? 0.5);
@@ -2279,18 +2078,6 @@ function updateMarket(live) {
     }
   };
   renderBookMeta("up", upBid, upAsk, upMid, upBidD5, upAskD5);
-
-  if ($("down-bid-px")) $("down-bid-px").textContent = fmtPriceCents(dnBid);
-  if ($("down-ask-px")) $("down-ask-px").textContent = fmtPriceCents(dnAsk);
-  if ($("down-bid-sz")) {
-    $("down-bid-sz").textContent = fmtBookVol(dnBidSz);
-    $("down-bid-sz").title = dnBidSz !== null ? `${fmtShares(dnBidSz)} 股` : "";
-  }
-  if ($("down-ask-sz")) {
-    $("down-ask-sz").textContent = fmtBookVol(dnAskSz);
-    $("down-ask-sz").title = dnAskSz !== null ? `${fmtShares(dnAskSz)} 股` : "";
-  }
-
   renderBookMeta("down", dnBid, dnAsk, dnMid, dnBidD5, dnAskD5);
 
   // Sync probability readouts for both Scan Balance bar & Holding Outcome boxes
@@ -2710,11 +2497,6 @@ function normalizePricePoint(p, startTs, openPx, idx, totalLen) {
 function drawLivePriceChart(live) {
   const canvas = $("live-price-canvas");
   if (!canvas || !live) return;
-
-  const legPoly = $("legend-poly");
-  const legProb = $("legend-prob");
-  if (legPoly) legPoly.hidden = chartViewMode === "prob";
-  if (legProb) legProb.hidden = chartViewMode === "price";
 
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
@@ -4828,19 +4610,16 @@ function ingestLiveDecisions(live) {
 
 function renderDecisionBulletin(live) {
   const listEl = $("decision-bulletin-list");
-  const countEl = $("bulletin-count");
   const modalCountEl = $("modal-bulletin-count");
   const previewEl = $("bulletin-latest-preview");
   const statusPillEl = $("bulletin-status-badge");
   const statusTextEl = $("bulletin-status-text");
-  const freshEl = $("console-fresh-time");
   if (!listEl) return;
 
   ingestLiveDecisions(live);
 
   const timeline = decisionAuditLog;
   if (!timeline.length) {
-    if (countEl) countEl.textContent = "历史";
     if (modalCountEl) modalCountEl.textContent = "0 条记录";
     if (statusPillEl) statusPillEl.className = "css-pill is-wait";
     if (statusTextEl) statusTextEl.textContent = "开盘观察";
@@ -4853,7 +4632,6 @@ function renderDecisionBulletin(live) {
     return;
   }
 
-  if (countEl) countEl.textContent = `历史 ${timeline.length}`;
   if (modalCountEl) modalCountEl.textContent = `${timeline.length} 条记录`;
   const tagMap = {
     taker_buy: ["出手买入", "is-buy"],
@@ -4962,14 +4740,6 @@ function renderDecisionBulletin(live) {
     if (statusPillEl) statusPillEl.className = `css-pill ${lCls}`;
     if (statusTextEl) statusTextEl.textContent = lTag;
     if (previewEl) previewEl.textContent = shortMsg;
-
-    const nowRef = Number(live?.now || live?.server_time || (Date.now() / 1000));
-    const hbSec = Math.max(0, Math.round((Date.now() / 1000) - nowRef));
-    const timeClock = new Date(nowRef * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Shanghai" });
-    if (freshEl) {
-      freshEl.textContent = hbSec <= 5 ? timeClock : `${hbSec}s前`;
-      freshEl.className = "console-fresh-time";
-    }
   }
 
   const rows = [...timeline].reverse().map((item, idx) => {
@@ -5087,85 +4857,6 @@ function updateSmoothCountdowns() {
     const lIdx = Number(ln.getAttribute("data-line"));
     ln.classList.toggle("is-done", Number.isFinite(lIdx) && lIdx < curStageIdx);
   });
-}
-
-let cachedSystemStatus = null;
-let lastSystemFetchMs = 0;
-
-function updateSystemStatusWidgets(sys, live) {
-  if (!sys) return;
-  cachedSystemStatus = sys;
-  const st = sys.storage || {};
-  const gd = sys.disk_guard || {};
-
-  const dot = $("sh-dot");
-  const procEl = $("sh-proc");
-  const feedsEl = $("sh-feeds");
-  const ramEl = $("sh-ram");
-  const diskEl = $("sh-disk");
-  const dataEl = $("sh-data");
-
-  const svc = sys.service_status || "offline";
-  const hb = sys.heartbeat_age_s;
-  const apiPaused = Boolean(live && live.api_schema_guard && live.api_schema_guard.paused);
-  if (dot) dot.className = `sh-dot ${apiPaused ? "bad" : svc === "online" ? "ok" : svc === "lagging" ? "warn" : "bad"}`;
-  if (procEl) {
-    if (apiPaused) {
-      procEl.textContent = "接口变更 · 安全暂停";
-    } else if (gd.paused) {
-      procEl.textContent = "磁盘危急 · 已暂停录行情";
-    } else if (svc === "online") {
-      procEl.textContent = `服务器在线${hb !== null && hb !== undefined ? ` (${hb.toFixed(0)}s)` : ""}`;
-    } else if (svc === "lagging") {
-      procEl.textContent = "心跳延迟";
-    } else {
-      procEl.textContent = "交易进程离线";
-    }
-  }
-
-  if (feedsEl) {
-    if (svc === "offline" || (hb !== null && hb !== undefined && hb > 15)) {
-      feedsEl.textContent = "数据源 0/4 (离线)";
-    } else {
-      const net = (live && live.network) || {};
-      let okCnt = 0;
-      if (net.spot_ws_connected) okCnt += 1;
-      if (net.book_ws_connected && !net.book_empty) okCnt += 1;
-      if (net.ws_connected) okCnt += 1;
-      if (net.chainlink_age_s !== null && net.chainlink_age_s !== undefined && net.chainlink_age_s <= 12) okCnt += 1;
-      feedsEl.textContent = `数据源 ${okCnt}/4`;
-    }
-  }
-
-  if (ramEl) {
-    const p = Number(sys.mem_used_pct || 0);
-    ramEl.textContent = sys.mem_used_pct !== null && sys.mem_used_pct !== undefined ? `内存 ${p.toFixed(0)}%` : "内存 --";
-    ramEl.className = `sh-chip ${p >= 88 ? "bad" : p >= 75 ? "warn" : ""}`;
-  }
-  if (diskEl) {
-    const p = Number(sys.disk_used_pct || 0);
-    diskEl.textContent = sys.disk_free_gb !== null && sys.disk_free_gb !== undefined ? `磁盘 ${p.toFixed(0)}% (剩${sys.disk_free_gb}G)` : "磁盘 --";
-    diskEl.className = `sh-chip ${p >= 85 || Number(sys.disk_free_gb || 99) < 3 ? "bad" : p >= 75 ? "warn" : ""}`;
-  }
-  if (dataEl) {
-    dataEl.textContent = `数据 ${Number(st.total_mb || 0).toFixed(0)}MB`;
-    dataEl.className = `sh-chip ${gd.paused ? "bad" : ""}`;
-  }
-}
-
-async function fetchSystemStatus(force = false) {
-  const nowMs = Date.now();
-  if (!force && cachedSystemStatus && nowMs - lastSystemFetchMs < 15000) {
-    updateSystemStatusWidgets(cachedSystemStatus, cachedLive);
-    return;
-  }
-  try {
-    const res = await fetchWithTimeout(`/api/system${force ? "?refresh=1" : ""}`, { cache: "no-store" }, 6000);
-    if (!res.ok) return;
-    const sys = await res.json();
-    lastSystemFetchMs = nowMs;
-    updateSystemStatusWidgets(sys, cachedLive);
-  } catch (_) {}
 }
 
 // ============================================================================
@@ -5293,8 +4984,6 @@ async function fetchAll(isManual = false) {
         refreshHistoryInBackground(false, curSlug, curFills);
       }
     }
-
-    fetchSystemStatus(isManual);
 
     if (isManual) {
       showToast("实时行情与历史结算账本已同步", "up");
@@ -5439,24 +5128,11 @@ function initInteractions() {
       if (e.target === connGuideModal) closeConnGuide();
     });
   }
-  const bulletinToggle = $("bulletin-toggle-btn");
   const timelineModal = $("decision-timeline-modal");
   const timelineClose = $("decision-timeline-close-btn");
   const closeTimelineModal = () => {
     if (timelineModal) timelineModal.hidden = true;
   };
-  if (bulletinToggle && timelineModal) {
-    const openTimelineModal = () => {
-      timelineModal.hidden = false;
-    };
-    bulletinToggle.addEventListener("click", openTimelineModal);
-    bulletinToggle.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        openTimelineModal();
-      }
-    });
-  }
   if (timelineClose) {
     timelineClose.addEventListener("click", closeTimelineModal);
   }
@@ -5619,20 +5295,6 @@ function initInteractions() {
   if (settingsBtn && settingsModal) {
     settingsBtn.addEventListener("click", openSettings);
   }
-  const healthStrip = $("server-health-strip");
-  if (healthStrip) {
-    healthStrip.addEventListener("click", openSettings);
-    healthStrip.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        openSettings();
-      }
-    });
-  }
-  const sideStorageRow = $("side-storage-row");
-  if (sideStorageRow) {
-    sideStorageRow.addEventListener("click", openSettings);
-  }
   if (settingsClose) settingsClose.addEventListener("click", closeSettingsModal);
   if (settingsModal) {
     settingsModal.addEventListener("click", (e) => {
@@ -5652,7 +5314,6 @@ function initInteractions() {
         const res = await resp.json();
         if (res.system) {
           renderSystemSettings(res.system);
-          updateSystemStatusWidgets(res.system, cachedLive);
         }
         const cl = res.cleanup || {};
         setSettingsFeedback(

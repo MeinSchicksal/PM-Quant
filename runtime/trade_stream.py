@@ -6,7 +6,6 @@ QueueMatcher to drive physical queue depth deduction.
 """
 import sys
 import json
-import math
 import queue
 import time
 import asyncio
@@ -23,7 +22,8 @@ import config
 from runtime.alerts import notify as send_alert
 from runtime.retention import is_raw_recording_allowed
 from runtime.ws_feeds import (
-    _install_ws_loop_exception_filter,
+    _BaseWSClient,
+    _safe_float,
     _ws_ping_rtt_loop,
     _ws_reconnect_backoff,
 )
@@ -31,17 +31,7 @@ from runtime.ws_feeds import (
 WS_URL = "wss://ws-live-data.polymarket.com"
 
 
-def _safe_float(val, default: float = 0.0) -> float:
-    try:
-        if val is None:
-            return default
-        out = float(val)
-        return out if math.isfinite(out) else default
-    except (TypeError, ValueError):
-        return default
-
-
-class TradeStreamClient:
+class TradeStreamClient(_BaseWSClient):
     def __init__(
         self,
         record_raw: bool = True,
@@ -153,49 +143,14 @@ class TradeStreamClient:
         self._reconnect_flag = True
 
     def stop(self):
-        """Stop background WebSocket client."""
-        self.running = False
-        self.connected = False
-        loop = self._loop
-        if loop and loop.is_running():
-            try:
-                def _cancel_worker():
-                    if self._worker_task is not None and not self._worker_task.done():
-                        self._worker_task.cancel()
-                loop.call_soon_threadsafe(_cancel_worker)
-            except Exception:
-                pass
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.5)
+        """Stop background WebSocket client and flush writer thread."""
+        super().stop()
         if self._writer_thread and self._writer_thread.is_alive():
             try:
                 self._write_queue.put_nowait(None)
             except queue.Full:
                 pass
             self._writer_thread.join(timeout=1.5)
-
-    def _run_loop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        _install_ws_loop_exception_filter(self._loop)
-        try:
-            self._worker_task = self._loop.create_task(self._ws_worker())
-            self._loop.run_until_complete(self._worker_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        finally:
-            try:
-                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
-            self._worker_task = None
-            self._loop.close()
 
     async def _ws_worker(self):
         import websockets

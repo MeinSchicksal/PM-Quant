@@ -126,7 +126,6 @@ class PaperRunner:
                 base = base * random.uniform(1.0 - jitter, 1.0 + jitter)
             floor_after_jitter = min_s * (1.0 - jitter)
             base = max(floor_after_jitter, min(max_s, base))
-        self.last_effective_latency_ms = round(base * 1000.0, 1)
         return base
 
     @staticmethod
@@ -237,15 +236,11 @@ class PaperRunner:
         # ~16.7 minutes and could reuse a stale queue_ahead entry.
         self._next_order_id = 0
         self.price_history = []
-        self._mkt_mid_buf = deque(maxlen=400)
-        self.regime_counts = {}
         self.regime_dwell = {}
         self._last_regime = None
         self._last_regime_t = None
         self.entry_regime = None
         self._last_step_time = None
-        self.consecutive_up = 0
-        self.consecutive_down = 0
         self._spot_buf = []
         self._basis_ema = None
         self._basis_updated_t = 0.0
@@ -255,7 +250,6 @@ class PaperRunner:
         self._last_hist_t = 0.0
         self._last_wait_dec_t = 0.0
         self._last_live_write_t = 0.0
-        self._last_live_action_cnt = -1
         self._load_ledger_history()
 
     def _load_ledger_history(self):
@@ -263,8 +257,6 @@ class PaperRunner:
         self._settled_slugs = set()
         self._recent_records = deque(maxlen=600)
         self.total_pnl = 0.0
-        self.consecutive_up = 0
-        self.consecutive_down = 0
         if not self.summary_file.exists():
             return
         bad_lines = 0
@@ -285,13 +277,6 @@ class PaperRunner:
                         self._settled_slugs.add(slug)
                     if rec.get("traded"):
                         self.total_pnl += float(rec.get("net_pnl", 0.0))
-                    w = rec.get("winner")
-                    if w == "Up":
-                        self.consecutive_up += 1
-                        self.consecutive_down = 0
-                    elif w == "Down":
-                        self.consecutive_down += 1
-                        self.consecutive_up = 0
                     self._recent_records.append(rec)
         except OSError as exc:
             print(f"[Runner] Failed to read summary.jsonl: {exc}")
@@ -302,7 +287,7 @@ class PaperRunner:
         self.circuit_breaker.load_from_summary(list(self._recent_records))
 
     def _rebuild_recent_circuit_breaker(self):
-        """Rebuild CircuitBreaker & trend counters from bounded in-memory recent records in <1ms."""
+        """Rebuild CircuitBreaker from bounded in-memory recent records in <1ms."""
         self.circuit_breaker = CircuitBreaker(
             max_daily_drawdown_usd=config.PARAMS.get("MAX_DAILY_DRAWDOWN_USD", 8.00),
             loss_streak_cooling=int(config.PARAMS.get("LOSS_STREAK_COOLING", 3)),
@@ -310,16 +295,6 @@ class PaperRunner:
             enabled=bool(config.PARAMS.get("ENABLE_CIRCUIT_BREAKER", True))
         )
         self.circuit_breaker.load_from_summary(list(self._recent_records))
-        self.consecutive_up = 0
-        self.consecutive_down = 0
-        for r in self._recent_records:
-            w = r.get("winner")
-            if w == "Up":
-                self.consecutive_up += 1
-                self.consecutive_down = 0
-            elif w == "Down":
-                self.consecutive_down += 1
-                self.consecutive_up = 0
 
     def _rebuild_accounting(self):
         """Full fallback rebuild from summary.jsonl (used only if reconciling an ancient non-recent slug)."""
@@ -379,7 +354,6 @@ class PaperRunner:
         self.entry_order_ids = set()
         self.last_entry_fill_t = None
         self.min_opp_ask_seen = None
-        self.regime_counts = {}
         self.regime_dwell = {}
         self._last_regime = None
         self._last_regime_t = None
@@ -388,7 +362,6 @@ class PaperRunner:
         self._last_hist_t = 0.0
         self._last_wait_dec_t = 0.0
         self._last_live_write_t = 0.0
-        self._last_live_action_cnt = -1
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self._mkt_mid_buf = deque(maxlen=400)
         self.price_history = [
@@ -411,9 +384,6 @@ class PaperRunner:
         self._mid_mkt_up = None
         self._entry_p_up = None
         self._entry_mkt_up = None
-        self.first_60s_high = self.last_poly_spot
-        self.first_60s_low = self.last_poly_spot
-        self.first_60s_range = 0.0
         if resume_from_live:
             self._try_resume_from_live(slug)
 
@@ -792,6 +762,41 @@ class PaperRunner:
                 "reason": reject_reason or "empty/one-sided book, no visible liquidity"
             })
 
+    def _evaluate_delayed_taker_fill(
+        self,
+        action: Decision,
+        want: float,
+        is_buy: bool,
+        ioc_limit_px: float,
+        lat_ms: int,
+        post_up: Optional[OrderBook],
+        post_dn: Optional[OrderBook],
+        reject_reason: Optional[str],
+    ) -> tuple:
+        """Validate post-delay book consistency and execute IOC limit matching."""
+        post_book = post_up if action.side == "Up" else post_dn
+        book_tol = max(0.0, float(config.PARAMS.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
+        if reject_reason is not None:
+            return 0.0, 0.0, reject_reason
+        if post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
+            return 0.0, 0.0, "延迟后重拉盘口为空，IOC 放弃成交"
+        if (
+            bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True))
+            and action.action == "taker_buy"
+            and post_up is not None and post_dn is not None
+            and not is_books_consistent(post_up, post_dn, tolerance=book_tol)
+        ):
+            return 0.0, 0.0, f"{lat_ms}ms 延迟后双边盘口数据损坏/不一致，IOC 放弃成交"
+        filled, vwap = self.matcher.taker_ioc_fill(
+            post_book, want, limit_price=ioc_limit_px, is_buy=is_buy
+        )
+        if filled <= 1e-6:
+            reject_reason = (
+                f"{lat_ms}ms 延迟后盘口已移动 (原信号价 {action.price:.2f}, IOC限价 {ioc_limit_px:.2f}, "
+                f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
+            )
+        return filled, vwap, reject_reason
+
     def _settle_due_pending_takers(
         self,
         now: float,
@@ -803,7 +808,6 @@ class PaperRunner:
         if not self.pending_takers:
             return
         remaining_takers = []
-        book_tol = max(0.0, float(config.PARAMS.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
         async_fetch_timeout = max(0.30, float(config.PARAMS.get("TAKER_DELAYED_BOOK_TIMEOUT_S", 0.85)))
         for pt in self.pending_takers:
             if now < pt["arrive_at"] - 1e-9:
@@ -877,30 +881,10 @@ class PaperRunner:
                     except Exception as exc:
                         post_up, post_dn = None, None
                         reject_reason = f"延迟拉取盘口异常({type(exc).__name__})，IOC 放弃成交"
-            post_book = post_up if action.side == "Up" else post_dn
 
-            if reject_reason is not None:
-                filled, vwap = 0.0, 0.0
-            elif post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
-                filled, vwap = 0.0, 0.0
-                reject_reason = "延迟后重拉盘口为空，IOC 放弃成交"
-            elif (
-                bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True))
-                and action.action == "taker_buy"
-                and post_up is not None and post_dn is not None
-                and not is_books_consistent(post_up, post_dn, tolerance=book_tol)
-            ):
-                filled, vwap = 0.0, 0.0
-                reject_reason = f"{lat_ms}ms 延迟后双边盘口数据损坏/不一致，IOC 放弃成交"
-            else:
-                filled, vwap = self.matcher.taker_ioc_fill(
-                    post_book, want, limit_price=ioc_limit_px, is_buy=is_buy
-                )
-                if filled <= 1e-6:
-                    reject_reason = (
-                        f"{lat_ms}ms 延迟后盘口已移动 (原信号价 {action.price:.2f}, IOC限价 {ioc_limit_px:.2f}, "
-                        f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
-                    )
+            filled, vwap, reject_reason = self._evaluate_delayed_taker_fill(
+                action, want, is_buy, ioc_limit_px, lat_ms, post_up, post_dn, reject_reason
+            )
             self._apply_taker_outcome(
                 fill_ts=now, now=now, action=action, want=want,
                 is_buy=is_buy, filled=filled, vwap=vwap, reject_reason=reject_reason,
@@ -1092,25 +1076,7 @@ class PaperRunner:
         poly_bps = ((poly_px - open_px) / open_px) * 10000.0 if (poly_px and open_px > 0) else 0.0
 
         ref_px = bin_px or (poly_px or open_px)
-        if self.price_history:
-            old_pt = None
-            for pt in reversed(self.price_history):
-                age = now - float(pt.get("t", now))
-                if age >= 5.0:
-                    old_pt = pt
-                    if age >= 12.0:
-                        break
-            if old_pt is not None:
-                if abs(float(getattr(spot, "ret_change_15s_bps", 0.0) or 0.0)) < 1e-9:
-                    spot.ret_change_15s_bps = round(bin_bps - float(old_pt.get("return_bps", 0.0) or 0.0), 3)
-                if abs(float(getattr(spot, "up_mid_change_15s", 0.0) or 0.0)) < 1e-9:
-                    old_up = old_pt.get("poly_up")
-                    spot.up_mid_change_15s = round(poly_up - (float(old_up) if old_up is not None else 0.5), 4)
         if ref_px > 0:
-            if now - self.window_start <= 60.0:
-                self.first_60s_high = max(getattr(self, "first_60s_high", ref_px), ref_px)
-                self.first_60s_low = min(getattr(self, "first_60s_low", ref_px), ref_px)
-                self.first_60s_range = round(self.first_60s_high - self.first_60s_low, 2)
             last_hist_t = getattr(self, "_last_hist_t", 0.0)
             dt_hist = now - last_hist_t
             prev_pt = self.price_history[-1] if self.price_history else None
@@ -1325,7 +1291,6 @@ class PaperRunner:
             ref_spot, ref_open, tau, vol_bps, book_up, book_down,
             is_toxic_shock=spot.is_toxic_shock, params=config.PARAMS
         )
-        self.regime_counts[regime_info.regime] = self.regime_counts.get(regime_info.regime, 0) + 1
 
         # Time-weighted dwell keeps attribution independent of tick cadence
         # (book updates accelerate near the close and would otherwise make
@@ -1401,10 +1366,6 @@ class PaperRunner:
                 (not replay_mode and delayed_book_fetcher is not None)
                 or (replay_mode and bool(config.PARAMS.get("REPLAY_REQUIRE_STRIKE_AND_BASIS", False)))
             ),
-            PREV_ROUND_ABS_MOVE=getattr(self, "last_round_abs_move", 35.0),
-            FIRST_60S_RANGE=getattr(self, "first_60s_range", 5.0),
-            CONSECUTIVE_UP_ROUNDS=getattr(self, "consecutive_up", 0),
-            CONSECUTIVE_DOWN_ROUNDS=getattr(self, "consecutive_down", 0)
         )
 
         if api_paused:
@@ -1546,8 +1507,6 @@ class PaperRunner:
                         max_pair_cap = float(config.PARAMS.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
                     elif "Deep Arbitrage lock" in act_reason:
                         max_pair_cap = float(config.PARAMS.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
-                    elif "Trailing Pair Lock" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("TRAILING_HEDGE_MAX_PAIR_COST", 0.97))
                     else:
                         max_pair_cap = 1.00
                     best_lim = 0.0
@@ -1697,29 +1656,9 @@ class PaperRunner:
                                 )
 
                 lat_ms = int(round(wire_lat * 1000))
-                book_tol = max(0.0, float(config.PARAMS.get("BOOK_CONSISTENCY_TOLERANCE", 0.015)))
-                if reject_reason is not None:
-                    filled, vwap = 0.0, 0.0
-                elif post_book is None or (post_book.best_ask is None and post_book.best_bid is None):
-                    filled, vwap = 0.0, 0.0
-                    reject_reason = "延迟后重拉盘口为空，IOC 放弃成交"
-                elif (
-                    bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True))
-                    and action.action == "taker_buy"
-                    and post_up is not None and post_dn is not None
-                    and not is_books_consistent(post_up, post_dn, tolerance=book_tol)
-                ):
-                    filled, vwap = 0.0, 0.0
-                    reject_reason = f"{lat_ms}ms 延迟后双边盘口数据损坏/不一致，IOC 放弃成交"
-                else:
-                    filled, vwap = self.matcher.taker_ioc_fill(
-                        post_book, want, limit_price=ioc_limit_px, is_buy=is_buy
-                    )
-                    if filled <= 1e-6:
-                        reject_reason = (
-                            f"{lat_ms}ms 延迟后盘口已移动 (原信号价 {action.price:.2f}, IOC限价 {ioc_limit_px:.2f}, "
-                            f"现ask={post_book.best_ask}/bid={post_book.best_bid})，IOC 错失防滑点"
-                        )
+                filled, vwap, reject_reason = self._evaluate_delayed_taker_fill(
+                    action, want, is_buy, ioc_limit_px, lat_ms, post_up, post_dn, reject_reason
+                )
                 self._apply_taker_outcome(
                     fill_ts=fill_ts, now=now, action=action, want=want,
                     is_buy=is_buy, filled=filled, vwap=vwap, reject_reason=reject_reason,
@@ -1737,8 +1676,6 @@ class PaperRunner:
                         max_pair_cap = float(config.PARAMS.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
                     elif "Deep Arbitrage lock" in act_reason:
                         max_pair_cap = float(config.PARAMS.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
-                    elif "Trailing Pair Lock" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("TRAILING_HEDGE_MAX_PAIR_COST", 0.97))
                     else:
                         max_pair_cap = 1.00
                     if est_pair > max_pair_cap + 1e-6:
@@ -1837,7 +1774,6 @@ class PaperRunner:
             if last_w <= 0.0 or (now - last_w) >= 0.15 or live_sig != last_sig:
                 self._write_live(now, spot, book_up, book_down)
                 self._last_live_write_t = now
-                self._last_live_action_cnt = len(self.actions)
                 self._last_live_sig = live_sig
 
     def estimate_twap_close_price(self, now: float) -> float:
@@ -1914,12 +1850,6 @@ class PaperRunner:
         net_pnl = round(proceeds - total_cost, 4)
         self._last_settled_slug = self.current_slug
         self.last_round_abs_move = self._compute_same_chain_abs_move(close_px, winner_source)
-        if winner == "Up":
-            self.consecutive_up = getattr(self, "consecutive_up", 0) + 1
-            self.consecutive_down = 0
-        elif winner == "Down":
-            self.consecutive_down = getattr(self, "consecutive_down", 0) + 1
-            self.consecutive_up = 0
         is_traded = len(self.fills) > 0 or total_cost > 1e-4
 
         # Attribution: the regime that permitted the first entry describes the
@@ -2236,24 +2166,9 @@ class PaperRunner:
             try:
                 with gzip.open(gz_path, "rt", encoding="utf-8") as handle:
                     detail = json.load(handle)
-                detail["open_px"] = round(open_px, 2)
-                detail["close_px"] = round(close_px, 2)
-                if detail.get("winner_source") == "gamma" and resolved_source != "gamma":
-                    detail_winner = detail.get("winner", resolved_winner)
-                    detail["winner"] = detail_winner
-                    detail["winner_source"] = "gamma"
-                    resolved_winner = detail_winner
-                else:
-                    detail["winner"] = resolved_winner
-                    detail["winner_source"] = resolved_source
-                pos_up = float(detail.get("pos_up", 0.0))
-                pos_down = float(detail.get("pos_down", 0.0))
-                total_cost = float(detail.get("total_cost", 0.0))
-                unwind_proc = float(detail.get("unwind_proceeds", 0.0) or 0.0)
-                proceeds = (pos_up * 1.0 if resolved_winner == "Up" else pos_down * 1.0) + unwind_proc
-                detail["proceeds"] = round(proceeds, 4)
-                detail["net_pnl"] = round(proceeds - total_cost, 4)
-                detail["result"] = "win" if detail["net_pnl"] > 1e-4 else ("loss" if detail["net_pnl"] < -1e-4 else "flat")
+                detail, _, _, _, _ = self._apply_reconcile_to_row(
+                    detail, open_px, close_px, resolved_winner, resolved_source
+                )
                 self._atomic_write_gzip_json(gz_path, detail)
             except Exception as e:
                 print(f"[Runner] Failed to reconcile window gz {slug}: {e}")

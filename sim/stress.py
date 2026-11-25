@@ -45,11 +45,8 @@ from core.types import OrderBook, SpotState
 from core.estimator import (
     calculate_dynamic_realized_vol,
     calculate_adaptive_spread_params,
+    normal_cdf as _normal_cdf,
 )
-
-
-def _normal_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 from core.execution import taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from runtime.runner import PaperRunner
