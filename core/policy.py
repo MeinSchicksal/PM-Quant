@@ -31,34 +31,25 @@ def required_entry_edge(
     params: Dict[str, float],
     p_side: Optional[float] = None,
 ) -> float:
-    """Compute dynamic required net edge accounting for odds skew, early tau & overextension.
+    """Compute dynamic required net edge accounting for odds skew & optional early tau.
 
-    - At or below `PRICE_EDGE_PIVOT` ($0.54), no extra price premium.
+    - At or below `PRICE_EDGE_PIVOT` ($0.55), no extra price premium.
     - Above the pivot, adds `(price - pivot) * PRICE_EDGE_SLOPE` to protect average entry odds.
-    - Above `EARLY_TAU_PIVOT_S` (180s), adds smooth early-window premium up to `EARLY_TAU_MAX_PREMIUM`.
-    - Above `ENTRY_OVEREXTENDED_PROB` (0.78), adds overextension damping so huge model leads
-      do not blindly chase stretched prices.
+    - Above `EARLY_TAU_PIVOT_S`, adds optional smooth early-window premium up to `EARLY_TAU_MAX_PREMIUM`.
     """
-    px_pivot = float(params.get("PRICE_EDGE_PIVOT", 0.54))
-    px_slope = max(0.0, float(params.get("PRICE_EDGE_SLOPE", 0.10)))
+    px_pivot = float(params.get("PRICE_EDGE_PIVOT", 0.55))
+    px_slope = max(0.0, float(params.get("PRICE_EDGE_SLOPE", 0.05)))
     px_prem = max(0.0, float(price) - px_pivot) * px_slope
 
-    tau_pivot = float(params.get("EARLY_TAU_PIVOT_S", 180.0))
-    tau_max_prem = max(0.0, float(params.get("EARLY_TAU_MAX_PREMIUM", 0.010)))
+    tau_pivot = float(params.get("EARLY_TAU_PIVOT_S", 240.0))
+    tau_max_prem = max(0.0, float(params.get("EARLY_TAU_MAX_PREMIUM", 0.0)))
     if tau_s > tau_pivot and tau_max_prem > 0.0:
         span = max(1.0, float(params.get("ENTRY_MAX_TAU_S", 280.0)) - tau_pivot)
         tau_prem = min(1.0, (float(tau_s) - tau_pivot) / span) * tau_max_prem
     else:
         tau_prem = 0.0
 
-    over_prem = 0.0
-    if p_side is not None:
-        over_prob = float(params.get("ENTRY_OVEREXTENDED_PROB", 0.0) or 0.0)
-        over_slope = max(0.0, float(params.get("ENTRY_OVEREXTENDED_SLOPE", 0.0) or 0.0))
-        if over_prob > 0.0 and over_slope > 0.0 and float(p_side) > over_prob:
-            over_prem = (float(p_side) - over_prob) * over_slope
-
-    return float(base_edge) + px_prem + tau_prem + over_prem
+    return float(base_edge) + px_prem + tau_prem
 
 
 def _walk_ask_vwap(book: OrderBook, size: float) -> tuple:
@@ -116,63 +107,6 @@ def _compute_ioc_buy_limit(
     return round(floor_tick, 2)
 
 
-def _score_taker_opportunity(
-    edge: float,
-    req_edge: float,
-    side: Side,
-    vel_signed: float,
-    spread: float,
-    tau_s: float,
-    params: Dict[str, float],
-) -> float:
-    """Scene-weighted score for Taker IOC execution."""
-    score = edge - req_edge
-    tailwind = vel_signed if side == "Up" else -vel_signed
-    mom_thresh = float(params.get("TAKER_MOMENTUM_BOOST_BPS", 0.8))
-    if tailwind >= mom_thresh:
-        score += 0.030 + min(0.015, (tailwind - mom_thresh) * 0.008)
-    urgent_tau = float(params.get("TAKER_URGENT_TAU_S", 90.0))
-    if tau_s <= urgent_tau:
-        score += 0.025
-    if spread <= 0.015:
-        score += 0.025
-    if edge >= 0.08:
-        score += 0.025 + min(0.040, (edge - 0.08) * 0.50)
-    return score
-
-
-def _score_maker_opportunity(
-    edge: float,
-    req_edge: float,
-    side: Side,
-    vel_signed: float,
-    vel_bps: float,
-    spread: float,
-    maker_px: float,
-    tau_s: float,
-    params: Dict[str, float],
-) -> float:
-    """Scene-weighted score for zero-fee Maker resting bid."""
-    score = edge - req_edge
-    calm_vel = float(params.get("MAKER_CALM_VEL_BPS", 1.0))
-    pref_spread = float(params.get("MAKER_PREFERRED_SPREAD", 0.02))
-    # Only award calm wide-spread bonus in normal mispricing; huge stale-book edge (>12c) should be taken via IOC
-    if vel_bps < calm_vel and spread >= pref_spread - 1e-6 and edge < 0.12:
-        score += 0.018 + min(0.012, max(0.0, spread - 0.02) * 0.4)
-    if maker_px <= 0.50:
-        score += 0.006
-    tailwind = vel_signed if side == "Up" else -vel_signed
-    mom_thresh = float(params.get("TAKER_MOMENTUM_BOOST_BPS", 0.8))
-    if tailwind >= mom_thresh:
-        score -= 0.030
-    if spread <= 0.015:
-        score -= 0.025
-    urgent_tau = float(params.get("TAKER_URGENT_TAU_S", 90.0))
-    if tau_s <= urgent_tau:
-        score -= 0.025
-    return score
-
-
 def _compute_flip_shares(
     held_leg_cost: float,
     committed: float,
@@ -188,6 +122,8 @@ def _compute_flip_shares(
 
     Steps down integer shares against actual visible L2 ask VWAP so a thin top
     level never causes a valid rescue flip to be dropped entirely when q-1 fits.
+    When `FLIP_REQUIRE_BREAKEVEN` is True, refuses any partial/half-way flip that
+    cannot reach settlement breakeven on the flipped side (eliminating guaranteed-loss locks).
     """
     if not bool(params.get("FLIP_PAYOFF_SIZING", False)):
         return float(min_order_sh)
@@ -196,12 +132,12 @@ def _compute_flip_shares(
         return float(min_order_sh)
     p0 = float(ask0) + taker_fee_per_share(float(ask0), fee_rate)
     unit_profit = max(0.05, 1.0 - p0)
-    target_profit = max(0.0, float(params.get("FLIP_TARGET_PROFIT_USD", 0.30)))
+    target_profit = max(0.0, float(params.get("FLIP_TARGET_PROFIT_USD", 0.0)))
     base_cost = max(float(held_leg_cost), float(committed))
     need_payout = max(0.0, base_cost + target_profit - float(opp_shares))
     min_sh_int = int(math.ceil(min_order_sh - 1e-9))
     q_target = max(min_sh_int, int(math.ceil(need_payout / unit_profit - 1e-9)))
-    max_sh = max(min_sh_int, int(float(params.get("FLIP_MAX_SHARES", 10.0))))
+    max_sh = max(min_sh_int, int(float(params.get("FLIP_MAX_SHARES", 12.0))))
     q_cap = min(q_target, max_sh)
 
     # Cap by hard per-window flip total cost, available bankroll, and visible L2 depth
@@ -210,8 +146,26 @@ def _compute_flip_shares(
     rem_cash = max(0.0, min(available_cap, eff_budget - committed))
     f_min_px = float(params.get("FLIP_MIN_PRICE", 0.01))
     f_max_px = float(params.get("FLIP_MAX_PRICE", 0.68))
+    req_breakeven = bool(params.get("FLIP_REQUIRE_BREAKEVEN", True))
     vis_depth = sum(float(sz) for _, sz in (getattr(opp_book, "asks", None) or []))
     max_depth_int = int(math.floor(vis_depth + 1e-6))
+    q_upper = min(max_sh, max_depth_int)
+
+    if req_breakeven:
+        # Search upward from L1-estimated q_target to find the smallest integer q
+        # whose real L2-swept VWAP clears settlement breakeven within budget/caps.
+        for q in range(max(min_sh_int, q_target), q_upper + 1):
+            vis_filled, vis_vwap, _ = _walk_ask_vwap(opp_book, float(q))
+            if vis_filled < float(q) - 1e-6:
+                continue
+            if not (f_min_px - 1e-6 <= vis_vwap <= f_max_px + 1e-6):
+                continue
+            need_cash = float(q) * (vis_vwap + taker_fee_per_share(vis_vwap, fee_rate))
+            if need_cash > rem_cash + 1e-9:
+                break
+            if (float(opp_shares) + float(q)) >= (base_cost + need_cash - 1e-6):
+                return float(q)
+        return 0.0
 
     q_start = min(q_cap, max_depth_int)
     for q in range(q_start, min_sh_int - 1, -1):
@@ -773,24 +727,18 @@ def plan_decision(
             urgent=True,
         )
 
-    # 8. Multi-Factor Net-Edge & Scene-Weighted Maker/Taker Evaluation
+    # 8. Clean Taker-First Net-Edge & Calm Maker Fallback Evaluation
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
     min_prob = float(params.get("ENTRY_MIN_PROB", 0.53))
-    value_enable = bool(params.get("ENTRY_VALUE_ENABLE", False))
-    value_min_prob = float(params.get("ENTRY_VALUE_MIN_PROB", 0.46))
-    value_max_px = float(params.get("ENTRY_VALUE_MAX_PRICE", 0.42))
-    value_min_edge = float(params.get("ENTRY_VALUE_MIN_EDGE", 0.055))
     min_maker_edge = float(params.get("MIN_MAKER_EDGE", 0.055))
-    min_taker_edge = float(params.get("MIN_TAKER_EDGE", 0.038))
-    maker_max_px = min(max_entry_px, float(params.get("MAKER_MAX_PRICE", max_entry_px)))
+    min_taker_edge = float(params.get("MIN_TAKER_EDGE", 0.035))
     max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
     max_taker_spread = float(params.get("MAX_TAKER_SPREAD", max_book_spread))
     max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
     enable_maker = bool(params.get("ENABLE_MAKER_ENTRY", True))
-    weighted_routing = bool(params.get("EXECUTION_WEIGHTED_ROUTING", False))
 
-    best_taker = None  # (score, edge, side, eff_ask, fee, ioc_lim, is_value)
-    best_maker = None  # (score, edge, side, maker_px, p_side, is_value)
+    best_taker = None  # (edge, side, eff_ask, fee, ioc_lim)
+    best_maker = None  # (edge, side, maker_px, p_side)
     wall_blocked_msg = None
     budget_blocked_msg = None
     knife_blocked_msg = None
@@ -801,12 +749,8 @@ def plan_decision(
     max_adverse_spot_bps = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
-        is_value_mode = False
         if p_side < min_prob:
-            if value_enable and p_side >= value_min_prob:
-                is_value_mode = True
-            else:
-                continue
+            continue
 
         # Pre-trade knife-drop guard (zero look-ahead)
         if enable_book_drop and book_drop_max > 0.0:
@@ -835,39 +779,30 @@ def plan_decision(
             )
             continue
 
-        side_tk_cap = min(max_entry_px, value_max_px) if is_value_mode else max_entry_px
-        side_mk_cap = min(maker_max_px, value_max_px) if is_value_mode else maker_max_px
-        side_tk_base = max(min_taker_edge, value_min_edge) if is_value_mode else min_taker_edge
-        side_mk_base = max(min_maker_edge, value_min_edge) if is_value_mode else min_maker_edge
-
         ask = tb.best_ask
-        if ask is not None and min_entry_px <= ask <= side_tk_cap + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
+        if ask is not None and min_entry_px <= ask <= max_entry_px + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
-            if min_entry_px <= eff_ask <= side_tk_cap + 1e-6 and vis_filled >= size - 1e-6:
+            if min_entry_px <= eff_ask <= max_entry_px + 1e-6 and vis_filled >= size - 1e-6:
                 fee = taker_fee_per_share(eff_ask, fee_rate)
                 need_cash = size * (eff_ask + fee)
                 taker_edge = p_side - (eff_ask + fee)
-                req_tk_edge = required_entry_edge(eff_ask, tau_s, side_tk_base, params, p_side=p_side)
+                req_tk_edge = required_entry_edge(eff_ask, tau_s, min_taker_edge, params, p_side=p_side)
                 if taker_edge >= req_tk_edge - 1e-9:
                     if available_cap + 1e-9 < need_cash:
                         budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
                     elif committed + need_cash > window_budget + 1e-9:
                         budget_blocked_msg = f"v3.3: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓"
                     else:
-                        tk_score = (
-                            _score_taker_opportunity(taker_edge, req_tk_edge, side, vel_signed, tb.spread, tau_s, params)
-                            if weighted_routing else taker_edge
-                        )
-                        if best_taker is None or tk_score > best_taker[0]:
+                        if best_taker is None or taker_edge > best_taker[0]:
                             ioc_lim = _compute_ioc_buy_limit(
-                                eff_ask, p_side, side_tk_base, tau_s, fee_rate, params, side_tk_cap,
+                                eff_ask, p_side, min_taker_edge, tau_s, fee_rate, params, max_entry_px,
                                 min_sweep_px=vis_worst,
                             )
-                            best_taker = (tk_score, taker_edge, side, eff_ask, fee, ioc_lim, is_value_mode)
+                            best_taker = (taker_edge, side, eff_ask, fee, ioc_lim)
 
-        # Passive Maker quotes are strictly forbidden during ANY spot shock (adverse selection)
+        # Passive Maker fallback: strictly forbidden during ANY spot shock (adverse selection)
         bid = tb.best_bid
         if (
             enable_maker
@@ -875,13 +810,13 @@ def plan_decision(
             and tb.spread <= max_book_spread + 1e-6
             and quote_attempts < max_quote_attempts
             and bid is not None
-            and min_entry_px <= bid <= side_mk_cap + 1e-6
+            and min_entry_px <= bid <= max_entry_px + 1e-6
         ):
-            maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= side_mk_cap) else round(bid, 2)
-            maker_px = min(side_mk_cap, max(min_entry_px, maker_px))
+            maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
+            maker_px = min(max_entry_px, max(min_entry_px, maker_px))
             need_cash = size * maker_px
             maker_edge = p_side - maker_px
-            req_mk_edge = required_entry_edge(maker_px, tau_s, side_mk_base, params, p_side=p_side)
+            req_mk_edge = required_entry_edge(maker_px, tau_s, min_maker_edge, params, p_side=p_side)
             if maker_edge >= req_mk_edge - 1e-9:
                 if available_cap + 1e-9 < need_cash:
                     budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
@@ -890,28 +825,13 @@ def plan_decision(
                 elif _has_heavy_ask_wall(tb, params):
                     wall_blocked_msg = f"v3.3: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
                 else:
-                    mk_score = (
-                        _score_maker_opportunity(
-                            maker_edge, req_mk_edge, side, vel_signed, vel_bps, tb.spread, maker_px, tau_s, params
-                        )
-                        if weighted_routing else maker_edge
-                    )
-                    if best_maker is None or mk_score > best_maker[0]:
-                        best_maker = (mk_score, maker_edge, side, maker_px, p_side, is_value_mode)
+                    if best_maker is None or maker_edge > best_maker[0]:
+                        best_maker = (maker_edge, side, maker_px, p_side)
 
-    # Dynamic scene-weighted choice when both Maker & Taker qualify
-    pick_maker = (
-        best_maker is not None
-        and (
-            best_taker is None
-            or (weighted_routing and best_maker[0] > best_taker[0] + 1e-9)
-        )
-    )
-
-    if best_taker is not None and not pick_maker:
-        _sc, edge, side, ask, fee, ioc_lim, is_val = best_taker
+    # Clean Taker-First routing: take immediately when post-fee edge clears; fall back to Maker in calm wide spreads
+    if best_taker is not None:
+        edge, side, ask, fee, ioc_lim = best_taker
         p_side = p_up if side == "Up" else p_down
-        tag = "低价赔率错杀·净边际吃单 IOC" if is_val else "权重优选·净边际吃单 IOC"
         return Decision(
             action="taker_buy",
             side=side,
@@ -919,21 +839,20 @@ def plan_decision(
             size=size,
             utility=round(edge, 4),
             limit_price=ioc_lim,
-            reason=f"v3.3 {tag}: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
-            intent="entry_value" if is_val else "entry_lead",
+            reason=f"v3.3 净边际吃单 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            intent="entry_lead",
         )
 
     if best_maker is not None:
-        _sc, edge, side, maker_px, p_side, is_val = best_maker
-        tag = "低价赔率错杀·净边际挂单 Maker" if is_val else "权重优选·净边际挂单 Maker"
+        edge, side, maker_px, p_side = best_maker
         return Decision(
             action="quote",
             side=side,
             price=maker_px,
             size=size,
             utility=round(edge, 4),
-            reason=f"v3.3 {tag}: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
-            intent="entry_value" if is_val else "entry_lead",
+            reason=f"v3.3 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
+            intent="entry_lead",
         )
 
     if is_shock_any:

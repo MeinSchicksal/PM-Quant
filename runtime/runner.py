@@ -497,10 +497,18 @@ class PaperRunner:
             saved_basis = raw.get("basis_ema")
             saved_now = float(raw.get("now") or 0.0)
             saved_prov = str(raw.get("spot_provider") or "").strip().lower()
-            cur_prov = str(config.PARAMS.get("SPOT_WS_PROVIDER", "binance") or "binance").strip().lower()
+            cur_prov = str(
+                (getattr(self, "net_stats", None) or {}).get("spot_provider")
+                or config.PARAMS.get("SPOT_WS_PROVIDER", "binance")
+                or "binance"
+            ).strip().lower()
             def _ccy(p: str) -> str:
                 return "USD" if p in ("coinbase", "kraken") else ("USDT" if p in ("binance", "okx") else "")
-            prov_compat = (not saved_prov) or (saved_prov == cur_prov) or (_ccy(saved_prov) == _ccy(cur_prov) and _ccy(cur_prov) != "")
+            prov_compat = (
+                (not saved_prov)
+                or (saved_prov == cur_prov and cur_prov != "auto")
+                or (_ccy(saved_prov) == _ccy(cur_prov) and _ccy(cur_prov) != "")
+            )
             basis_max_age = float(config.PARAMS.get("BASIS_MAX_AGE_S", 120.0))
             if (
                 saved_basis is not None
@@ -1488,7 +1496,6 @@ class PaperRunner:
                 if bool(config.PARAMS.get("ENABLE_BOOK_DROP_GUARD", False))
                 else None
             ),
-            value_min_prob=float(config.PARAMS.get("ENTRY_VALUE_MIN_PROB", 0.46)),
         )
         for o in to_cancel:
             o.cancel_at = now
@@ -2261,7 +2268,12 @@ class PaperRunner:
             "poly_spot_stale": not getattr(self, "poly_spot_fresh", False),
             "spot_stale": bool(getattr(spot, "is_stale", False)),
             "spot_source": getattr(spot, "spot_source", "binance"),
-            "spot_provider": str(config.PARAMS.get("SPOT_WS_PROVIDER", "binance") or "binance").strip().lower(),
+            "spot_provider": str(
+                (getattr(self, "net_stats", None) or {}).get("spot_provider")
+                or (getattr(spot, "spot_source", "") or "").replace("_ws", "")
+                or config.PARAMS.get("SPOT_WS_PROVIDER", "binance")
+                or "binance"
+            ).strip().lower(),
             "basis_ema": round(self._basis_ema, 2) if self._basis_ema is not None else None,
             "open_px": poly_open,
             "binance_open_px": bin_open,

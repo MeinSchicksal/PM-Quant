@@ -38,44 +38,37 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         self.assertTrue(0.82 < norm_p < 0.90)
         self.assertLess(student_t5_cdf(3.5, unit_variance=True), normal_cdf(3.5))
 
-    def test_overextended_prob_adds_edge_damping(self):
-        p = dict(config.PARAMS)
-        e_norm = required_entry_edge(0.60, 120.0, 0.038, p, p_side=0.72)
-        e_over = required_entry_edge(0.60, 120.0, 0.038, p, p_side=0.90)
-        self.assertGreater(e_over, e_norm + 0.01)
-
-    def test_weighted_routing_picks_maker_in_calm_wide_spread_and_taker_in_momentum(self):
+    def test_taker_first_and_calm_wide_spread_maker_fallback(self):
         p = dict(config.PARAMS, AVAILABLE_CAPITAL=100.0, COMMITTED_WINDOW_COST=0.0)
-        # Wide spread ($0.03), calm spot (0.0 bps), mid/low price, ample time -> Maker wins by weighted score
-        bu = _book(0.47, 0.50)
-        bd = _book(0.50, 0.53)
-        d_calm = plan_decision(
-            Position(), Position(), bu, bd, _spot(vel=0.0), tau_s=160.0,
+        # Case 1: Taker edge clears post-fee threshold (0.58 - 0.50 - 0.0175 = 0.0625 >= 0.035) -> Taker immediately
+        bu_tk = _book(0.47, 0.50)
+        bd_tk = _book(0.50, 0.53)
+        d_tk = plan_decision(
+            Position(), Position(), bu_tk, bd_tk, _spot(vel=0.0), tau_s=160.0,
             params=p, p_fair=0.58,
         )
-        self.assertEqual(d_calm.action, "quote")
-        self.assertEqual(d_calm.side, "Up")
+        self.assertEqual(d_tk.action, "taker_buy")
+        self.assertEqual(d_tk.side, "Up")
+        self.assertEqual(d_tk.intent, "entry_lead")
 
-        # Same book & probability, but tailwind spot momentum (+1.6 bps) -> Taker wins by weighted score
-        d_mom = plan_decision(
-            Position(), Position(), bu, bd, _spot(vel=1.6), tau_s=160.0,
+        # Case 2: Wide spread where Taker edge is insufficient (0.58 - 0.54 - 0.0174 = 0.0226 < 0.035),
+        # but calm Maker bid ($0.50) clears thicker Maker edge (0.58 - 0.50 = 0.08 >= 0.055) -> Maker fallback
+        bu_mk = _book(0.49, 0.54)
+        bd_mk = _book(0.46, 0.51)
+        d_mk = plan_decision(
+            Position(), Position(), bu_mk, bd_mk, _spot(vel=0.0), tau_s=160.0,
             params=p, p_fair=0.58,
         )
-        self.assertEqual(d_mom.action, "taker_buy")
-        self.assertEqual(d_mom.side, "Up")
+        self.assertEqual(d_mk.action, "quote")
+        self.assertEqual(d_mk.side, "Up")
+        self.assertEqual(d_mk.intent, "entry_lead")
 
-    def test_low_price_value_mispricing_entry_in_contested_zone(self):
-        p = dict(config.PARAMS, AVAILABLE_CAPITAL=100.0, COMMITTED_WINDOW_COST=0.0)
-        # Contested P*(Up)=0.49 (below 0.53), but panicked Up ask=$0.38 -> strong payoff asymmetry
-        bu = _book(0.37, 0.38)
-        bd = _book(0.62, 0.63)
-        d = plan_decision(
-            Position(), Position(), bu, bd, _spot(vel=0.9), tau_s=150.0,
-            params=p, p_fair=0.49,
+        # Case 3: Contested P* < 0.53 (0.49) must NOT catch falling knives even at $0.38
+        d_lowp = plan_decision(
+            Position(), Position(), _book(0.37, 0.38), _book(0.62, 0.63),
+            _spot(vel=0.9), tau_s=150.0, params=p, p_fair=0.49,
         )
-        self.assertIn(d.action, ("taker_buy", "quote"))
-        self.assertEqual(d.side, "Up")
-        self.assertIn("低价赔率错杀", d.reason)
+        self.assertEqual(d_lowp.action, "wait")
 
     def test_early_phase_blocks_add_and_late_phase_blocks_new_entry(self):
         p = dict(
@@ -89,16 +82,23 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         bu = _book(0.50, 0.51)
         bd = _book(0.49, 0.50)
 
-        # Early phase (tau=220s > 180s): must NOT add to 10 shares
+        # Early phase (first 60s, tau=260s > 240s): must NOT add to 10 shares
         d_early = plan_decision(
-            Position(5.0, 2.60), Position(), bu, bd, _spot(vel=0.5), tau_s=220.0,
+            Position(5.0, 2.60), Position(), bu, bd, _spot(vel=0.5), tau_s=260.0,
             params=p, p_fair=0.65, entries_count=1,
         )
         self.assertEqual(d_early.action, "wait")
 
-        # Late phase (tau=35s < 45s): flat account must NOT open new entry
+        # Mid phase (after 60s, tau=220s <= 240s): trend add is unlocked
+        d_mid = plan_decision(
+            Position(5.0, 2.60), Position(), bu, bd, _spot(vel=0.5), tau_s=220.0,
+            params=p, p_fair=0.65, entries_count=1,
+        )
+        self.assertEqual(d_mid.action, "taker_buy")
+
+        # Late phase (last 30s, tau=25s < 30s): flat account must NOT open new entry
         d_late = plan_decision(
-            Position(), Position(), bu, bd, _spot(vel=0.5), tau_s=35.0,
+            Position(), Position(), bu, bd, _spot(vel=0.5), tau_s=25.0,
             params=dict(p, COMMITTED_WINDOW_COST=0.0), p_fair=0.65, entries_count=0,
         )
         self.assertEqual(d_late.action, "wait")
@@ -115,10 +115,10 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         )
         pos_up = Position(5.0, 2.50)  # avg $0.50
 
-        # 1) Chasing higher price ($0.58 > avg $0.50 + $0.05) -> blocked
+        # 1) Extreme chasing ($0.68 > avg $0.50 + $0.15 = $0.65) -> blocked
         d_chase = plan_decision(
-            pos_up, Position(), _book(0.57, 0.58), _book(0.42, 0.43),
-            _spot(vel=0.5), tau_s=130.0, params=p, p_fair=0.70, entries_count=1,
+            pos_up, Position(), _book(0.67, 0.68), _book(0.32, 0.33),
+            _spot(vel=0.5), tau_s=130.0, params=p, p_fair=0.78, entries_count=1,
         )
         self.assertEqual(d_chase.action, "wait")
 
@@ -129,16 +129,16 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         )
         self.assertEqual(d_rev.action, "wait")
 
-        # 3) Better/similar price ($0.49 <= $0.55) AND prob healthy (0.64, drop 0.02 <= 0.06) -> allowed
+        # 3) Healthy trend add ($0.58 <= avg $0.50 + $0.15) AND prob healthy (0.70) -> allowed
         d_good = plan_decision(
-            pos_up, Position(), _book(0.48, 0.49), _book(0.51, 0.52),
-            _spot(vel=0.2), tau_s=130.0, params=p, p_fair=0.64, entries_count=1,
+            pos_up, Position(), _book(0.57, 0.58), _book(0.42, 0.43),
+            _spot(vel=0.2), tau_s=130.0, params=p, p_fair=0.70, entries_count=1,
         )
         self.assertEqual(d_good.action, "taker_buy")
         self.assertEqual(d_good.side, "Up")
         self.assertEqual(d_good.size, 5.0)
 
-    def test_payoff_driven_flip_sizes_integer_shares_and_caps_martingale(self):
+    def test_payoff_driven_flip_sizes_integer_shares_and_enforces_breakeven(self):
         # Held 5 Up costing $2.60; reversal confirmed with Down ask=$0.55, P*(Down)=0.65
         p = dict(
             config.PARAMS,
@@ -154,86 +154,65 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         )
         self.assertEqual(d_flip.action, "taker_buy")
         self.assertEqual(d_flip.side, "Down")
-        # fee(0.55)=0.017325 -> unit_profit=0.432675 -> ceil((2.60+0.30)/0.432675) = 7 shares!
+        # fee(0.55)=0.017325 -> unit_profit=0.432675 -> ceil(2.60/0.432675) = 7 shares!
         self.assertEqual(d_flip.size, 7.0)
+        self.assertEqual(d_flip.intent, "reversal_flip")
         self.assertIn("终局动态不对劲反买", d_flip.reason)
 
-        # Overpriced opposite ask (> FLIP_MAX_PRICE $0.68) must be blocked even if trying to break even
+        # Overpriced opposite ask (> FLIP_MAX_PRICE $0.68) must be blocked
         d_expensive = plan_decision(
             Position(5.0, 2.60), Position(), _book(0.28, 0.30), _book(0.70, 0.72),
             _spot(vel=-0.5), tau_s=110.0, params=p, p_fair=0.18, entries_count=1,
         )
         self.assertEqual(d_expensive.action, "wait")
 
-        # Hard cap: even if held cost is huge ($5.80), flip shares never exceed FLIP_MAX_SHARES and total cost <= $10
-        p_big = dict(p, COMMITTED_WINDOW_COST=5.80, HELD_LEG_COST=5.80)
-        d_cap = plan_decision(
-            Position(10.0, 5.80), Position(), _book(0.44, 0.45), _book(0.54, 0.55),
-            _spot(vel=-0.5), tau_s=110.0, params=p_big, p_fair=0.35, entries_count=2,
+        # Breakeven hard guard: if held cost ($6.80) at ask=$0.64 needs ~20 shares (> FLIP_MAX_SHARES=12),
+        # refuse half-way lock instead of buying an unrecoverable partial hedge!
+        p_unrecoverable = dict(p, COMMITTED_WINDOW_COST=6.80, HELD_LEG_COST=6.80)
+        d_no_half = plan_decision(
+            Position(10.0, 6.80), Position(), _book(0.35, 0.36), _book(0.63, 0.64),
+            _spot(vel=-0.5), tau_s=110.0, params=p_unrecoverable, p_fair=0.25, entries_count=2,
         )
-        self.assertEqual(d_cap.action, "taker_buy")
-        self.assertLessEqual(d_cap.size, float(config.PARAMS["FLIP_MAX_SHARES"]))
+        self.assertEqual(d_no_half.action, "wait")
 
-        # After an integer-share flip (e.g. 5 Up + 8 Down -> net_gap = -3 < 5), must hold to settlement
-        # and NEVER fall through to fresh-entry logic to chase another lot!
-        p_after = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=7.0)
+        # Recoverable 10-share reversal ($5.20 held cost at ask=$0.50 -> needs 11 shares <= 12, total ~$10.9 <= $14)
+        p_recov = dict(p, COMMITTED_WINDOW_COST=5.20, HELD_LEG_COST=5.20)
+        d_recov = plan_decision(
+            Position(10.0, 5.20), Position(), _book(0.49, 0.50), _book(0.49, 0.50),
+            _spot(vel=-0.5), tau_s=110.0, params=p_recov, p_fair=0.35, entries_count=2,
+        )
+        self.assertEqual(d_recov.action, "taker_buy")
+        self.assertEqual(d_recov.size, 11.0)
+        self.assertLessEqual(5.20 + d_recov.size * 0.52, float(config.PARAMS["FLIP_MAX_TOTAL_WINDOW_COST"]) + 0.05)
+
+        # After an integer-share flip (e.g. 5 Up + 7 Down -> net_gap = -2 < 5), must hold to settlement
+        p_after = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=6.5)
         d_hold = plan_decision(
-            Position(5.0, 2.60), Position(8.0, 4.40), _book(0.26, 0.28), _book(0.70, 0.72),
+            Position(5.0, 2.60), Position(7.0, 3.90), _book(0.26, 0.28), _book(0.70, 0.72),
             _spot(vel=-0.5), tau_s=85.0, params=p_after, p_fair=0.15, entries_count=2,
         )
         self.assertEqual(d_hold.action, "wait")
         self.assertIn("持有至结算", d_hold.reason)
-        self.assertLessEqual(5.80 + d_cap.size * 0.57, float(config.PARAMS["FLIP_MAX_TOTAL_WINDOW_COST"]) + 0.05)
 
-    def test_flip_shares_steps_down_on_thin_top_level_vwap_budget(self):
-        """When L1 ask is thin and sweeping L2 pushes q shares slightly over $10, step down to q-1."""
+    def test_flip_shares_steps_down_on_thin_top_level_when_breakeven_still_holds(self):
+        """When L1 ask is thin and L2 raises VWAP slightly, step down if breakeven holds or block if not."""
         book_dn = OrderBook(bids=[(0.46, 50.0)], asks=[(0.48, 5.0), (0.60, 20.0)], source_t=1000.0, received_at=1000.0)
         book_up = OrderBook(bids=[(0.51, 50.0)], asks=[(0.53, 50.0)], source_t=1000.0, received_at=1000.0)
         p = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=100.0,
-            COMMITTED_WINDOW_COST=6.00,
-            HELD_LEG_COST=6.00,
+            COMMITTED_WINDOW_COST=3.00,
+            HELD_LEG_COST=3.00,
             SECONDS_SINCE_LAST_ENTRY=20.0,
             FLIPS_USED=0,
         )
         d = plan_decision(
-            Position(10.0, 6.00), Position(), book_up, book_dn,
-            _spot(vel=-0.5), tau_s=100.0, params=p, p_fair=0.30, entries_count=2,
+            Position(5.0, 3.00), Position(), book_up, book_dn,
+            _spot(vel=-0.5), tau_s=100.0, params=p, p_fair=0.30, entries_count=1,
         )
         self.assertEqual(d.action, "taker_buy")
         self.assertEqual(d.side, "Down")
-        self.assertEqual(d.size, 7.0)
-
-    def test_value_maker_quote_survives_narrow_preferred_side_flip_until_prob_breaks(self):
-        """Contested low-price value Maker quote is not cancelled just because opp hits 0.53."""
-        from core.execution import plan_order_actions
-        from core.types import Decision, Order
-
-        order = Order(
-            id=1, client_order_id="cid-val-1", side="Up", price=0.38, size=5.0, remaining=5.0,
-            purpose="entry", placed_at=1000.0,
-        )
-        order.entry_reason = "v3.3 低价赔率错杀·净边际挂单 Maker: Up bid=$0.38 (P*=0.48, 零费边际=+0.100)"
-        book_up = _book(0.37, 0.40)
-        book_dn = _book(0.60, 0.63)
-
-        # P*(Up)=0.47 >= 0.46 while opp P*(Down)=0.53 triggers preferred_side="Down": keep alive!
-        to_cancel_ok, _ = plan_order_actions(
-            [order], Decision(action="wait", reason="hold"), now=1002.0,
-            preferred_side="Down", book_up=book_up, book_down=book_dn,
-            p_up=0.47, min_hold_maker_edge=0.015, value_min_prob=0.46,
-        )
-        self.assertEqual(to_cancel_ok, [])
-
-        # Once P*(Up)=0.43 < 0.46: must cancel cleanly!
-        to_cancel_brk, _ = plan_order_actions(
-            [order], Decision(action="wait", reason="hold"), now=1003.0,
-            preferred_side="Down", book_up=book_up, book_down=book_dn,
-            p_up=0.43, min_hold_maker_edge=0.015, value_min_prob=0.46,
-        )
-        self.assertEqual(len(to_cancel_brk), 1)
-        self.assertIn("低价错杀胜率跌破下限撤单", to_cancel_brk[0].cancel_reason)
+        self.assertGreaterEqual(d.size, 6.0)
 
     def test_audit_bugfixes_spot_velocity_outage_and_resume_brier_and_close_pending(self):
         """Verify spot velocity >5s outage guard, Brier live resume, and pending_takers cancel on close."""
@@ -295,25 +274,25 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
             mock_fut.cancel.assert_called_once()
             self.assertTrue(any(a.get("action") == "taker_reject" for a in r2.actions))
 
-    def test_structured_intent_and_alert_proxy_support(self):
-        """Verify Decision.intent decouples logic from Chinese text and alerts respect configured proxy."""
+    def test_alert_proxy_support_and_clean_reversal_cancel(self):
+        """Verify objective reversal cancels resting quotes cleanly and alerts respect configured proxy."""
         from unittest.mock import patch
         from core.execution import plan_order_actions
         from core.types import Decision, Order
         import runtime.alerts as alerts
 
-        # 1) Value-mode quote stays alive via structured Order.intent even with plain ASCII reason
+        # 1) Resting Maker quote cancels cleanly when preferred side flips
         order = Order(
-            id=2, client_order_id="cid-intent-1", side="Up", price=0.38, size=5.0, remaining=5.0,
-            purpose="entry", placed_at=1000.0, intent="entry_value",
+            id=2, client_order_id="cid-intent-1", side="Up", price=0.48, size=5.0, remaining=5.0,
+            purpose="entry", placed_at=1000.0, intent="entry_lead",
         )
-        order.entry_reason = "plain ascii reason without Chinese keywords"
         to_cancel, _ = plan_order_actions(
             [order], Decision(action="wait", reason="hold"), now=1002.0,
-            preferred_side="Down", book_up=_book(0.37, 0.40), book_down=_book(0.60, 0.63),
-            p_up=0.47, min_hold_maker_edge=0.015, value_min_prob=0.46,
+            preferred_side="Down", book_up=_book(0.47, 0.50), book_down=_book(0.50, 0.53),
+            p_up=0.45, min_hold_maker_edge=0.020,
         )
-        self.assertEqual(to_cancel, [])
+        self.assertEqual(len(to_cancel), 1)
+        self.assertIn("客观方向反转撤单", to_cancel[0].cancel_reason)
 
         # 2) Alerts use set_alert_proxy() when delivering webhook
         alerts.set_alert_proxy("http://127.0.0.1:7897")

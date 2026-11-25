@@ -36,7 +36,7 @@ class TradeStreamClient(_BaseWSClient):
         self,
         record_raw: bool = True,
         proxy: Optional[str] = None,
-        idle_reconnect_s: float = 60.0,
+        idle_reconnect_s: float = 180.0,
         wake_event: Optional[threading.Event] = None,
     ):
         self.record_raw = record_raw

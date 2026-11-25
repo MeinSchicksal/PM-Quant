@@ -50,38 +50,25 @@ PARAMS = {
     "QUEUE_CANCEL_CONSERVATIVE_MULT": 1.03,  # Conservative 3% buffer on physical L2 depth cap (never looser than reality)
     "BOOK_CONSISTENCY_TOLERANCE": 0.015,     # Allow 1-tick async WS frame jitter across Up/Down streams (still blocks arb/cross)
 
-    # 2. v3.3 Multi-Factor Weighted Execution Engine (Maker/Taker Scene Routing + Paced Exposure)
+    # 2. v3.3 Clean Entry Engine (Taker-First + Calm Maker Fallback + Unit-Variance t5)
     "MODEL_T5_UNIT_VARIANCE": True,   # Normalize Student-t(5) by sqrt(5/3) to remove mid-range under-confidence
-    "ENABLE_MAKER_ENTRY": True,       # Keep Maker & Taker dual channels; select dynamically via scene-weighted score
-    "EXECUTION_WEIGHTED_ROUTING": True,  # Score Maker vs Taker by spread, spot calmness/momentum, price & tau
+    "ENABLE_MAKER_ENTRY": True,       # Keep zero-fee Maker fallback when Taker edge isn't met & spot is calm
     "DIRECTIONAL_ANTI_TOXICITY": True,# Only block adverse moves; ALLOW Taker IOC in the direction of spot momentum
     "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)
-    "LATE_NO_NEW_ENTRY_TAU_S": 45.0,  # Final 45s: stop opening fresh positions / adds (allow payoff-driven flip rescue only)
-    "EARLY_PHASE_MIN_TAU_S": 180.0,   # First 120s (tau > 180s): light probe phase capped at 5 shares (no early 10-share overload)
+    "LATE_NO_NEW_ENTRY_TAU_S": 30.0,  # Final 30s: stop opening fresh positions / adds (allow payoff-driven flip rescue only)
+    "EARLY_PHASE_MIN_TAU_S": 240.0,   # First 60s (tau > 240s): light probe phase capped at 5 shares (block early noise overload)
     "ENTRY_MAX_TAU_S": 280.0,         # Entry active window: start 20s after open (tau in [15s, 280s])
     "ENTRY_MIN_PROB": 0.53,           # Primary leading-side probability threshold
-    # Low-price mispricing / odds-value entry (not restricted strictly to strong model lead):
-    "ENTRY_VALUE_ENABLE": True,       # Allow 5-share value entry on panicky low-price mispricings in contested zone
-    "ENTRY_VALUE_MIN_PROB": 0.46,     # Minimum calibrated P* for contested low-price value entry
-    "ENTRY_VALUE_MAX_PRICE": 0.42,    # Only fire non-leading value entry when price <= $0.42 (strong payoff asymmetry)
-    "ENTRY_VALUE_MIN_EDGE": 0.055,    # Require higher net edge (>= 5.5%) for contested value entries
     "ENTRY_MIN_PRICE": 0.20,          # Avoid deep out-of-the-money lottery tickets
-    "ENTRY_MAX_PRICE": 0.72,          # Avoid >$0.72 low-payoff high-price traps
-    "ENTRY_OVEREXTENDED_PROB": 0.78,  # Above P* = 78%, add overextension edge penalty (don't chase huge leads blindly)
-    "ENTRY_OVEREXTENDED_SLOPE": 0.12, # Extra required edge per +1.0 P* above ENTRY_OVEREXTENDED_PROB
-    "MIN_MAKER_EDGE": 0.055,          # Thick safety cushion for zero-fee Maker bids (fixes inverted Maker < Taker threshold)
+    "ENTRY_MAX_PRICE": 0.74,          # Avoid >$0.74 low-payoff high-price traps (v3.2 baseline)
+    "MIN_MAKER_EDGE": 0.055,          # Thick safety cushion for zero-fee Maker bids (strictly > MIN_TAKER_EDGE)
     "MIN_HOLD_MAKER_EDGE": 0.020,     # Pull resting Maker quote if live edge decays below 2.0%
-    "MIN_TAKER_EDGE": 0.038,          # Post-fee Taker IOC net-edge threshold
-    "MAKER_CALM_VEL_BPS": 1.0,        # Spot |velocity| < 1.0 bps boosts Maker routing weight
-    "MAKER_PREFERRED_SPREAD": 0.02,   # Spread >= $0.02 boosts zero-fee Maker advantage
-    "MAKER_MAX_PRICE": 0.62,          # Restrict passive Maker bids to mid/low price zone (avoid high-price toxic fills)
-    "TAKER_MOMENTUM_BOOST_BPS": 0.8,  # Tailwind spot momentum >= 0.8 bps boosts Taker routing weight
-    "TAKER_URGENT_TAU_S": 90.0,       # Below 90s remaining, bias toward immediate Taker execution
-    # Odds-Skew & Early-Window Protection:
-    "PRICE_EDGE_PIVOT": 0.54,         # No extra price premium at or below $0.54
-    "PRICE_EDGE_SLOPE": 0.10,         # +1.0% required edge per +$0.10 above $0.54 to protect entry average
-    "EARLY_TAU_PIVOT_S": 180.0,
-    "EARLY_TAU_MAX_PREMIUM": 0.010,   # Moderate +1.0% early-window premium (tau=280s -> 0% at tau=180s)
+    "MIN_TAKER_EDGE": 0.035,          # Post-fee Taker IOC net-edge threshold (v3.2 baseline)
+    # Mild Odds-Skew Protection (v3.2 baseline):
+    "PRICE_EDGE_PIVOT": 0.55,         # No extra price premium at or below $0.55
+    "PRICE_EDGE_SLOPE": 0.05,         # +0.5% required edge per +$0.10 above $0.55
+    "EARLY_TAU_PIVOT_S": 240.0,
+    "EARLY_TAU_MAX_PREMIUM": 0.0,     # Disabled: first-60s 5-share cap already handles early-window noise
     "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
     "MAKER_MIN_WALL_SHARES": 200.0,
     "MAX_ENTRY_VOL_BPS": 75.0,        # Extreme liquidation cascade storm guard (pause new entries when 5m vol > 75 bps)
@@ -97,25 +84,25 @@ PARAMS = {
     "BOOK_DROP_GUARD_MAX": 0.03,      # 5s 内盘口跌幅 >= $0.03 触发阈值
     "ENTRY_MAX_ADVERSE_SPOT_BPS": 1.5,# 方向性防接飞刀：现货 2-3s 已反向急跌超 1.5 bps 时禁止逆势开仓
 
-    # 3. Position Management (v3.3: Average-Protecting Quality Add + Payoff-Driven Dynamic Flip)
+    # 3. Position Management (v3.3: Trend-Confirming Add + Breakeven-Gated Dynamic Flip)
     "ALLOW_REENTRY_AFTER_PAIR": False,# 完成反手后不再同窗反复重开，防锯齿磨损
     "REENTRY_COOLDOWN_S": 10.0,
-    "ENABLE_PYRAMID_ADD": True,       # 开启“不拉烂均价 + 防反转送钱”的中盘质量加仓
+    "ENABLE_PYRAMID_ADD": True,       # 开启中盘顺势加仓（防下跌摊平 + 前 60s 禁加仓）
     "PYRAMID_ALLOW_AFTER_FLIP": False,# 反手调仓后禁止继续加仓
     "PYRAMID_ALLOW_MAKER": False,     # 加仓仅使用 Taker IOC
     "PYRAMID_USE_DYNAMIC_EDGE": True, # 与开仓使用统一动态净边际标准
-    "SECONDARY_ENTRY_COOLDOWN_S": 12.0,# 加仓冷却 12s，避免同帧信号机械翻倍
-    "PYRAMID_MAX_TAU_S": 180.0,       # 早盘前 120s 严禁加仓到 10 股，保留反转补救余地
-    "PYRAMID_MIN_TAU_S": 45.0,        # 尾盘 45s 禁止顺势加仓
-    "PYRAMID_MIN_PROB": 0.56,         # 己侧概率保持健康（防反转低价送钱）
+    "SECONDARY_ENTRY_COOLDOWN_S": 6.0,# 加仓冷却 6s，避免同帧信号机械翻倍
+    "PYRAMID_MAX_TAU_S": 240.0,       # 早盘前 60s 严禁加仓到 10 股，释放 60s 后中盘趋势加仓窗口
+    "PYRAMID_MIN_TAU_S": 30.0,        # 尾盘最后 30s 禁止顺势加仓
+    "PYRAMID_MIN_PROB": 0.54,         # 己侧概率保持健康（防反转低价送钱）
     "PYRAMID_MAX_PROB_DROP": 0.06,    # 相对首仓开仓 P* 下跌不得超 6%，防止反转下跌途中摊平送钱
     "PYRAMID_MIN_PRICE": 0.20,
-    "PYRAMID_MAX_PRICE": 0.65,        # 中盘优质加仓封顶 $0.65，避免高位接盘拉烂均价（B1 实测最优档）
-    "PYRAMID_MAX_ABOVE_AVG": 0.05,    # 加仓价 <= 持仓均价 + $0.05（兼顾不拉烂均价与顺势优质加仓）
+    "PYRAMID_MAX_PRICE": 0.74,        # 与 ENTRY_MAX_PRICE 对齐，允许高胜率趋势段顺势加仓
+    "PYRAMID_MAX_ABOVE_AVG": 0.15,    # 允许合理顺势加仓（防极端追高但不误杀趋势确认加仓）
     "PYRAMID_MAX_SPREAD": 0.08,
     "PYRAMID_MIN_MAKER_EDGE": 0.06,
-    "PYRAMID_MIN_TAKER_EDGE": 0.040,  # 中盘优质加仓净边际门槛 4.0%（B1 档：收益与回撤双优）
-    "ENABLE_REVERSAL_FLIP": True,     # 确认反转后按终局盈亏反算股数，一步到位 Taker 调仓
+    "PYRAMID_MIN_TAKER_EDGE": 0.035,  # 与开仓基础边际一致，消除伪精度碎步微调
+    "ENABLE_REVERSAL_FLIP": True,     # 确认反转后按终局保本反算整数股，一步到位 Taker 调仓
     "FLIP_ALLOW_MAKER": False,        # 反转仅使用 Taker IOC
     "FLIP_ALLOW_MULTI": False,        # 单窗最多完整翻面 1 次，防 V 型双杀
     "MAX_FLIPS_PER_WINDOW": 1,
@@ -127,19 +114,20 @@ PARAMS = {
     "FLIP_MAX_PRICE": 0.68,           # 绝不为强行回本去买 >$0.68 的高价负赔率单
     "FLIP_MAX_SPREAD": 0.10,
     "FLIP_MIN_MAKER_EDGE": 0.055,
-    "FLIP_MIN_TAKER_EDGE": 0.038,
-    "FLIP_USE_DYNAMIC_EDGE": True,    # 反手同样应用高价动态边际惩罚
-    "FLIP_PAYOFF_SIZING": True,       # 终局导向动态整数股（支持 5~10 股一次买够，不再死守 5 股）
-    "FLIP_TARGET_PROFIT_USD": 0.30,   # 反手目标：对侧胜出时保本并争取微盈 +$0.30
-    "FLIP_MAX_SHARES": 10.0,          # 单次反手硬上限 10 股（防马丁格尔翻倍失控）
-    "FLIP_MAX_TOTAL_WINDOW_COST": 10.0,# 含反手单窗总投入硬封顶 $10.00
+    "FLIP_MIN_TAKER_EDGE": 0.035,     # 与基础 Taker 边际对齐
+    "FLIP_USE_DYNAMIC_EDGE": False,   # 反手不再叠加高价动态边际惩罚，避免错过最佳翻面时机
+    "FLIP_PAYOFF_SIZING": True,       # 终局导向动态整数股（支持 5~12 股一次买够，不再死守 5 股）
+    "FLIP_REQUIRE_BREAKEVEN": True,   # 硬护栏：上限内若无法达到终局保本则放弃反手，杜绝半吊子锁仓
+    "FLIP_TARGET_PROFIT_USD": 0.0,    # 终局目标仅求保本，不强行多买额外敞口
+    "FLIP_MAX_SHARES": 12.0,          # 单次反手上限 12 股（可完整覆盖 10 股中盘仓位翻面）
+    "FLIP_MAX_TOTAL_WINDOW_COST": 14.0,# 含反手单窗总投入上限 $14.00（与 10 股持仓翻面保本配平）
 
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
     "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
     "TAKER_REAL_DELAY_CHECK": True,   # Wait wire latency and match natively on live post-delay book (no post-arrival reject)
     "POLY_PRICE_MAX_AGE_S": 10.0,     # Ignore cached Chainlink TWAP older than 10s
-    "BASIS_MAX_AGE_S": 120.0,         # Expire Binance-Chainlink basis EMA if TWAP silent > 120s
-    # 现货 WebSocket 数据源: 当前切换为 coinbase (BTC/USD) 进行实测验证；支持环境变量 PM_SPOT_WS_PROVIDER 覆盖 (binance / coinbase / okx / kraken / auto)
+    "BASIS_MAX_AGE_S": 120.0,         # Expire spot-Chainlink basis EMA if TWAP silent > 120s
+    # 现货 WebSocket 数据源: 固定默认 coinbase (BTC/USD，服务器延迟最低且权威)；支持 PM_SPOT_WS_PROVIDER 环境变量覆盖
     "SPOT_WS_PROVIDER": os.environ.get("PM_SPOT_WS_PROVIDER", "coinbase").strip().lower() or "coinbase",
     "MIN_MODEL_VOL_BPS": 14.0,        # Calibrated empirical 5-min BTC std floor (~14 bps); prevents Phi(d) saturation
 

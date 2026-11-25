@@ -2041,7 +2041,7 @@ function updateMarket(live) {
   const tauNowStage = Number(live.tau_s ?? 0);
   if (activeStageEl) {
     const hasWorking = Array.isArray(live.working_orders) && live.working_orders.length > 0;
-    const isEarlyProbe = tauNowStage > 180;
+    const isEarlyProbe = tauNowStage > 240;
     if (hasAnyHolding) {
       activeStageEl.textContent = isEarlyProbe ? "早盘轻仓" : "中盘控仓";
     } else if (hasWorking) {
@@ -2142,8 +2142,8 @@ function updateMarket(live) {
       radarEl.textContent = `开盘前 20 秒校准基准价与波动节奏 · 约 ${waitLeft} 秒后开启早盘轻仓试探`;
     } else if (tauNow > 0 && tauNow <= 15) {
       radarEl.textContent = "已进入最后 15 秒尾盘锁定阶段 · 冻结下单，准备迎接下一轮";
-    } else if (tauNow > 15 && tauNow <= 45) {
-      radarEl.textContent = "已进入最后 45 秒尾盘收官阶段 · 停止新开仓，静待本轮交割";
+    } else if (tauNow > 15 && tauNow <= 30) {
+      radarEl.textContent = "已进入最后 30 秒尾盘收官阶段 · 停止新开仓，静待本轮交割";
     } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(rawR)) {
       radarEl.textContent = "检测到 BTC 突发剧烈波动 · 风控已自动挡在门外，等行情平稳后再评估";
     } else {
@@ -4746,10 +4746,10 @@ function renderDecisionBulletin(live) {
       lTag = "尾盘锁定";
       lCls = "is-wait";
       shortMsg = "最后 15 秒冻结下单，准备下一轮";
-    } else if (tauS > 15 && tauS <= 45) {
+    } else if (tauS > 15 && tauS <= 30) {
       lTag = "尾盘收官";
       lCls = "is-wait";
-      shortMsg = "最后 45 秒停止新开仓，静待交割";
+      shortMsg = "最后 30 秒停止新开仓，静待交割";
     } else {
       const pm = curRawReason.match(/P\*\(?Up\)?=([\d.]+)/i);
       const um = curRawReason.match(/Up=([\d.-]+)\/([\d.-]+)/i);
