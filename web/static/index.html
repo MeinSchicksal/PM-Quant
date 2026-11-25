@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-title" content="PM-Quant">
   <title>PM-Quant · BTC 5分钟量化交易终端</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 22V10m0 12h16M11 18l4-5 4 2 5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3.2.91">
+  <link rel="stylesheet" href="/static/style.css?v=3.3.8">
 </head>
 <body data-page="overview">
   <!-- LEFT SIDEBAR: navigation + data-source connection status -->
@@ -507,7 +507,7 @@
         <div class="srb-top-line">
           <div class="srb-time-group">
             <strong class="srb-range" id="market-time-range">--:-- ~ --:--</strong>
-            <span class="srb-tau-wrap">剩 <strong class="srb-tau" id="market-tau">--:--</strong></span>
+            <span class="srb-tau-wrap"><span class="srb-tau-label">剩余</span><strong class="srb-tau" id="market-tau">--:--</strong></span>
             <span class="chart-sub-tag" id="chart-elapsed-badge" hidden>已运行 0s / 300s</span>
             <span hidden><strong id="market-spot">$0.00</strong><small id="market-open">基准 $0.00</small><strong id="market-bps">$0.00</strong><small id="market-bps-sub">+0.000%</small></span>
           </div>
@@ -583,54 +583,86 @@
             </div>
           </section>
 
-          <!-- Unified Battle Card: Always-On Probability Track + Auto-Expanding Holding Bottom-Line -->
+          <!-- Unified Dual-Side Battle Panel: Market Probability + UP/DOWN Position (Shares / Avg / Cost) + Settlement Forecast -->
           <section class="panel battle-card" id="copilot-battle-card" aria-label="本轮多空概率与持仓底牌">
-            <!-- Always-On Top Track: Live UP vs DOWN Market Probability Balance -->
-            <div class="bsv-balance-head" id="battle-scan-view">
-              <div class="bsv-side up">
-                <span class="bsv-tag up">▲ 看涨</span>
-                <strong class="bsv-prob up" id="up-meta-implied">--%</strong>
-              </div>
-              <div class="bsv-scale-wrap" aria-hidden="true">
-                <div class="bsv-scale-track">
-                  <div class="bsv-scale-fill up" id="battle-balance-up" style="width: 50%"></div>
-                  <span class="bsv-scale-mid"></span>
-                </div>
-              </div>
-              <div class="bsv-side down">
-                <strong class="bsv-prob down" id="down-meta-implied">--%</strong>
-                <span class="bsv-tag down">看跌 ▼</span>
-              </div>
-              <span id="battle-radar-text" hidden></span>
+            <!-- Slim Full-Width Probability Balance Rail -->
+            <div class="battle-prob-rail" id="battle-scan-view" aria-hidden="true">
+              <div class="bpr-fill up" id="battle-balance-up" style="width: 50%"></div>
+              <span class="bpr-mid"></span>
             </div>
 
-            <!-- Auto-Expanding Holding Section (Cleanly docks under the track once holding) -->
-            <div class="battle-holding-view" id="battle-holding-view" hidden>
-              <div class="bhv-position-col">
-                <div class="bhv-chips" id="battle-holding-chips">
-                  <strong class="bhv-main-pos" id="battle-pos-headline">看涨 0.0 股</strong>
-                </div>
-                <span class="bhv-sub" id="battle-pos-sub">均价 -- · 投入 $0.00</span>
-              </div>
-
-              <div class="bhv-outcomes-grid">
-                <div class="bhv-outcome-box side-up" id="card-up" data-focus-side="UP">
-                  <div class="bhv-ob-top">
-                    <span class="bhv-ob-dir up">若看涨胜出</span>
+            <!-- Symmetric UP vs DOWN Fusion Cards -->
+            <div class="battle-dual-grid">
+              <!-- UP (看涨) Side Card -->
+              <div class="battle-side-card side-up" id="card-up" data-focus-side="UP">
+                <div class="bsc-head">
+                  <div class="bsc-title-group">
+                    <span class="bsc-dir-badge up">▲ 看涨</span>
+                    <strong class="bsc-prob up" id="up-meta-implied">--%</strong>
+                  </div>
+                  <div class="bsc-tags">
+                    <span class="bsc-hold-tag up">已持仓</span>
+                    <span class="bsc-empty-tag">未买入</span>
                     <span class="ot-lead-tag" id="up-lead-tag" hidden>当前占优</span>
                   </div>
-                  <div class="bhv-ob-pnl" id="pnl-forecast-up">
-                    <strong class="bhv-pnl-num">$0.00</strong>
+                </div>
+
+                <div class="bsc-metrics">
+                  <div class="bsc-metric">
+                    <span class="bsc-k">份额</span>
+                    <strong class="bsc-v" id="up-pos-shares">0.0 股</strong>
+                  </div>
+                  <div class="bsc-metric">
+                    <span class="bsc-k">均价</span>
+                    <strong class="bsc-v" id="up-pos-avg">--</strong>
+                  </div>
+                  <div class="bsc-metric">
+                    <span class="bsc-k">投入</span>
+                    <strong class="bsc-v" id="up-pos-cost">$0.00</strong>
                   </div>
                 </div>
 
-                <div class="bhv-outcome-box side-down" id="card-down" data-focus-side="DOWN">
-                  <div class="bhv-ob-top">
-                    <span class="bhv-ob-dir down">若看跌胜出</span>
+                <div class="bsc-pnl-footer">
+                  <span class="bsc-pnl-label">若看涨胜出</span>
+                  <div class="bsc-pnl-val" id="pnl-forecast-up">
+                    <strong class="bhv-pnl-num flat">$0.00</strong>
+                  </div>
+                </div>
+              </div>
+
+              <!-- DOWN (看跌) Side Card -->
+              <div class="battle-side-card side-down" id="card-down" data-focus-side="DOWN">
+                <div class="bsc-head">
+                  <div class="bsc-title-group">
+                    <span class="bsc-dir-badge down">▼ 看跌</span>
+                    <strong class="bsc-prob down" id="down-meta-implied">--%</strong>
+                  </div>
+                  <div class="bsc-tags">
+                    <span class="bsc-hold-tag down">已持仓</span>
+                    <span class="bsc-empty-tag">未买入</span>
                     <span class="ot-lead-tag" id="down-lead-tag" hidden>当前占优</span>
                   </div>
-                  <div class="bhv-ob-pnl" id="pnl-forecast-down">
-                    <strong class="bhv-pnl-num">$0.00</strong>
+                </div>
+
+                <div class="bsc-metrics">
+                  <div class="bsc-metric">
+                    <span class="bsc-k">份额</span>
+                    <strong class="bsc-v" id="down-pos-shares">0.0 股</strong>
+                  </div>
+                  <div class="bsc-metric">
+                    <span class="bsc-k">均价</span>
+                    <strong class="bsc-v" id="down-pos-avg">--</strong>
+                  </div>
+                  <div class="bsc-metric">
+                    <span class="bsc-k">投入</span>
+                    <strong class="bsc-v" id="down-pos-cost">$0.00</strong>
+                  </div>
+                </div>
+
+                <div class="bsc-pnl-footer">
+                  <span class="bsc-pnl-label">若看跌胜出</span>
+                  <div class="bsc-pnl-val" id="pnl-forecast-down">
+                    <strong class="bhv-pnl-num flat">$0.00</strong>
                   </div>
                 </div>
               </div>
@@ -638,12 +670,7 @@
 
             <!-- Hidden compatibility hooks for legacy JS references -->
             <div hidden>
-              <span id="up-pos-shares">0.0 股</span>
-              <span id="up-pos-avg">--</span>
-              <span id="up-pos-cost">$0.00</span>
-              <span id="down-pos-shares">0.0 股</span>
-              <span id="down-pos-avg">--</span>
-              <span id="down-pos-cost">$0.00</span>
+              <span id="battle-radar-text"></span>
               <span id="up-prob-hold">--%</span>
               <span id="down-prob-hold">--%</span>
               <span id="console-edge-meter"></span>
@@ -1071,6 +1098,6 @@
   <!-- Interactive Toast Feedback -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=3.2.91"></script>
+  <script src="/static/app.js?v=3.3.8"></script>
 </body>
 </html>

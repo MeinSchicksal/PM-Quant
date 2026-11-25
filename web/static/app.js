@@ -2287,10 +2287,10 @@ function formatActionItem(a, startTs = 0) {
   const t = Number(a.t || a.ts || 0);
   let timeStr = "--:--:--";
   if (startTs > 0 && t > 1e9) {
-    const sec = Math.max(0, Math.round(t - startTs));
+    const sec = Math.min(300, Math.max(0, Math.round(t - startTs)));
     const m = String(Math.floor(sec / 60)).padStart(2, "0");
     const s = String(sec % 60).padStart(2, "0");
-    timeStr = `+${m}:${s}`;
+    timeStr = `${m}:${s}`;
   } else if (t > 1e9) {
     const fmt = new Intl.DateTimeFormat("zh-CN", {
       timeZone: "Asia/Shanghai",
@@ -2466,38 +2466,41 @@ function renderActionFeed(actions, startTs = 0) {
             ? "wait"
             : "quote";
 
-      if (isFill) {
-        return `
-          <li class="action-item tl-item clickable is-fill-hero ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该成交节点">
-            <div class="ex-card-top">
-              <div class="ex-badges">
-                <span class="ex-tag ${tagCls}">${escapeHtml(item.typeLabel)}</span>
-                <span class="ex-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
-              </div>
-              <span class="ex-time">${escapeHtml(item.timeStr)}</span>
+      const hasSpec = px > 0 && sz > 0;
+      const itemCls = isFill ? "is-fill-hero" : `is-secondary is-${tagCls}`;
+      const sideArrow = item.sideClass === "up" ? "▲ " : item.sideClass === "down" ? "▼ " : "";
+      const pxLabel = isFill ? "均价" : "报价";
+      const metricsHtml = hasSpec
+        ? `
+          <div class="ex-kpi-strip ${isFill ? "is-fill" : ""}">
+            <div class="ex-kpi">
+              <span class="ex-kpi-k">${pxLabel}</span>
+              <strong class="ex-kpi-v">$${px.toFixed(2)}</strong>
             </div>
-            <div class="ex-fill-metrics">
-              <span class="ex-spec">${escapeHtml(item.specStr || "--")}</span>
-              ${notional > 0 ? `<strong class="ex-notional">${fmtUsd(notional)}</strong>` : ""}
+            <span class="ex-kpi-sep" aria-hidden="true"></span>
+            <div class="ex-kpi">
+              <span class="ex-kpi-k">份数</span>
+              <strong class="ex-kpi-v">${sz.toFixed(1)} 股</strong>
             </div>
-            <div class="ex-reason">${escapeHtml(item.reasonStr)}</div>
-          </li>
-        `;
-      }
-
-      const inlineSpec = item.specStr && item.specStr !== "--"
-        ? `<span class="ex-spec-inline">${escapeHtml(item.specStr)}</span>`
+            ${isFill && notional > 0 ? `
+            <span class="ex-kpi-sep" aria-hidden="true"></span>
+            <div class="ex-kpi is-cost">
+              <span class="ex-kpi-k">投入</span>
+              <strong class="ex-kpi-v">${fmtUsd(notional)}</strong>
+            </div>` : ""}
+          </div>
+        `
         : "";
       return `
-        <li class="action-item tl-item clickable is-secondary ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图定位该节点">
+        <li class="action-item tl-item clickable ${itemCls} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图定位该节点">
           <div class="ex-card-top">
             <div class="ex-badges">
+              ${item.sideLabel && item.sideLabel !== "--" ? `<span class="ex-side ${item.sideClass}">${sideArrow}${escapeHtml(item.sideLabel)}</span>` : ""}
               <span class="ex-tag ${tagCls}">${escapeHtml(item.typeLabel)}</span>
-              <span class="ex-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
-              ${inlineSpec}
             </div>
-            <span class="ex-time">${escapeHtml(item.timeStr)}</span>
+            <span class="ex-time-stamp">${escapeHtml(item.timeStr)}</span>
           </div>
+          ${metricsHtml}
           <div class="ex-reason">${escapeHtml(item.reasonStr)}</div>
         </li>
       `;
@@ -4786,12 +4789,46 @@ function renderDecisionBulletin(live) {
     if (previewEl) previewEl.textContent = shortMsg;
   }
 
+  const curSlugT = live?.slug || "";
+  const liveStartTs = Number(live?.start || 0);
+  const formatThoughtTime = (item) => {
+    const tNum = Number(item?.t || 0);
+    const sameRound = !item?.slug || !curSlugT || item.slug === curSlugT;
+    if (sameRound && liveStartTs > 0 && tNum > 1e9) {
+      const sec = Math.min(300, Math.max(0, Math.round(tNum - liveStartTs)));
+      const m = String(Math.floor(sec / 60)).padStart(2, "0");
+      const s = String(sec % 60).padStart(2, "0");
+      return `${m}:${s}`;
+    }
+    if (item?.tau_s != null && Number.isFinite(Number(item.tau_s))) {
+      const sec = Math.min(300, Math.max(0, Math.round(300 - Number(item.tau_s))));
+      const m = String(Math.floor(sec / 60)).padStart(2, "0");
+      const s = String(sec % 60).padStart(2, "0");
+      return `${m}:${s}`;
+    }
+    return tNum > 1e9 ? new Date(tNum * 1000).toLocaleTimeString("zh-CN", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Shanghai"
+    }) : "--:--";
+  };
+
+  const resolveThoughtTag = (item, text) => {
+    if (item.action && item.action !== "wait" && tagMap[item.action]) {
+      return tagMap[item.action];
+    }
+    const raw = `${item.reason || ""} ${text || ""}`;
+    if (/开盘前|校准基准|Observation/i.test(raw)) return ["开盘校准", "is-calm"];
+    if (/剧烈波动|急跌|急涨|防接飞刀|避险|Anti-toxicity|Toxic|shock|风暴|暂停下单/i.test(raw)) return ["风控避险", "is-warn"];
+    if (/延迟|同步|超时|网络|断流/i.test(raw)) return ["延迟暂缓", "is-warn"];
+    if (/持有.*结算|稳赢|锁仓|等交割/i.test(raw)) return ["持仓观望", "is-calm"];
+    if (/尾盘|停止新开|冻结下单|最后\s*\d+\s*秒/i.test(raw)) return ["尾盘收官", "is-calm"];
+    if (/偏贵|不够划算|折价|等待|胜率/i.test(raw)) return ["等待好价", "is-wait"];
+    return tagMap[item.action] || ["观察中", "is-wait"];
+  };
+
   const rows = [...timeline].reverse().map((item, idx) => {
-    const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
-      hour12: false, timeZone: "Asia/Shanghai"
-    }) : "--:--:--";
-    const [tagLabel, tagCls] = tagMap[item.action] || ["观察中", "is-wait"];
+    const ts = formatThoughtTime(item);
     const text = translateDecisionReason(item.reason);
+    const [tagLabel, tagCls] = resolveThoughtTag(item, text);
     const latestCls = idx === 0 ? " is-latest" : "";
     return `
       <div class="bulletin-card${latestCls}">
@@ -4807,7 +4844,6 @@ function renderDecisionBulletin(live) {
   // Inline Strategy Thought Timeline in Right Rail (Zero Modal Blocking)
   const inlineThoughtsEl = $("inline-thoughts-feed");
   if (inlineThoughtsEl) {
-    const curSlugT = live?.slug || "";
     const curRoundItems = curSlugT ? timeline.filter((it) => !it.slug || it.slug === curSlugT) : timeline;
     const displayItems = (curRoundItems.length ? curRoundItems : timeline).slice(-30).reverse();
     if (!displayItems.length) {
@@ -4818,21 +4854,16 @@ function renderDecisionBulletin(live) {
         </div>`);
     } else {
       const inlineHtml = displayItems.map((item, idx) => {
-        const ts = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString("zh-CN", {
-          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Shanghai"
-        }) : "--:--:--";
-        const [tagLabel, tagCls] = tagMap[item.action] || ["观察中", "is-wait"];
+        const ts = formatThoughtTime(item);
         const text = translateDecisionReason(item.reason);
+        const [tagLabel, tagCls] = resolveThoughtTag(item, text);
         return `
           <div class="ith-item ${idx === 0 ? "is-latest" : ""}">
-            <span class="ith-rail" aria-hidden="true"><span class="ith-dot ${tagCls}"></span></span>
-            <div class="ith-body">
-              <div class="ith-top">
-                <span class="ith-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
-                <span class="ith-time">${ts}</span>
-              </div>
-              <div class="ith-text">${escapeHtml(text)}</div>
+            <div class="ith-top">
+              <span class="ith-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
+              <span class="ith-time-stamp">${ts}</span>
             </div>
+            <div class="ith-text">${escapeHtml(text)}</div>
           </div>`;
       }).join("");
       setHtmlIfChanged(inlineThoughtsEl, inlineHtml);
