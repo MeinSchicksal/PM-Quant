@@ -309,6 +309,17 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         finally:
             alerts.set_alert_proxy(None)
 
+    def test_price_history_compaction_preserves_window_head_and_bounds_size(self):
+        from runtime.runner import PaperRunner
+
+        pts = [{"t": round(1000.0 + i * 0.1, 1), "price": 58000.0 + i * 0.1} for i in range(2200)]
+        compacted = PaperRunner._compact_price_history(pts, max_points=1500)
+        self.assertLessEqual(len(compacted), 1500)
+        self.assertEqual(compacted[0]["t"], 1000.0, "Window 00:00 head must never be truncated")
+        self.assertEqual(compacted[-1]["t"], pts[-1]["t"], "Latest tick must be preserved")
+        # Recent tail remains high resolution (last 200 ticks untouched)
+        self.assertEqual([p["t"] for p in compacted[-200:]], [p["t"] for p in pts[-200:]])
+
 
 if __name__ == "__main__":
     unittest.main()

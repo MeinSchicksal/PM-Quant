@@ -388,6 +388,23 @@ class PaperRunner:
         if resume_from_live:
             self._try_resume_from_live(slug)
 
+    @staticmethod
+    def _compact_price_history(hist: list, max_points: int = 1500) -> list:
+        """Compress an oversized price_history WITHOUT ever truncating the 00:00 window head.
+
+        Keeps index 0 (window open anchor) and the most recent tail intact, thinning only
+        the older interior by 2x so the chart always spans the full 00:00..05:00 timeline.
+        """
+        if len(hist) <= max_points:
+            return hist
+        keep_tail = min(300, max_points // 3)
+        head = hist[:1]
+        older = hist[1:-keep_tail] if keep_tail > 0 else hist[1:]
+        tail = hist[-keep_tail:] if keep_tail > 0 else []
+        while len(head) + len(older) + len(tail) > max_points and len(older) > 2:
+            older = older[::2]
+        return head + older + tail
+
     def _try_resume_from_live(self, slug: str) -> bool:
         """Restore same-window inventory and fill actions after an unexpected restart."""
         if not slug or not self.live_file.exists():
@@ -477,7 +494,10 @@ class PaperRunner:
 
         restored_hist = raw.get("price_history")
         if isinstance(restored_hist, list) and len(restored_hist) > len(self.price_history):
-            self.price_history = [pt for pt in restored_hist if isinstance(pt, dict)][-720:]
+            self.price_history = self._compact_price_history(
+                [pt for pt in restored_hist if isinstance(pt, dict)],
+                max_points=1500,
+            )
             # 重启恢复时不还原旧 working_orders，避免进程离线期间产生过期僵尸挂单；
             # 仅回填近 75 秒现货轨迹以保持 60s TWAP / basis_ema 热启动。
             now_ref = float(raw.get("now") or time.time())
@@ -1111,14 +1131,14 @@ class PaperRunner:
             prev_pt = self.price_history[-1] if self.price_history else None
             fast_change = (
                 prev_pt is not None
-                and dt_hist >= 0.10
+                and dt_hist >= 0.18
                 and (
                     abs(poly_up - float(prev_pt.get("poly_up") or poly_up)) >= 0.008
                     or abs(bin_px - float(prev_pt.get("price") or bin_px)) >= 1.0
                     or (poly_px is not None and abs(poly_px - float(prev_pt.get("poly_price") or poly_px)) >= 0.5)
                 )
             )
-            if replay_mode or len(self.price_history) <= 1 or dt_hist >= 0.20 or fast_change:
+            if replay_mode or len(self.price_history) <= 1 or dt_hist >= 0.35 or fast_change:
                 self.price_history.append({
                     "t": round(now, 1),
                     "price": round(bin_px, 2),                                   # Binance spot, USD
@@ -1132,7 +1152,7 @@ class PaperRunner:
                 })
                 self._last_hist_t = now
                 if len(self.price_history) > 1500:
-                    self.price_history = self.price_history[-1500:]
+                    self.price_history = self._compact_price_history(self.price_history, max_points=1500)
 
         if net_stats:
             self.net_stats = net_stats
