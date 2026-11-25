@@ -106,22 +106,8 @@ class TestV24DynamicFeatures(unittest.TestCase):
         book_dn = OrderBook(bids=[(0.19, 20.0)], asks=[(0.22, 20.0)])
         spot = SpotState(timestamp=1250.0, price=75100.0, open_price=75000.0)
 
-        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=dict(self.params, ENABLE_DRIFT_MODE_B=False))
+        dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=50.0, params=self.params)
         self.assertEqual(dec.action, "wait")
-
-    def test_defensive_salvage_when_bid_collapses_and_spot_adverse(self):
-        """When tau <= 30s, held leg bid <= 0.15 and spot adverse, unwind at market bid."""
-        pos_up = Position(shares=5.0, cash=2.75)
-        pos_dn = Position(0.0, 0.0)
-        book_up = OrderBook(bids=[(0.08, 20.0)], asks=[(0.12, 20.0)])
-        book_dn = OrderBook(bids=[(0.88, 20.0)], asks=[(0.92, 20.0)])
-        spot = SpotState(timestamp=1275.0, price=74900.0, open_price=75000.0)
-
-        params_salvage = dict(self.params, ALLOW_TAKER_UNWIND=True, DEFENSIVE_SALVAGE_ENABLE=True)
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=25.0, params=params_salvage)
-        self.assertEqual(dec.action, "taker_unwind")
-        self.assertEqual(dec.side, "Up")
-        self.assertAlmostEqual(dec.price, 0.08)
 
 
 if __name__ == "__main__":

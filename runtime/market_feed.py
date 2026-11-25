@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import OrderBook, SpotState
 from core.estimator import calculate_dual_horizon_vol, calculate_adaptive_spread_params
+from runtime.alerts import set_alert_proxy
 from runtime.retention import is_raw_recording_allowed
 
 
@@ -285,6 +286,7 @@ class MarketFeed:
             if r1.status_code == 200 and r2.status_code == 200:
                 self._update_clock_from_clob_resp(r2, 0.5 * (t0 + t1))
                 self.session.proxies = {}
+                set_alert_proxy(None)
                 return
         except Exception:
             pass
@@ -298,10 +300,12 @@ class MarketFeed:
                 if r1.status_code == 200 and r2.status_code == 200:
                     self._update_clock_from_clob_resp(r2, 0.5 * (t0 + t1))
                     self.session.proxies = px_cfg
+                    set_alert_proxy(self.proxy)
                     return
             except Exception:
                 pass
         self.session.proxies = {}
+        set_alert_proxy(None)
 
     def reprobe_connectivity(self, now: Optional[float] = None) -> bool:
         """Re-probe direct vs proxy connectivity after sustained outage and sync all sessions/WS clients."""

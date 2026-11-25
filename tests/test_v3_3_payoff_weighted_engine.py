@@ -295,6 +295,41 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
             mock_fut.cancel.assert_called_once()
             self.assertTrue(any(a.get("action") == "taker_reject" for a in r2.actions))
 
+    def test_structured_intent_and_alert_proxy_support(self):
+        """Verify Decision.intent decouples logic from Chinese text and alerts respect configured proxy."""
+        from unittest.mock import patch
+        from core.execution import plan_order_actions
+        from core.types import Decision, Order
+        import runtime.alerts as alerts
+
+        # 1) Value-mode quote stays alive via structured Order.intent even with plain ASCII reason
+        order = Order(
+            id=2, client_order_id="cid-intent-1", side="Up", price=0.38, size=5.0, remaining=5.0,
+            purpose="entry", placed_at=1000.0, intent="entry_value",
+        )
+        order.entry_reason = "plain ascii reason without Chinese keywords"
+        to_cancel, _ = plan_order_actions(
+            [order], Decision(action="wait", reason="hold"), now=1002.0,
+            preferred_side="Down", book_up=_book(0.37, 0.40), book_down=_book(0.60, 0.63),
+            p_up=0.47, min_hold_maker_edge=0.015, value_min_prob=0.46,
+        )
+        self.assertEqual(to_cancel, [])
+
+        # 2) Alerts use set_alert_proxy() when delivering webhook
+        alerts.set_alert_proxy("http://127.0.0.1:7897")
+        try:
+            with patch.dict("os.environ", {"PM_ALERT_WEBHOOK_URL": "https://example.invalid/hook"}, clear=False):
+                with patch("runtime.alerts.requests.post") as mock_post:
+                    mock_post.return_value.status_code = 200
+                    alerts._send_all("test", "hello", "info")
+                    mock_post.assert_called_once()
+                    self.assertEqual(
+                        mock_post.call_args.kwargs.get("proxies"),
+                        {"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"},
+                    )
+        finally:
+            alerts.set_alert_proxy(None)
+
 
 if __name__ == "__main__":
     unittest.main()

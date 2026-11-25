@@ -341,25 +341,6 @@ class TestTakerKnifeDropProtection(unittest.TestCase):
 
 
 class TestV26PolicyUpgrades(unittest.TestCase):
-    def test_blackswan_lock_triggers_when_opp_ask_at_or_below_006(self):
-        import config
-        from core.policy import plan_decision
-
-        pos_up = Position(shares=5.0, cash=2.40)  # @ 0.48
-        pos_dn = Position(0.0, 0.0)
-        b_up = _book(0.94, 50.0, 0.95, 50.0)
-        b_dn = _book(0.05, 50.0, 0.06, 50.0)
-        spot = SpotState(timestamp=1250.0, price=65050.0, open_price=65000.0, realized_vol_bps=14.0)
-        # Opt-in behavior still works when explicitly enabled
-        p_on = dict(config.PARAMS, ENABLE_BLACKSWAN_LOCK=True)
-        dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=p_on, entries_count=1)
-        self.assertEqual(dec.action, "taker_hedge")
-        self.assertEqual(dec.side, "Down")
-        self.assertAlmostEqual(dec.price, 0.06, places=4)
-        # In default config, fixed black-swan lock is OFF so it does not bleed premium
-        dec_default = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=45.0, params=config.PARAMS, entries_count=1)
-        self.assertEqual(dec_default.action, "wait")
-
     def test_pyramid_confirm_add_triggers_on_strong_winner(self):
         import config
         from core.policy import plan_decision
@@ -654,7 +635,7 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         self.assertEqual(dec_tk.action, "taker_buy")
         self.assertEqual(dec_tk.side, "Up")
 
-    def test_v28_extreme_vol_storm_pauses_entries_but_allows_blackswan_lock(self):
+    def test_v28_extreme_vol_storm_pauses_entries_and_adds(self):
         import config
         from core.policy import plan_decision
 
@@ -670,15 +651,12 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         self.assertEqual(dec_new.action, "wait")
         self.assertIn("极端巨震风暴避险", dec_new.reason)
 
-        # Existing inventory still gets explicit Black-Swan Lock protection during storm when opted in
-        b_dn_cheap = _book(0.04, 50.0, 0.05, 50.0)
-        b_up_high = _book(0.94, 50.0, 0.96, 50.0)
-        dec_lock = plan_decision(
-            Position(shares=5.0, cash=2.90), Position(0.0, 0.0), b_up_high, b_dn_cheap, spot_storm,
-            tau_s=120.0, params=dict(config.PARAMS, ENABLE_BLACKSWAN_LOCK=True), p_fair=0.90, entries_count=1,
+        # Pyramid add also pauses during extreme storm
+        dec_add = plan_decision(
+            Position(shares=5.0, cash=2.70), Position(0.0, 0.0), b_up, b_dn, spot_storm,
+            tau_s=120.0, params=dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=30.0), p_fair=0.75, entries_count=1,
         )
-        self.assertEqual(dec_lock.action, "taker_hedge")
-        self.assertEqual(dec_lock.side, "Down")
+        self.assertEqual(dec_add.action, "wait")
 
     def test_v28_ws_event_driven_wake_event_and_exception_filter(self):
         import asyncio

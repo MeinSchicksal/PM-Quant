@@ -106,19 +106,22 @@ class TestEventDrivenReplay(unittest.TestCase):
          config.CURRENT_LEDGER_DIR, config.REPORTS_DIR) = self._orig
         self._tmp.cleanup()
 
-    def test_replay_fills_only_on_recorded_print_and_locks_pair(self):
-        with overridden_params({"ENABLE_MAKER_ENTRY": True, "MIN_MAKER_EDGE": 0.05, "ENTRY_MIN_PROB": 0.52, "ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00, "MIN_TAKER_EDGE": 0.99}):
+    def test_replay_fills_only_on_recorded_print_and_settles_winner(self):
+        with overridden_params({
+            "ENABLE_MAKER_ENTRY": True,
+            "MIN_MAKER_EDGE": 0.05,
+            "ENTRY_MIN_PROB": 0.52,
+            "MIN_TAKER_EDGE": 0.99,
+            "ENABLE_PYRAMID_ADD": False,
+        }):
             results = run_replay(limit=1, quiet=True, write=False)
         self.assertEqual(len(results), 1)
         r = results[0]
         self.assertTrue(r["replayed"])
-        self.assertGreaterEqual(r["fills"], 2)  # maker entry + taker hedge
+        self.assertEqual(r["fills"], 1)  # maker entry held cleanly to settlement
 
-        # Entry: 5 shares @ 0.45 (maker, zero fee). Hedge: 5 shares @ 0.52 +
-        # taker fee. A locked pair settles at 5 * (1 - pair_cost) whichever side
-        # wins, so the replay PnL is fully determined and winner-independent.
-        fee_per_share = 0.07 * 0.52 * (1.0 - 0.52)
-        expected = round(5.0 * (1.0 - (0.45 + 0.52 + fee_per_share)), 4)
+        # Entry: 5 shares @ 0.45 (maker, zero fee), settled as Up winner -> +$2.75
+        expected = round(5.0 * (1.0 - 0.45), 4)
         self.assertAlmostEqual(r["replay_pnl"], expected, places=3)
         # The attribution label must come from the entry tick, not a tick-vote.
         self.assertEqual(r["regime_source"], "entry_time")
@@ -142,13 +145,13 @@ class TestEventDrivenReplay(unittest.TestCase):
         self.assertEqual(results[0]["replay_pnl"], 0.0)
 
     def test_param_overrides_are_restored_on_error(self):
-        original = config.PARAMS["LWAA_MIN_PROB"]
+        original = config.PARAMS["ENTRY_MIN_PROB"]
         with self.assertRaises(RuntimeError):
-            with overridden_params({"LWAA_MIN_PROB": 0.5, "NOT_A_REAL_PARAM": 1}):
-                self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], 0.5)
+            with overridden_params({"ENTRY_MIN_PROB": 0.5, "NOT_A_REAL_PARAM": 1}):
+                self.assertEqual(config.PARAMS["ENTRY_MIN_PROB"], 0.5)
                 self.assertEqual(config.PARAMS["NOT_A_REAL_PARAM"], 1)
                 raise RuntimeError("boom")
-        self.assertEqual(config.PARAMS["LWAA_MIN_PROB"], original)
+        self.assertEqual(config.PARAMS["ENTRY_MIN_PROB"], original)
         self.assertNotIn("NOT_A_REAL_PARAM", config.PARAMS)
 
 

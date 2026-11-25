@@ -105,7 +105,10 @@ def plan_order_actions(
                         to_cancel.append(o)
                         continue
                 if o.purpose != "hedge" and preferred_side is not None and o.side != preferred_side:
-                    is_value_quote = "低价赔率错杀" in str(getattr(o, "entry_reason", "") or "")
+                    is_value_quote = (
+                        getattr(o, "intent", "") == "entry_value"
+                        or "低价赔率错杀" in str(getattr(o, "entry_reason", "") or "")
+                    )
                     if is_value_quote and p_up is not None:
                         p_side_val = float(p_up) if o.side == "Up" else (1.0 - float(p_up))
                         if p_side_val >= float(value_min_prob) - 1e-6:

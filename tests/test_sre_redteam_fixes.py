@@ -76,14 +76,6 @@ class TestPolicyAndMatcherHardening(unittest.TestCase):
         self.assertEqual(dec_flat.action, "wait")
         self.assertIn("Circuit breaker", dec_flat.reason)
 
-        # Existing winning position -> still allowed to execute explicit Black-Swan Lock under breaker
-        dec_lock = plan_decision(
-            Position(5.0, 2.80), Position(0, 0), _book(0.94, 0.96), _book(0.04, 0.05),
-            spot, tau_s=120.0, params=dict(params, ENABLE_BLACKSWAN_LOCK=True), circuit_breaker_active=True,
-            circuit_breaker_reason="Daily limit", p_fair=0.92, entries_count=1,
-        )
-        self.assertEqual(dec_lock.action, "taker_hedge")
-
         # Existing winning position -> blocked from pyramid add under breaker
         dec_pyr = plan_decision(
             Position(5.0, 2.80), Position(0, 0), _book(0.55, 0.57), _book(0.43, 0.45),
@@ -93,15 +85,6 @@ class TestPolicyAndMatcherHardening(unittest.TestCase):
         )
         self.assertEqual(dec_pyr.action, "wait")
         self.assertIn("reduce-only", dec_pyr.reason)
-
-    def test_blackswan_lock_checks_book_consistency_and_free_capital(self):
-        spot = SpotState(timestamp=1200.0, price=65200.0, open_price=65000.0, realized_vol_bps=18.0)
-        # Inconsistent books: ask sum = 0.70 + 0.05 = 0.75 < 0.995 -> must NOT lock
-        dec_bad_book = plan_decision(
-            Position(5.0, 2.80), Position(0, 0), _book(0.68, 0.70), _book(0.04, 0.05),
-            spot, tau_s=120.0, params=config.PARAMS, p_fair=0.92, entries_count=1,
-        )
-        self.assertNotEqual(dec_bad_book.action, "taker_hedge")
 
         # Insufficient remaining capital ($0.10 < 5 * $0.05 = $0.25) -> must NOT lock
         dec_no_cash = plan_decision(

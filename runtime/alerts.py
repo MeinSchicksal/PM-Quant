@@ -21,9 +21,39 @@ import requests
 
 _LOCK = threading.Lock()
 _LAST_SENT: Dict[str, float] = {}
+_LAST_ERR_LOG_T: float = 0.0
+_ALERT_PROXY: Optional[str] = None
 _QUEUE: "queue.Queue[tuple]" = queue.Queue(maxsize=64)
 _WORKER_STARTED = False
 _HOSTNAME = socket.gethostname()
+
+
+def set_alert_proxy(proxy: Optional[str]):
+    """Configure optional HTTP/HTTPS proxy for alert deliveries (synced from MarketFeed)."""
+    global _ALERT_PROXY
+    with _LOCK:
+        clean = str(proxy or "").strip()
+        _ALERT_PROXY = clean or None
+
+
+def _get_alert_proxies() -> Optional[Dict[str, str]]:
+    with _LOCK:
+        px = _ALERT_PROXY
+    if not px:
+        px = os.environ.get("PM_PROXY", "").strip()
+    if px:
+        return {"http": px, "https": px}
+    return None
+
+
+def _log_alert_error(channel: str, detail: str):
+    global _LAST_ERR_LOG_T
+    now_m = time.monotonic()
+    with _LOCK:
+        if (now_m - _LAST_ERR_LOG_T) < 60.0:
+            return
+        _LAST_ERR_LOG_T = now_m
+    print(f"[Alerts] Delivery warning ({channel}): {detail}")
 
 
 def is_alerting_configured() -> bool:
@@ -38,27 +68,37 @@ def _send_all(title: str, message: str, level: str):
     prefix = f"[PM-Quant/{level.upper()}@{_HOSTNAME}]"
     full_title = f"{prefix} {title}"
     body_text = f"{full_title}\n{message}"
+    proxies = _get_alert_proxies()
 
     tg_token = os.environ.get("PM_TELEGRAM_BOT_TOKEN", "").strip()
     tg_chat = os.environ.get("PM_TELEGRAM_CHAT_ID", "").strip()
     if tg_token and tg_chat:
         try:
-            requests.post(
+            resp = requests.post(
                 f"https://api.telegram.org/bot{tg_token}/sendMessage",
                 json={"chat_id": tg_chat, "text": body_text, "disable_web_page_preview": True},
+                proxies=proxies,
                 timeout=(3.0, 5.0),
             )
-        except Exception:
-            pass
+            if resp.status_code >= 300:
+                _log_alert_error("telegram", f"HTTP {resp.status_code}")
+        except Exception as exc:
+            _log_alert_error("telegram", str(exc)[:160])
 
     bark_url = os.environ.get("PM_BARK_URL", "").strip().rstrip("/")
     if bark_url:
         try:
             enc_title = urllib.parse.quote(full_title, safe="")
             enc_body = urllib.parse.quote(message, safe="")
-            requests.get(f"{bark_url}/{enc_title}/{enc_body}", timeout=(3.0, 5.0))
-        except Exception:
-            pass
+            resp = requests.get(
+                f"{bark_url}/{enc_title}/{enc_body}",
+                proxies=proxies,
+                timeout=(3.0, 5.0),
+            )
+            if resp.status_code >= 300:
+                _log_alert_error("bark", f"HTTP {resp.status_code}")
+        except Exception as exc:
+            _log_alert_error("bark", str(exc)[:160])
 
     hook_url = os.environ.get("PM_ALERT_WEBHOOK_URL", "").strip()
     if hook_url:
@@ -72,9 +112,11 @@ def _send_all(title: str, message: str, level: str):
                 payload = {"content": body_text}
             else:
                 payload = {"title": full_title, "message": message, "level": level, "text": body_text}
-            requests.post(hook_url, json=payload, timeout=(3.0, 5.0))
-        except Exception:
-            pass
+            resp = requests.post(hook_url, json=payload, proxies=proxies, timeout=(3.0, 5.0))
+            if resp.status_code >= 300:
+                _log_alert_error("webhook", f"HTTP {resp.status_code}")
+        except Exception as exc:
+            _log_alert_error("webhook", str(exc)[:160])
 
 
 def _worker_loop():

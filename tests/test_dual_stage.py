@@ -87,19 +87,6 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
         self.assertEqual(dec.action, "wait")
         self.assertIn("持有 5 股 Up", dec.reason)
 
-    def test_opt_in_arbitrage_hedge_locks_when_enabled(self):
-        """When ENABLE_ARBITRAGE_HEDGE=True explicitly, deep pair_cost <= 0.90 executes hedge."""
-        pos_up = Position(shares=5.0, cash=2.10)  # @ 0.42
-        pos_dn = Position(0.0, 0.0)
-        book_up = OrderBook(bids=[(0.60, 50.0)], asks=[(0.65, 50.0)])
-        book_dn = OrderBook(bids=[(0.30, 50.0)], asks=[(0.35, 50.0)])
-        spot = SpotState(timestamp=1200.0, price=75020.0, open_price=75000.0)
-
-        p = dict(self.params, ENABLE_ARBITRAGE_HEDGE=True, ARBITRAGE_HEDGE_MAX_PAIR_COST=0.90)
-        dec = plan_decision(pos_up, pos_dn, book_up, book_dn, spot, tau_s=100.0, params=p)
-        self.assertEqual(dec.action, "taker_hedge")
-        self.assertEqual(dec.side, "Down")
-
     def test_fully_hedged_pair_holds_to_settlement(self):
         """Balanced Up/Down pair holds when reentry disabled, and can trade again when edge exists."""
         pos_up = Position(shares=5.0, cash=2.10)

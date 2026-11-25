@@ -86,6 +86,8 @@ class Order:
     cancel_effective_at: Optional[float] = None
     cancel_reason: str = ""
     activated: bool = False
+    # Structured strategy intent (e.g. "entry_lead", "entry_value", "pyramid_add", "reversal_flip")
+    intent: str = ""
 
 
 @dataclass
@@ -106,3 +108,5 @@ class Decision:
     # On real Polymarket CLOB, limit protection is enforced natively by the
     # matching engine at this price — never via post-arrival look-ahead rejects.
     limit_price: Optional[float] = None
+    # Structured execution intent so execution/runner never have to parse Chinese `reason` text.
+    intent: str = ""

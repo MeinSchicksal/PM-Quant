@@ -17,10 +17,6 @@ from typing import Dict, Iterable, Tuple
 from core.types import Order, OrderBook
 
 
-def _clamp_px(px: float) -> float:
-    return min(0.99, max(0.01, px))
-
-
 def is_books_consistent(
     book_up: OrderBook,
     book_down: OrderBook,
@@ -42,41 +38,6 @@ def is_books_consistent(
     if au + ad < 1.0 - tol - 1e-9 or bu + bd > 1.0 + tol + 1e-9:
         return False
     return True
-
-
-def make_complementary(book_up: OrderBook, book_down: OrderBook) -> Tuple[OrderBook, OrderBook]:
-    """Enforce no-arbitrage consistency between the two complementary token books.
-
-    Up and Down redeem to $1.00 together, so buying both asks must cost >= $1.00
-    and selling both bids must yield <= $1.00. The venue feeds the two books as
-    independent snapshots that momentarily disagree near expiry (recorded ask
-    sums as low as $0.80); consuming them verbatim let the arbitrage-hedge leg
-    book a sub-$1 pair as risk-free profit. Shift the too-cheap asks up and the
-    too-rich bids down by the minimal amount that removes the impossible free
-    money. Already-consistent snapshots -- including legitimate post-move
-    arbitrage locks -- are returned unchanged.
-    """
-    au, ad = book_up.best_ask, book_down.best_ask
-    ask_delta = 0.0
-    if au is not None and ad is not None and au + ad < 1.0 - 1e-9:
-        ask_delta = (1.0 - (au + ad)) / 2.0
-    bu, bd = book_up.best_bid, book_down.best_bid
-    bid_delta = 0.0
-    if bu is not None and bd is not None and bu + bd > 1.0 + 1e-9:
-        bid_delta = -((bu + bd) - 1.0) / 2.0
-    if ask_delta == 0.0 and bid_delta == 0.0:
-        return book_up, book_down
-
-    def shift(book: OrderBook) -> OrderBook:
-        return OrderBook(
-            bids=[(_clamp_px(px + bid_delta), sz) for px, sz in book.bids],
-            asks=[(_clamp_px(px + ask_delta), sz) for px, sz in book.asks],
-            last_trade_price=book.last_trade_price,
-            source_t=book.source_t,
-            received_at=book.received_at,
-        )
-
-    return shift(book_up), shift(book_down)
 
 
 class QueueMatcher:

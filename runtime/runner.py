@@ -25,7 +25,7 @@ from core.estimator import estimate_p_fair
 from core.execution import plan_order_actions, taker_fee_per_share
 from core.circuit_breaker import CircuitBreaker
 from runtime.retention import is_replay_archive_allowed
-from sim.matcher import QueueMatcher, is_books_consistent, make_complementary
+from sim.matcher import QueueMatcher, is_books_consistent
 
 
 class PaperRunner:
@@ -936,8 +936,6 @@ class PaperRunner:
         and must not cancel resting quotes during a replay.
         """
         tau = max(0.0, self.window_end - now)
-        if not bool(config.PARAMS.get("STRICT_BOOK_CONSISTENCY", True)):
-            book_up, book_down = make_complementary(book_up, book_down)
         open_px = getattr(self, "open_price", 0.0)
         vol_bps = max(
             float(getattr(spot, "realized_vol_bps", 15.0) or 15.0),
@@ -1407,7 +1405,7 @@ class PaperRunner:
             anti_toxic_bps_pt = float(config.PARAMS.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
             vel_bps_pt = abs(float(getattr(spot, "velocity_bps", 0.0) or 0.0))
             max_vol_pt = float(config.PARAMS.get("MAX_ENTRY_VOL_BPS", 75.0))
-            min_tau_pt = float(config.PARAMS.get("ENTRY_MIN_TAU_S", config.PARAMS.get("LWAA_MIN_TAU_S", 15.0)))
+            min_tau_pt = float(config.PARAMS.get("ENTRY_MIN_TAU_S", 15.0))
             pt_urgent = (
                 bool(getattr(spot, "is_toxic_shock", False))
                 or vel_bps_pt >= anti_toxic_bps_pt
@@ -1528,17 +1526,13 @@ class PaperRunner:
                     return max(0.01, round(sig_px - ioc_slip, 2))
                 raw_cap = min(0.99, round(sig_px + ioc_slip, 2))
                 act_reason = action.reason or ""
+                act_intent = str(getattr(action, "intent", "") or "")
                 if action.action == "taker_hedge":
                     held_basis = (
                         self.pos_up.avg_price if action.side == "Down"
                         else self.pos_down.avg_price
                     )
-                    if "黑天鹅锁利" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
-                    elif "Deep Arbitrage lock" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
-                    else:
-                        max_pair_cap = 1.00
+                    max_pair_cap = 1.00
                     best_lim = 0.0
                     c_hi = int(round(raw_cap * 100))
                     c_lo = max(1, int(round(sig_px * 100)) - 2)
@@ -1550,8 +1544,8 @@ class PaperRunner:
                     return best_lim if best_lim > 0 else round(sig_px, 2)
 
                 # taker_buy: cap limit price so post-fee edge still clears required edge
-                is_flip_order = ("反买" in act_reason) or ("反手" in act_reason)
-                is_pyramid_order = ("加仓" in act_reason)
+                is_flip_order = (act_intent == "reversal_flip") or ("反买" in act_reason) or ("反手" in act_reason)
+                is_pyramid_order = (act_intent == "pyramid_add") or ("加仓" in act_reason)
                 if is_flip_order:
                     held_pos_flip = self.pos_down if action.side == "Up" else self.pos_up
                     held_basis_flip = held_pos_flip.avg_price
@@ -1701,13 +1695,7 @@ class PaperRunner:
                         else self.pos_down.avg_price
                     )
                     est_pair = held_basis + vwap + taker_fee_per_share(vwap, fee_r)
-                    act_reason = action.reason or ""
-                    if "黑天鹅锁利" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
-                    elif "Deep Arbitrage lock" in act_reason:
-                        max_pair_cap = float(config.PARAMS.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
-                    else:
-                        max_pair_cap = 1.00
+                    max_pair_cap = 1.00
                     if est_pair > max_pair_cap + 1e-6:
                         reject_reason = (
                             f"下单前可见 L2 深度 VWAP 使配对成本 {est_pair:.4f} > ${max_pair_cap:.2f} "
@@ -1743,7 +1731,8 @@ class PaperRunner:
                 filled_size=0.0,
                 purpose=purpose,
                 placed_at=now,
-                live_at=now + quote_lat
+                live_at=now + quote_lat,
+                intent=str(getattr(action, "intent", "") or ""),
             )
             new_order.entry_reason = str(action.reason or "")
             target_book = book_up if action.side == "Up" else book_down

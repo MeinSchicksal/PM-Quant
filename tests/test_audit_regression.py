@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 import config
 from core.types import Decision, Order, OrderBook, Position, SpotState
 from core.policy import plan_decision
-from sim.matcher import QueueMatcher, make_complementary
+from sim.matcher import QueueMatcher
 from runtime.runner import PaperRunner
 
 
@@ -157,33 +157,7 @@ class TestPriceSeries(unittest.TestCase):
 
 
 class TestPolicyDeadBranches(unittest.TestCase):
-    def test_mwde_taker_is_reachable_after_complementary_correction(self):
-        """make_complementary forces ask_up+ask_down>=1; the old <0.90 gate was dead."""
-        cu, cd = make_complementary(
-            _book(0.35, 0.38), _book(0.45, 0.50)
-        )
-        spot = SpotState(timestamp=1.0, price=100100.0, open_price=100000.0,
-                         poly_price=100100.0)
-        dec = plan_decision(
-            Position(0, 0), Position(0, 0), cu, cd, spot, 200.0,
-            dict(config.PARAMS, MAX_ORDERBOOK_SPREAD=0.10, EXECUTION_WEIGHTED_ROUTING=False),
-            p_fair=0.60, quote_attempts=1
-        )
-        self.assertEqual(dec.action, "taker_buy")
-
-    def test_allow_taker_unwind_false_really_disables_salvage(self):
-        params = dict(config.PARAMS, ALLOW_TAKER_UNWIND=False,
-                      DEFENSIVE_SALVAGE_ENABLE=True, ENABLE_ARBITRAGE_HEDGE=False)
-        spot = SpotState(timestamp=1.0, price=99900.0, open_price=100000.0,
-                         poly_price=99900.0)
-        dec = plan_decision(
-            Position(5.0, 2.25), Position(0, 0),
-            _book(0.10, 0.99), _book(0.55, 0.99),
-            spot, 25.0, params
-        )
-        self.assertNotEqual(dec.action, "taker_unwind")
-
-    def test_tail_freeze_blocks_hedge_and_unwind(self):
+    def test_tail_freeze_blocks_entry_and_management(self):
         spot = SpotState(timestamp=1.0, price=100000.0, open_price=100000.0,
                          poly_price=100000.0)
         dec = plan_decision(
@@ -193,18 +167,6 @@ class TestPolicyDeadBranches(unittest.TestCase):
         )
         self.assertEqual(dec.action, "wait")
         self.assertIn("Tail freeze", dec.reason)
-
-    def test_hedge_lock_threshold_is_not_silently_overridden(self):
-        params = dict(config.PARAMS, ENABLE_ARBITRAGE_HEDGE=False,
-                      ARBITRAGE_HEDGE_MAX_PAIR_COST=0.85)
-        spot = SpotState(timestamp=1.0, price=100000.0, open_price=100000.0,
-                         poly_price=100000.0)
-        dec = plan_decision(
-            Position(5.0, 2.25), Position(0, 0),
-            _book(0.40, 0.99), _book(0.40, 0.44),
-            spot, 100.0, params
-        )
-        self.assertNotEqual(dec.action, "taker_hedge")
 
 
 class TestSettlementTruth(unittest.TestCase):
@@ -225,24 +187,6 @@ class TestSettlementTruth(unittest.TestCase):
             self.assertEqual(out["winner"], "Up")
             self.assertEqual(out["close_px"], 99.0)
             self.assertEqual(out["net_pnl"], 2.5)
-
-    def test_vwap_slippage_rejects_fake_riskfree_hedge(self):
-        r = _runner()
-        r.start_window("s", 0.0, 300.0, 100000.0,
-                       binance_open_px=100000.0, poly_spot=100000.0)
-        r.pos_up = Position(5.0, 2.25)
-        # best_ask=0.30 looks like a lock, but walking 5 shares hits 0.75.
-        bd = _book(0.20, 0.30, t=100.0,
-                   asks=[(0.30, 1.0), (0.75, 50.0)])
-        bu = _book(0.40, 0.60, t=100.0)
-        sp = SpotState(timestamp=100.0, price=100000.0, open_price=100000.0,
-                       poly_price=100000.0, binance_open_price=100000.0)
-        with patch.dict(config.PARAMS, {"ENABLE_ARBITRAGE_HEDGE": True, "ARBITRAGE_HEDGE_MAX_PAIR_COST": 1.00}):
-            r.step(100.0, sp, bu, bd, poly_spot=100000.0)
-        rejects = [a for a in r.actions if a.get("action") == "taker_reject"]
-        self.assertTrue(rejects)
-        self.assertIn("VWAP", rejects[-1]["reason"])
-        self.assertEqual(r.pos_down.shares, 0.0)
 
 
 class TestSecondPassFixes(unittest.TestCase):

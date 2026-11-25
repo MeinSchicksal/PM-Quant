@@ -97,20 +97,7 @@ PARAMS = {
     "BOOK_DROP_GUARD_MAX": 0.03,      # 5s 内盘口跌幅 >= $0.03 触发阈值
     "ENTRY_MAX_ADVERSE_SPOT_BPS": 1.5,# 方向性防接飞刀：现货 2-3s 已反向急跌超 1.5 bps 时禁止逆势开仓
 
-    # 2b. Mode B: Skewed-Drift High-Certainty Taker IOC (disabled)
-    "ENABLE_DRIFT_MODE_B": False,
-    "DRIFT_MODE_B_MIN_PRICE": 0.75,
-    "DRIFT_MODE_B_MAX_PRICE": 0.88,
-    "DRIFT_MODE_B_MIN_PROB": 0.80,
-    "DRIFT_MODE_B_MIN_EDGE": 0.05,
-    "DRIFT_MODE_B_DISABLE_PYRAMID": True,
-
     # 3. Position Management (v3.3: Average-Protecting Quality Add + Payoff-Driven Dynamic Flip)
-    "ENABLE_ARBITRAGE_HEDGE": False,  # 严格关闭锁利阈值，保留赢家腿奔向 $1.00 的完整赔率凸性
-    "ARBITRAGE_HEDGE_MAX_PAIR_COST": 0.90,
-    "ENABLE_BLACKSWAN_LOCK": False,   # 严格关闭锁利阈值，不把多次小赢拿去换一次亏损
-    "BLACKSWAN_LOCK_MAX_OPP_ASK": 0.06,
-    "BLACKSWAN_LOCK_MAX_PAIR_COST": 0.85,
     "ALLOW_REENTRY_AFTER_PAIR": False,# 完成反手后不再同窗反复重开，防锯齿磨损
     "REENTRY_COOLDOWN_S": 10.0,
     "ENABLE_PYRAMID_ADD": True,       # 开启“不拉烂均价 + 防反转送钱”的中盘质量加仓
@@ -146,12 +133,6 @@ PARAMS = {
     "FLIP_TARGET_PROFIT_USD": 0.30,   # 反手目标：对侧胜出时保本并争取微盈 +$0.30
     "FLIP_MAX_SHARES": 10.0,          # 单次反手硬上限 10 股（防马丁格尔翻倍失控）
     "FLIP_MAX_TOTAL_WINDOW_COST": 10.0,# 含反手单窗总投入硬封顶 $10.00
-    "ALLOW_TAKER_UNWIND": False,      # 严格禁止卖出，买入即持有至到期结算
-    "DEFENSIVE_SALVAGE_ENABLE": False,
-    "DEFENSIVE_SALVAGE_TAU_S": 30.0,
-    "DEFENSIVE_SALVAGE_MAX_PROB": 0.12,
-    "DEFENSIVE_SALVAGE_MAX_BID": 0.15,
-    "DEFENSIVE_SALVAGE_MIN_BID": 0.06,
 
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
     "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
@@ -184,13 +165,6 @@ PARAMS = {
     "MIN_MARKET_MID_BALANCED": 0.42,
     "MAX_MARKET_MID_BALANCED": 0.58,
 
-    # Compatibility keys for stress/replay overrides
-    "LWAA_MIN_TAU_S": 15.0,
-    "LWAA_MAX_TAU_S": 280.0,
-    "LWAA_MIN_PROB": 0.53,
-    "LWAA_MIN_EDGE": 0.055,
-    "LWAA_MAX_ENTRY_PRICE": 0.72,
-
     # 7. Data Retention & Disk-Full Auto-Guard (summary.jsonl is NEVER deleted)
     "RECORD_RAW_MARKET": True,          # Master toggle for raw data/1_market recording (auto-paused if disk critical)
     "MARKET_RETENTION_DAYS": 3,         # Keep recent 3 days of raw data/1_market/{events,oracle,books,spot}
@@ -212,7 +186,7 @@ def validate_params(params=None):
     """Fail fast when risk parameters contradict each other."""
     p = PARAMS if params is None else params
     errors = []
-    max_px = p.get("ENTRY_MAX_PRICE", p.get("LWAA_MAX_ENTRY_PRICE", 0.75))
+    max_px = p["ENTRY_MAX_PRICE"]
     lot_size = p["LOT_SIZE"]
     budget = p["MAX_WINDOW_LOSS_USD"]
     min_lot_cost = lot_size * max_px * p["MIN_LOTS"]
@@ -254,19 +228,6 @@ def validate_params(params=None):
     max_tau = float(p.get("ENTRY_MAX_TAU_S", 280.0))
     if late_tau > 0.0 and not (min_tau <= late_tau <= max_tau):
         errors.append(f"LATE_NO_NEW_ENTRY_TAU_S={late_tau} must lie in [{min_tau}, {max_tau}]")
-    if p.get("ENABLE_DRIFT_MODE_B", False):
-        mb_min = float(p.get("DRIFT_MODE_B_MIN_PRICE", 0.75))
-        mb_max = float(p.get("DRIFT_MODE_B_MAX_PRICE", 0.88))
-        mb_prob = float(p.get("DRIFT_MODE_B_MIN_PROB", 0.80))
-        mb_edge = float(p.get("DRIFT_MODE_B_MIN_EDGE", 0.05))
-        if not (0.0 < mb_min < mb_max <= 0.99):
-            errors.append(f"Invalid Mode B price range ({mb_min:.2f}, {mb_max:.2f}]")
-        if not (0.50 <= mb_prob <= 0.99) or mb_edge < 0.0:
-            errors.append(f"Invalid Mode B prob/edge ({mb_prob:.2f}, {mb_edge:.3f})")
-        if budget + 1e-9 < lot_size * mb_max:
-            errors.append(
-                f"MAX_WINDOW_LOSS_USD={budget:.2f} cannot cover 1 Mode B lot at ${mb_max:.2f}"
-            )
     if errors:
         raise ValueError("Inconsistent risk parameters: " + "; ".join(errors))
     return True

@@ -22,7 +22,6 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
     def test_v29_version_and_calibrated_defaults(self):
         self.assertEqual(config.VERSION, "v3.3")
         self.assertEqual(config.BATCH_ID, "v3.3")
-        self.assertFalse(config.PARAMS["ENABLE_BLACKSWAN_LOCK"])
         self.assertAlmostEqual(config.PARAMS["LATENCY_S"], 0.18, places=4)
         self.assertAlmostEqual(config.PARAMS["CANCEL_LATENCY_S"], 0.18, places=4)
         self.assertTrue(config.PARAMS["LATENCY_DYNAMIC_FROM_RTT"])

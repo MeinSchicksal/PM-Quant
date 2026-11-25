@@ -265,7 +265,7 @@ def determine_objective_side(
     p_fair: Optional[float] = None,
 ) -> Optional[Side]:
     """Return the model-favoured side when P* exceeds ENTRY_MIN_PROB."""
-    min_prob = float(params.get("ENTRY_MIN_PROB", params.get("LWAA_MIN_PROB", 0.52)))
+    min_prob = float(params.get("ENTRY_MIN_PROB", 0.53))
     p_up = float(p_fair) if p_fair is not None else _compute_p_fair(spot, tau_s, params)
     if p_up >= min_prob:
         return "Up"
@@ -315,81 +315,6 @@ def _plan_inventory_management(
             )
     spot_is_stale = bool(getattr(spot, "is_stale", False))
 
-    if (
-        bool(params.get("ENABLE_ARBITRAGE_HEDGE", False))
-        and held_shares >= min_order_sh - 1e-4
-        and opp_book_valid
-        and not spot_is_stale
-    ):
-        max_pair_cost = float(params.get("ARBITRAGE_HEDGE_MAX_PAIR_COST", 0.90))
-        hedge_ask = opp_book.best_ask
-        if hedge_ask is not None:
-            fee = taker_fee_per_share(hedge_ask, fee_rate)
-            pair_cost = held_basis + hedge_ask + fee
-            need_cash = held_shares * (hedge_ask + fee)
-            if pair_cost <= max_pair_cost and available_cap + 1e-9 >= need_cash:
-                return Decision(
-                    action="taker_hedge",
-                    side=opp_side,
-                    price=hedge_ask,
-                    size=held_shares,
-                    utility=round(held_shares * (1.00 - pair_cost), 4),
-                    reason=f"Deep Arbitrage lock: pair_cost={pair_cost:.3f} <= {max_pair_cost:.2f}, take hedge @ {hedge_ask:.2f}",
-                )
-
-    # Ultra-deep black-swan lock: protect 94%+ winners (opp_ask <= $0.06 & pair_cost <= $0.85, requires >= 5.0 shares)
-    if (
-        bool(params.get("ENABLE_BLACKSWAN_LOCK", False))
-        and held_shares >= min_order_sh - 1e-4
-        and dual_books_consistent
-        and not spot_is_stale
-    ):
-        bs_max_opp = float(params.get("BLACKSWAN_LOCK_MAX_OPP_ASK", 0.06))
-        bs_max_pair = float(params.get("BLACKSWAN_LOCK_MAX_PAIR_COST", 0.85))
-        hedge_ask = opp_book.best_ask
-        if hedge_ask is not None and hedge_ask <= bs_max_opp + 1e-6:
-            fee = taker_fee_per_share(hedge_ask, fee_rate)
-            pair_cost = held_basis + hedge_ask + fee
-            need_cash = held_shares * (hedge_ask + fee)
-            if pair_cost <= bs_max_pair + 1e-6 and available_cap + 1e-9 >= need_cash:
-                return Decision(
-                    action="taker_hedge",
-                    side=opp_side,
-                    price=hedge_ask,
-                    size=held_shares,
-                    utility=round(held_shares * (1.00 - pair_cost), 4),
-                    reason=f"v2.6 极深黑天鹅锁利: {opp_side} ask=${hedge_ask:.2f}, pair_cost={pair_cost:.3f} <= {bs_max_pair:.2f}",
-                )
-
-    salvage_tau = float(params.get("DEFENSIVE_SALVAGE_TAU_S", 30.0))
-    salvage_prob = float(params.get("DEFENSIVE_SALVAGE_MAX_PROB", 0.12))
-    salvage_max_bid = float(params.get("DEFENSIVE_SALVAGE_MAX_BID", 0.15))
-    salvage_min_bid = float(params.get("DEFENSIVE_SALVAGE_MIN_BID", 0.06))
-    salvage_enabled = (
-        bool(params.get("DEFENSIVE_SALVAGE_ENABLE", True))
-        and bool(params.get("ALLOW_TAKER_UNWIND", True))
-    )
-
-    if (
-        salvage_enabled
-        and not spot_is_stale
-        and held_shares >= min_order_sh - 1e-4
-        and tau_s <= salvage_tau
-        and p_fair_held < salvage_prob
-    ):
-        salvage_bid = held_book.best_bid
-        if salvage_bid is not None and salvage_min_bid <= salvage_bid <= salvage_max_bid:
-            fee = taker_fee_per_share(salvage_bid, fee_rate)
-            salvage_cash = held_shares * (salvage_bid - fee)
-            return Decision(
-                action="taker_unwind",
-                side=held_side,
-                price=salvage_bid,
-                size=held_shares,
-                utility=round(salvage_bid - fee, 4),
-                reason=f"Defensive Salvage: 尾盘({tau_s:.0f}s) P*={p_fair_held:.2f} 坍塌，市价出清残值 bid={salvage_bid:.2f} (挽回${salvage_cash:.2f})",
-            )
-
     # Under reduce-only circuit breaker, never open secondary risk (pyramid add / reversal flip)
     if circuit_breaker_active:
         return _wait(
@@ -419,7 +344,7 @@ def _plan_inventory_management(
     #       without waiting for expensive 70%+ odds traps (Taker IOC).
     #   (2) Confirmed Reversal Rebalance (Flip): cut/shift wrong exposure via Taker IOC ONLY when
     #       opposite side confirms clear probability leadership + positive standalone EV (never passive Maker).
-    max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 240.0)))
+    max_tau = float(params.get("ENTRY_MAX_TAU_S", 280.0))
     sec_cooldown = float(params.get("SECONDARY_ENTRY_COOLDOWN_S", 15.0))
     flip_cooldown = float(params.get("FLIP_COOLDOWN_S", 5.0))
     elapsed_since_entry = params.get("SECONDS_SINCE_LAST_ENTRY")
@@ -471,10 +396,6 @@ def _plan_inventory_management(
             and (not spot_is_stale)
             and (not adverse_held_shock)
         ) if bool(params.get("DIRECTIONAL_ANTI_TOXICITY", True)) else (not is_toxic_or_stale)
-        mode_b_pyramid_blocked = (
-            bool(params.get("DRIFT_MODE_B_DISABLE_PYRAMID", True))
-            and held_basis > float(params.get("DRIFT_MODE_B_MIN_PRICE", 0.75)) - 1e-6
-        )
         allow_add_after_flip = bool(params.get("PYRAMID_ALLOW_AFTER_FLIP", False))
         entry_side_prob = params.get("ENTRY_SIDE_PROB")
         max_prob_drop = float(params.get("PYRAMID_MAX_PROB_DROP", 0.0) or 0.0)
@@ -488,7 +409,6 @@ def _plan_inventory_management(
             and pyr_taker_ok
             and pyr_cooldown_ok
             and prob_not_deteriorated
-            and not mode_b_pyramid_blocked
             and bool(params.get("ENABLE_PYRAMID_ADD", False))
             and (allow_add_after_flip or opp_shares < 1e-4)
             and held_shares < max_net_shares_cap - 1e-4
@@ -535,6 +455,7 @@ def _plan_inventory_management(
                             utility=round(tk_edge, 4),
                             limit_price=ioc_lim,
                             reason=f"优质控均价加仓 IOC: {held_side} ask=${eff_ask:.2f} (均价=${held_basis:.2f}, 限价=${ioc_lim:.2f}, P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
+                            intent="pyramid_add",
                         )
             bid = held_book.best_bid
             mk_cap = min(p_max_px, 0.78)
@@ -562,6 +483,7 @@ def _plan_inventory_management(
                         size=lot_size,
                         utility=round(mk_edge, 4),
                         reason=f"v2.9 顺势确认加仓 Maker: {held_side} bid=${mk_px:.2f} (P*={p_fair_held:.2f}, 零费边际={mk_edge:+.3f})",
+                        intent="pyramid_add",
                     )
 
         # 2) Payoff-Driven Confirmed Reversal Rebalance / Flip:
@@ -650,6 +572,7 @@ def _plan_inventory_management(
                                 utility=round(tk_edge, 4),
                                 limit_price=ioc_lim,
                                 reason=f"终局动态不对劲反买 IOC ({flip_sz:.0f}股): {opp_side} ask=${eff_ask:.2f} (配对成本=${pair_cost:.3f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
+                                intent="reversal_flip",
                             )
             bid = opp_book.best_bid
             if (
@@ -677,6 +600,7 @@ def _plan_inventory_management(
                         size=lot_size,
                         utility=round(mk_edge, 4),
                         reason=f"动态不对劲反买 Maker: {opp_side} bid=${mk_px:.2f} (配对成本=${pair_cost_mk:.3f}, 对侧P*={p_opp:.2f}, 零费边际={mk_edge:+.3f})",
+                        intent="reversal_flip",
                     )
 
     should_pull = (
@@ -723,7 +647,7 @@ def plan_decision(
     p_down = 1.0 - p_up
 
     # 3. Tail freeze applies to EVERY branch (entries, hedges, unwinds)
-    min_tau = float(params.get("ENTRY_MIN_TAU_S", params.get("LWAA_MIN_TAU_S", 15.0)))
+    min_tau = float(params.get("ENTRY_MIN_TAU_S", 15.0))
     if tau_s < min_tau:
         return _wait(f"v2.3: Tail freeze (tau {tau_s:.0f}s < {min_tau:.0f}s), holding to settlement", urgent=True)
 
@@ -784,7 +708,7 @@ def plan_decision(
     if u_shares >= max_shares - 1e-4 or d_shares >= max_shares - 1e-4:
         return _wait(f"Max position reached ({max(u_shares, d_shares):.0f} shares), holding to settlement", urgent=True)
 
-    max_entry_px = float(params.get("ENTRY_MAX_PRICE", params.get("LWAA_MAX_ENTRY_PRICE", 0.80)))
+    max_entry_px = float(params.get("ENTRY_MAX_PRICE", 0.72))
     min_entry_px = float(params.get("ENTRY_MIN_PRICE", 0.20))
 
     available_cap = float(params.get("AVAILABLE_CAPITAL", 100.0))
@@ -813,7 +737,7 @@ def plan_decision(
         return _wait(f"v2.9: 极端巨震风暴避险 (5m波动率 {live_vol:.1f} > {max_entry_vol:.0f} bps)", urgent=True)
 
     # 7. Active Time Window & Readiness Guards
-    max_tau = float(params.get("ENTRY_MAX_TAU_S", params.get("LWAA_MAX_TAU_S", 280.0)))
+    max_tau = float(params.get("ENTRY_MAX_TAU_S", 280.0))
     if tau_s > max_tau:
         return _wait(f"v3.3: Observation period (tau {tau_s:.0f}s > {max_tau:.0f}s)", urgent=True)
 
@@ -851,12 +775,12 @@ def plan_decision(
 
     # 8. Multi-Factor Net-Edge & Scene-Weighted Maker/Taker Evaluation
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
-    min_prob = float(params.get("ENTRY_MIN_PROB", params.get("LWAA_MIN_PROB", 0.53)))
+    min_prob = float(params.get("ENTRY_MIN_PROB", 0.53))
     value_enable = bool(params.get("ENTRY_VALUE_ENABLE", False))
     value_min_prob = float(params.get("ENTRY_VALUE_MIN_PROB", 0.46))
     value_max_px = float(params.get("ENTRY_VALUE_MAX_PRICE", 0.42))
     value_min_edge = float(params.get("ENTRY_VALUE_MIN_EDGE", 0.055))
-    min_maker_edge = float(params.get("MIN_MAKER_EDGE", params.get("LWAA_MIN_EDGE", 0.055)))
+    min_maker_edge = float(params.get("MIN_MAKER_EDGE", 0.055))
     min_taker_edge = float(params.get("MIN_TAKER_EDGE", 0.038))
     maker_max_px = min(max_entry_px, float(params.get("MAKER_MAX_PRICE", max_entry_px)))
     max_book_spread = float(params.get("MAX_ORDERBOOK_SPREAD", 0.06))
@@ -996,6 +920,7 @@ def plan_decision(
             utility=round(edge, 4),
             limit_price=ioc_lim,
             reason=f"v3.3 {tag}: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            intent="entry_value" if is_val else "entry_lead",
         )
 
     if best_maker is not None:
@@ -1008,69 +933,11 @@ def plan_decision(
             size=size,
             utility=round(edge, 4),
             reason=f"v3.3 {tag}: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
+            intent="entry_value" if is_val else "entry_lead",
         )
 
     if is_shock_any:
         return _wait(f"v2.9: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
-
-    # 8b. 模式 B（单边高确定性顺势折价 IOC）：仅在模式 A 空仓观望且无冲击时激活，严禁与模式 A 抢戏
-    if (
-        bool(params.get("ENABLE_DRIFT_MODE_B", False))
-        and u_shares <= 1e-4
-        and d_shares <= 1e-4
-        and entries_count == 0
-    ):
-        mb_min_px = float(params.get("DRIFT_MODE_B_MIN_PRICE", 0.75))
-        mb_max_px = float(params.get("DRIFT_MODE_B_MAX_PRICE", 0.88))
-        mb_min_prob = float(params.get("DRIFT_MODE_B_MIN_PROB", 0.80))
-        mb_min_edge = float(params.get("DRIFT_MODE_B_MIN_EDGE", 0.05))
-        best_mode_b = None
-        for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
-            if p_side < mb_min_prob or tb.spread > max_book_spread + 1e-6:
-                continue
-            adverse_shock = (
-                (side == "Up" and vel_signed <= -anti_toxic_bps)
-                or (side == "Down" and vel_signed >= anti_toxic_bps)
-            )
-            if adverse_shock:
-                continue
-            ask = tb.best_ask
-            if ask is None or not (mb_min_px < ask <= mb_max_px + 1e-9):
-                continue
-            vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
-            if vis_filled < size - 1e-6:
-                continue
-            if not (mb_min_px < vis_vwap <= mb_max_px + 1e-9):
-                continue
-            fee = taker_fee_per_share(vis_vwap, fee_rate)
-            net_edge = p_side - (vis_vwap + fee)
-            if net_edge < mb_min_edge - 1e-9:
-                continue
-            need_cash = size * (vis_vwap + fee)
-            if available_cap + 1e-9 < need_cash:
-                budget_blocked_msg = f"v3.0: 模式B资金不足 (${available_cap:.2f} < ${need_cash:.2f})"
-                continue
-            if committed + need_cash > window_budget + 1e-9:
-                budget_blocked_msg = f"v3.0: 模式B超出单窗预算 (${committed:.2f}/${window_budget:.2f})"
-                continue
-            ioc_lim = _compute_ioc_buy_limit(
-                vis_vwap, p_side, mb_min_edge, tau_s, fee_rate, params,
-                mb_max_px, use_dynamic_edge=False, min_sweep_px=vis_worst,
-            )
-            if best_mode_b is None or net_edge > best_mode_b[0]:
-                best_mode_b = (net_edge, side, vis_vwap, ioc_lim, p_side)
-
-        if best_mode_b is not None:
-            edge, side, ask, ioc_lim, p_side = best_mode_b
-            return Decision(
-                action="taker_buy",
-                side=side,
-                price=round(ask, 4),
-                size=size,
-                utility=round(edge, 4),
-                limit_price=ioc_lim,
-                reason=f"v3.0 模式B·单边顺势折价 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
-            )
 
     if knife_blocked_msg:
         return _wait(knife_blocked_msg, urgent=knife_urgent)
