@@ -68,6 +68,7 @@ def plan_order_actions(
     mkt_mom_up: Optional[float] = None,
     mkt_mom_down: Optional[float] = None,
     book_drop_guard_max: Optional[float] = None,
+    value_min_prob: float = 0.46,
 ) -> Tuple[List[Order], Optional[Decision]]:
     """Determine which orders to cancel and which new order to place.
     
@@ -104,9 +105,20 @@ def plan_order_actions(
                         to_cancel.append(o)
                         continue
                 if o.purpose != "hedge" and preferred_side is not None and o.side != preferred_side:
-                    o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
-                    to_cancel.append(o)
-                    continue
+                    is_value_quote = "低价赔率错杀" in str(getattr(o, "entry_reason", "") or "")
+                    if is_value_quote and p_up is not None:
+                        p_side_val = float(p_up) if o.side == "Up" else (1.0 - float(p_up))
+                        if p_side_val >= float(value_min_prob) - 1e-6:
+                            # Contested-zone low-price value quote stays alive while its own P* & edge hold
+                            pass
+                        else:
+                            o.cancel_reason = f"低价错杀胜率跌破下限撤单(挂单={o.side}, P*={p_side_val:.2f})"
+                            to_cancel.append(o)
+                            continue
+                    else:
+                        o.cancel_reason = f"客观方向反转撤单(挂单={o.side}, 现势={preferred_side})"
+                        to_cancel.append(o)
+                        continue
                 if o.purpose != "hedge" and p_up is not None and min_hold_maker_edge is not None:
                     p_side = float(p_up) if o.side == "Up" else (1.0 - float(p_up))
                     live_edge = p_side - float(o.price)

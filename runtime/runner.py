@@ -384,6 +384,7 @@ class PaperRunner:
         self._mid_mkt_up = None
         self._entry_p_up = None
         self._entry_mkt_up = None
+        self._entry_side_prob = None
         if resume_from_live:
             self._try_resume_from_live(slug)
 
@@ -517,6 +518,19 @@ class PaperRunner:
         restored_tl = raw.get("decision_timeline")
         if isinstance(restored_tl, list):
             self.decision_timeline = [it for it in restored_tl if isinstance(it, dict)][-50:]
+        for attr_name, json_key in (
+            ("_entry_side_prob", "entry_side_prob"),
+            ("_entry_p_up", "entry_p_up"),
+            ("_entry_mkt_up", "entry_mkt_up"),
+            ("_mid_p_up", "mid_p_up"),
+            ("_mid_mkt_up", "mid_mkt_up"),
+        ):
+            try:
+                val = raw.get(json_key)
+                if val is not None and math.isfinite(float(val)):
+                    setattr(self, attr_name, float(val))
+            except (TypeError, ValueError):
+                pass
 
         if up_sh > 0 or dn_sh > 0 or self.fills:
             print(
@@ -642,8 +656,10 @@ class PaperRunner:
                 if self.entries_count == 0 and self.entry_regime is None:
                     self.entry_regime = self._last_regime
                 if self.entries_count == 0 and getattr(self, "_entry_p_up", None) is None:
-                    self._entry_p_up = round(float(getattr(self, "last_prob_up", 0.5)), 4)
+                    p_u_now = float(getattr(self, "last_prob_up", 0.5))
+                    self._entry_p_up = round(p_u_now, 4)
                     self._entry_mkt_up = round(float(getattr(self, "last_poly_up", 0.5)), 4)
+                    self._entry_side_prob = round(p_u_now if side == "Up" else (1.0 - p_u_now), 4)
                 self.entries_count += 1
                 # Grant each new entry stage its own fresh quote_attempts budget
                 self.quote_attempts = 0
@@ -671,6 +687,12 @@ class PaperRunner:
         else:
             self.pos_down.shares += fill_sz
             self.pos_down.cash += (fill_sz * order.price)
+        paired = min(self.pos_up.shares, self.pos_down.shares)
+        if paired > 1e-6:
+            pair_cost = self.pos_up.avg_price + self.pos_down.avg_price
+            self.insurance_paid = max(0.0, (pair_cost - 1.00) * paired)
+        else:
+            self.insurance_paid = 0.0
         self._record_fill(
             ts, order.side, order.price, fill_sz, "maker", order.purpose,
             order_id=order.id, reason=str(getattr(order, "entry_reason", "") or ""),
@@ -1033,6 +1055,7 @@ class PaperRunner:
         p_fair = estimate_p_fair(
             spot, open_px, tau, vol_bps,
             poly_price=poly_spot if poly_fresh else None,
+            unit_variance=bool(config.PARAMS.get("MODEL_T5_UNIT_VARIANCE", False)),
         )
         self.last_prob_up = p_fair
 
@@ -1350,10 +1373,16 @@ class PaperRunner:
         mkt_mom_up, mkt_mom_down = self._update_and_get_book_momentum(
             now, book_up, book_down, window_s=book_drop_win_s
         )
+        held_leg_cost = (
+            self.pos_up.cash if net_gap > 1e-4
+            else (self.pos_down.cash if net_gap < -1e-4 else 0.0)
+        )
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
             COMMITTED_WINDOW_COST=committed_cost,
+            HELD_LEG_COST=held_leg_cost,
+            ENTRY_SIDE_PROB=getattr(self, "_entry_side_prob", None),
             SECONDS_SINCE_LAST_ENTRY=secs_since_entry,
             FLIPS_USED=getattr(self, "flips_count", 0),
             HAS_WORKING_ORDERS=any(o.cancel_at is None and o.remaining > 1e-6 for o in self.working_orders),
@@ -1440,7 +1469,7 @@ class PaperRunner:
             float(config.PARAMS.get("LOT_SIZE", 5.0)),
             float(config.PARAMS.get("MIN_ORDER_SHARES", 5.0)),
         )
-        pref_side = determine_objective_side(spot, tau, eval_params)
+        pref_side = determine_objective_side(spot, tau, eval_params, p_fair=p_fair)
         to_cancel, action = plan_order_actions(
             self.working_orders, decision, now,
             max_queue_wait_s=float(config.PARAMS.get("MAX_QUEUE_WAIT_S", 15.0)),
@@ -1461,6 +1490,7 @@ class PaperRunner:
                 if bool(config.PARAMS.get("ENABLE_BOOK_DROP_GUARD", False))
                 else None
             ),
+            value_min_prob=float(config.PARAMS.get("ENTRY_VALUE_MIN_PROB", 0.46)),
         )
         for o in to_cancel:
             o.cancel_at = now
@@ -1526,15 +1556,15 @@ class PaperRunner:
                     held_pos_flip = self.pos_down if action.side == "Up" else self.pos_up
                     held_basis_flip = held_pos_flip.avg_price
                     max_flip_pair = float(config.PARAMS.get("FLIP_MAX_PAIR_COST", 2.00))
-                    req_edge = float(config.PARAMS.get("FLIP_MIN_TAKER_EDGE", 0.035))
+                    req_edge = float(config.PARAMS.get("FLIP_MIN_TAKER_EDGE", 0.038))
                 elif is_pyramid_order:
                     held_basis_flip = 0.0
                     max_flip_pair = 2.0
-                    req_edge = float(config.PARAMS.get("PYRAMID_MIN_TAKER_EDGE", 0.055))
+                    req_edge = float(config.PARAMS.get("PYRAMID_MIN_TAKER_EDGE", 0.040))
                 else:
                     held_basis_flip = 0.0
                     max_flip_pair = 2.0
-                    base_tk = float(config.PARAMS.get("MIN_TAKER_EDGE", 0.065))
+                    base_tk = float(config.PARAMS.get("MIN_TAKER_EDGE", 0.038))
                     req_edge = required_entry_edge(sig_px, tau, base_tk, config.PARAMS)
 
                 if action.utility is None:
@@ -1552,7 +1582,7 @@ class PaperRunner:
                     req_p = (
                         req_edge
                         if (is_flip_order or is_pyramid_order)
-                        else required_entry_edge(p, tau, float(config.PARAMS.get("MIN_TAKER_EDGE", 0.065)), config.PARAMS)
+                        else required_entry_edge(p, tau, float(config.PARAMS.get("MIN_TAKER_EDGE", 0.038)), config.PARAMS, p_side=p_est)
                     )
                     if (p_est - (p + f_p)) >= req_p - 1e-6:
                         best_lim = p
@@ -1949,6 +1979,25 @@ class PaperRunner:
         if is_traded:
             self.total_pnl += net_pnl
 
+        # Cancel & audit any still-in-flight async taker orders before archiving window
+        if getattr(self, "pending_takers", None):
+            for pt in self.pending_takers:
+                fut = pt.get("book_future")
+                if fut is not None and hasattr(fut, "cancel"):
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                act = pt.get("action")
+                if act is not None:
+                    self.actions.append({
+                        "t": round(float(self.window_end or time.time()), 2),
+                        "action": "taker_reject",
+                        "side": getattr(act, "side", None),
+                        "requested": round(float(pt.get("want", 0.0) or 0.0), 4),
+                        "reason": "窗口切换时在途异步Taker未完成，自动取消并放弃成交",
+                    })
+
         # 2. Archive compressed detailed window log atomically (skip under critical disk-full guard)
         if is_replay_archive_allowed():
             detail = dict(
@@ -2268,7 +2317,12 @@ class PaperRunner:
             "network": getattr(self, "net_stats", {}),
             "api_schema_guard": getattr(self, "_api_schema_guard", {"paused": False, "source": "", "reason": ""}),
             "last_decision": self.decisions[-1] if self.decisions else None,
-            "decision_timeline": getattr(self, "decision_timeline", [])[-30:]
+            "decision_timeline": getattr(self, "decision_timeline", [])[-30:],
+            "entry_side_prob": getattr(self, "_entry_side_prob", None),
+            "entry_p_up": getattr(self, "_entry_p_up", None),
+            "entry_mkt_up": getattr(self, "_entry_mkt_up", None),
+            "mid_p_up": getattr(self, "_mid_p_up", None),
+            "mid_mkt_up": getattr(self, "_mid_mkt_up", None),
         }
         self._atomic_write_text(
             self.live_file,

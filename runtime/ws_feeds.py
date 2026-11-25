@@ -805,8 +805,8 @@ class PolymarketBookWSClient(_BaseWSClient):
                     # Validate freshness of THIS specific token, not unrelated prewarmed tokens
                     if (t - src_t) > max_age_s:
                         return None
-                # Tight single-token freeze guard (15s) so silent per-token drops cannot bypass deadman for 60s
-                if src_t > 0.0 and (t - src_t) > max(max_age_s, 15.0):
+                # Tight single-token freeze guard (10s) so silent per-token drops trigger fast resubscribe + REST fallback
+                if src_t > 0.0 and (t - src_t) > max(max_age_s, 10.0):
                     # 单 Token 静默断流时主动触发原地重订自愈，避免整窗永久退化为慢速 REST 轮询
                     self._schedule_token_resubscribe_locked(str(token_id), t)
                     return None

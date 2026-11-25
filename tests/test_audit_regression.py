@@ -166,7 +166,7 @@ class TestPolicyDeadBranches(unittest.TestCase):
                          poly_price=100100.0)
         dec = plan_decision(
             Position(0, 0), Position(0, 0), cu, cd, spot, 200.0,
-            dict(config.PARAMS, MAX_ORDERBOOK_SPREAD=0.10),
+            dict(config.PARAMS, MAX_ORDERBOOK_SPREAD=0.10, EXECUTION_WEIGHTED_ROUTING=False),
             p_fair=0.60, quote_attempts=1
         )
         self.assertEqual(dec.action, "taker_buy")

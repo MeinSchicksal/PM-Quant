@@ -1,5 +1,5 @@
 // ============================================================================
-// PM-QUANT · Institutional Quantitative Trading Terminal Logic (v3.1.0)
+// PM-QUANT · Institutional Quantitative Trading Terminal Logic (v3.3.0)
 // ============================================================================
 
 const $ = (id) => document.getElementById(id);
@@ -676,13 +676,17 @@ function translateDecisionReason(rawReason) {
     return `已持有 ${m[1]} 股${dirCn(m[2])}（均价 $${m[3]}），安心等待到期结算`;
   }
 
-  // 2. 开盘观察 / 尾盘冻结
-  if ((m = s.match(/Observation period\s*\(tau\s*([\d.]+)s/i)) || /开盘观察|warmup/i.test(s)) {
-    const left = m ? `（还剩 ${Math.round(parseFloat(m[1]))} 秒）` : "";
-    return `开盘前 60 秒先观察价格走势，暂不下单${left}`;
+  // 2. 开盘校准 / 尾盘收官与冻结
+  if ((m = s.match(/Observation period\s*\(tau\s*([\d.]+)s/i)) || /开盘观察|开盘校准|warmup/i.test(s)) {
+    const waitLeft = m ? Math.max(1, Math.round(parseFloat(m[1]) - 280)) : null;
+    const left = waitLeft ? `（还剩约 ${waitLeft} 秒）` : "";
+    return `开盘前 20 秒校准基准价，暂不下单${left}`;
+  }
+  if (/尾盘收官期停止新开仓/i.test(s)) {
+    return "进入最后 45 秒尾盘收官期，不再新开仓，准备迎接下一轮";
   }
   if ((m = s.match(/Tail freeze\s*\(tau\s*([\d.]+)s/i)) || /尾盘冻结|cutoff|tau too low|Late window/i.test(s)) {
-    return "临近本轮结束，停止新下单，已有持仓安心等待结算";
+    return "临近本轮结束（最后 15 秒），冻结下单，已有持仓安心等待结算";
   }
 
   // 3. 模式 B：单边顺势折价
@@ -696,40 +700,62 @@ function translateDecisionReason(rawReason) {
     return "发现高胜率顺势折价机会，果断出手买入";
   }
 
-  // 4. 净边际挂单 / 吃单（最核心的开仓动作）
-  if (/净边际挂单|Maker/i.test(s) && /bid=\$?([\d.]+)/i.test(s)) {
+  // 4. 低价赔率错杀 / 权重优选挂单与吃单（最核心的开仓动作）
+  if (/低价赔率错杀.*挂单/i.test(s) && /bid=\$?([\d.]+)/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+bid=\$?([\d.]+)/i);
     const pm = s.match(/P\*=([\d.]+)/i);
-    const em = s.match(/净边际=([+-]?[\d.]+)/i);
+    if (sm) {
+      const pTxt = pm ? `（估算胜率 ${pctStr(pm[1])}）` : "";
+      return `发现低价高赔率错杀：以 $${sm[2]} 轻仓挂单买${dirCn(sm[1])}${pTxt}`;
+    }
+  }
+  if (/低价赔率错杀.*吃单/i.test(s) && /ask=\$?([\d.]+)/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+ask=\$?([\d.]+)/i);
+    const pm = s.match(/P\*=([\d.]+)/i);
+    if (sm) {
+      const pTxt = pm ? `（估算胜率 ${pctStr(pm[1])}）` : "";
+      return `发现低价高赔率错杀：以 $${sm[2]} 轻仓吃单买${dirCn(sm[1])}${pTxt}`;
+    }
+  }
+  if (/净边际挂单|权重优选挂单|Maker/i.test(s) && /bid=\$?([\d.]+)/i.test(s)) {
+    const sm = s.match(/(Up|Down)\s+bid=\$?([\d.]+)/i);
+    const pm = s.match(/P\*=([\d.]+)/i);
+    const em = s.match(/(?:净边际|零费边际)=([+-]?[\d.]+)/i);
     if (sm) {
       const pTxt = pm ? `预计胜率 ${pctStr(pm[1])}，` : "";
       const eTxt = em ? `，比公允价便宜 ${edgePct(em[1])}` : "";
-      return `看好${dirCn(sm[1])}：${pTxt}以 $${sm[2]} 挂单排队买入${eTxt}`;
+      return `盘口平稳加权挂单：看好${dirCn(sm[1])}（${pTxt}以 $${sm[2]} 零费排队${eTxt}）`;
     }
   }
-  if (/净边际吃单|IOC/i.test(s) && /ask=\$?([\d.]+)/i.test(s)) {
+  if (/净边际吃单|权重优选吃单|IOC/i.test(s) && /ask=\$?([\d.]+)/i.test(s) && !/加仓|反买/.test(s)) {
     const sm = s.match(/(Up|Down)\s+ask=\$?([\d.]+)/i);
     const pm = s.match(/P\*=([\d.]+)/i);
     const em = s.match(/净边际=([+-]?[\d.]+)/i);
     if (sm) {
       const pTxt = pm ? `预计胜率 ${pctStr(pm[1])}，` : "";
       const eTxt = em ? `，比公允价便宜 ${edgePct(em[1])}` : "";
-      return `看好${dirCn(sm[1])}：${pTxt}市场价 $${sm[2]} 很划算${eTxt}，直接买入`;
+      return `时机占优直接吃单：看好${dirCn(sm[1])}（${pTxt}市场价 $${sm[2]}${eTxt}）`;
     }
   }
 
-  // 5. 顺势加仓 / 反转调仓 / 再入场冷却 / 锁利 / 尾盘止损
-  if (/顺势确认加仓|顺势概率优势加仓/i.test(s)) {
+  // 5. 质量控均价加仓 / 终局反转调仓 / 再入场冷却 / 锁利 / 尾盘止损
+  if (/优质控均价加仓|顺势确认加仓|顺势概率优势加仓/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
-    return sm
-      ? `走势占优且赔率划算，以 $${sm[2]} 顺势加仓买入${dirCn(sm[1])}`
-      : "走势占优且赔率划算，顺势加仓买入";
+    const avgm = s.match(/均价=\$?([\d.]+)/i);
+    if (sm) {
+      const avgTxt = avgm ? `（原均价 $${avgm[1]}）` : "";
+      return `胜率稳健且不追高，以 $${sm[2]} 优质加仓${dirCn(sm[1])}${avgTxt}`;
+    }
+    return "胜率稳健且价格占优，执行控均价加仓";
   }
-  if (/不对劲反买|反买/i.test(s)) {
+  if (/终局反转反买|不对劲反买|反买/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
-    return sm
-      ? `行情确认反转，以 $${sm[2]} 吃单买入${dirCn(sm[1])}做方向调仓`
-      : "行情确认反转，吃单买入反方向做仓位调整";
+    const qm = s.match(/\((\d+)股\)/);
+    if (sm) {
+      const qtyTxt = qm ? `一次性买入 ${qm[1]} 股` : "吃单买入";
+      return `行情确认反转，按终局盈亏以 $${sm[2]} ${qtyTxt}${dirCn(sm[1])}一步调仓`;
+    }
+    return "行情确认反转，按终局目标一次性买入反方向调仓";
   }
   if (/波段再入场冷却/i.test(s)) {
     return "刚完成对冲调仓，短冷却 4 秒后重新观察领先方向";
@@ -791,8 +817,8 @@ function translateDecisionReason(rawReason) {
   if (/Waiting for official strike|strike price unavailable/i.test(s)) {
     return "正在等待本轮官方开盘价确认...";
   }
-  if (/Max entries|Fully hedged|Max position|Max capital|budget/i.test(s)) {
-    return "本轮仓位已达到安全上限，拿好现有持仓等待结算";
+  if (/Max entries|Fully hedged|Max position|Max capital|budget|已完成配对|终局调仓/i.test(s)) {
+    return "本轮仓位已完成布局或调仓，拿好现有持仓等待结算";
   }
   if (/Insufficient capital/i.test(s)) {
     return "可用资金不足，暂停开新仓";
@@ -2009,11 +2035,23 @@ function updateMarket(live) {
   if (holdView) holdView.hidden = !hasAnyHolding;
   if (battleCard) battleCard.classList.toggle("is-holding-mode", hasAnyHolding);
 
-  // Update active stage label ("扫描机会" -> "持仓博弈" once holding)
+  // Update active stage label to reflect v3.3 paced phases (早盘轻仓试探 vs 中盘控仓博弈)
   const activeStageEl = $("stage-step-active");
+  const freezeStageEl = $("stage-step-freeze");
+  const tauNowStage = Number(live.tau_s ?? 0);
   if (activeStageEl) {
     const hasWorking = Array.isArray(live.working_orders) && live.working_orders.length > 0;
-    activeStageEl.textContent = hasAnyHolding ? "持仓博弈" : hasWorking ? "排队接货" : "扫描机会";
+    const isEarlyProbe = tauNowStage > 180;
+    if (hasAnyHolding) {
+      activeStageEl.textContent = isEarlyProbe ? "早盘轻仓" : "中盘控仓";
+    } else if (hasWorking) {
+      activeStageEl.textContent = "排队接货";
+    } else {
+      activeStageEl.textContent = isEarlyProbe ? "早盘试探" : "中盘机会";
+    }
+  }
+  if (freezeStageEl) {
+    freezeStageEl.textContent = tauNowStage > 0 && tauNowStage <= 15 ? "尾盘锁定" : "尾盘收官";
   }
 
   if (hasAnyHolding) {
@@ -2099,11 +2137,13 @@ function updateMarket(live) {
       const wPx = Number(wo.price ?? wo.px ?? 0);
       const qAhead = Number(wo.queue_ahead ?? 0);
       radarEl.innerHTML = `已在 <b>$${wPx.toFixed(2)}</b> 挂单排队买 <b class="${wSideCn === "看涨" ? "up" : "down"}">${wSideCn}</b> · ${qAhead <= 1 ? "已排在队首，随时可能成交" : `前方还有 ${qAhead.toFixed(1)} 股排队`}`;
-    } else if (tauNow > 240 || /Observation period/i.test(rawR)) {
-      const waitLeft = Math.max(1, Math.round(tauNow - 240));
-      radarEl.textContent = `开盘前 60 秒先校准基准价与波动节奏 · 约 ${waitLeft} 秒后开启机会扫描`;
+    } else if (tauNow > 280 || /Observation period/i.test(rawR)) {
+      const waitLeft = Math.max(1, Math.round(tauNow - 280));
+      radarEl.textContent = `开盘前 20 秒校准基准价与波动节奏 · 约 ${waitLeft} 秒后开启早盘轻仓试探`;
     } else if (tauNow > 0 && tauNow <= 15) {
-      radarEl.textContent = "已进入最后 15 秒尾盘锁定阶段 · 停止新开仓，准备迎接下一轮";
+      radarEl.textContent = "已进入最后 15 秒尾盘锁定阶段 · 冻结下单，准备迎接下一轮";
+    } else if (tauNow > 15 && tauNow <= 45) {
+      radarEl.textContent = "已进入最后 45 秒尾盘收官阶段 · 停止新开仓，静待本轮交割";
     } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(rawR)) {
       radarEl.textContent = "检测到 BTC 突发剧烈波动 · 风控已自动挡在门外，等行情平稳后再评估";
     } else {
@@ -4694,15 +4734,19 @@ function renderDecisionBulletin(live) {
       lTag = "急震暂停";
       lCls = "is-warn";
       shortMsg = "BTC 刚剧烈异动，先避险不乱冲";
-    } else if (tauS > 240 || /Observation period/i.test(curRawReason)) {
-      lTag = "开盘观察";
+    } else if (tauS > 280 || /Observation period/i.test(curRawReason)) {
+      lTag = "开盘校准";
       lCls = "is-wait";
-      const leftObs = Math.max(1, Math.round(tauS - 240));
-      shortMsg = `先看前 1 分钟走势，${leftObs} 秒后开始找机会`;
+      const leftObs = Math.max(1, Math.round(tauS - 280));
+      shortMsg = `开盘校准基准价，${leftObs} 秒后轻仓试探`;
     } else if (tauS > 0 && tauS <= 15) {
-      lTag = "尾盘停手";
+      lTag = "尾盘锁定";
       lCls = "is-wait";
-      shortMsg = "最后 15 秒不再开新仓，准备下一轮";
+      shortMsg = "最后 15 秒冻结下单，准备下一轮";
+    } else if (tauS > 15 && tauS <= 45) {
+      lTag = "尾盘收官";
+      lCls = "is-wait";
+      shortMsg = "最后 45 秒停止新开仓，静待交割";
     } else {
       const pm = curRawReason.match(/P\*\(?Up\)?=([\d.]+)/i);
       const um = curRawReason.match(/Up=([\d.-]+)\/([\d.-]+)/i);
@@ -4845,9 +4889,9 @@ function updateSmoothCountdowns() {
     roundBar.classList.toggle("is-freeze", tau <= 15 && tau > 0);
   }
 
-  // Update 4-Act Stage Stepper: observe (0..60s) -> active (60..285s) -> freeze (285..300s) -> settle (0s)
+  // Update 4-Act Stage Stepper (v3.3): observe (0..20s) -> active (20..255s) -> freeze/late (255..300s) -> settle (0s)
   const stageOrder = ["observe", "active", "freeze", "settle"];
-  const curStageIdx = tau === 0 ? 3 : tau <= 15 ? 2 : elapsed < 60 ? 0 : 1;
+  const curStageIdx = tau === 0 ? 3 : tau <= 45 ? 2 : elapsed < 20 ? 0 : 1;
   document.querySelectorAll("#round-stage-stepper .stage-step").forEach((el) => {
     const idx = stageOrder.indexOf(el.getAttribute("data-stage"));
     el.classList.toggle("is-active", idx === curStageIdx);

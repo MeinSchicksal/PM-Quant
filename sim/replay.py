@@ -231,7 +231,7 @@ def replay_window(
     last_poly = None
     prev_t = start
     carry_prints: List[Dict[str, Any]] = []
-    lat_s = float(config.PARAMS.get("REPLAY_LATENCY_S", max(float(config.PARAMS.get("LATENCY_S", 0.30)), 0.50)))
+    lat_s = float(config.PARAMS.get("REPLAY_LATENCY_S", config.PARAMS.get("LATENCY_S", 0.18)))
 
     def _book_at_time(evs: List[Dict[str, Any]], start_idx: int, target_t: float) -> Optional[OrderBook]:
         if not evs:

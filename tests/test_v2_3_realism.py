@@ -248,7 +248,10 @@ class TestV23Realism(unittest.TestCase):
         sp_chop = SpotState(timestamp=1100.0, price=75003.0, open_price=75000.0)
         b_up_tight = OrderBook(bids=[(0.42, 20.0)], asks=[(0.44, 20.0)])
         b_dn_tight = OrderBook(bids=[(0.56, 20.0)], asks=[(0.58, 20.0)])
-        dec_chop = plan_decision(Position(0, 0), Position(0, 0), b_up_tight, b_dn_tight, sp_chop, 180.0, config.PARAMS)
+        dec_chop = plan_decision(
+            Position(0, 0), Position(0, 0), b_up_tight, b_dn_tight, sp_chop, 180.0,
+            dict(config.PARAMS, ENTRY_VALUE_ENABLE=False),
+        )
         self.assertEqual(dec_chop.action, "wait")
         self.assertIn("无足够净边际", dec_chop.reason)
 

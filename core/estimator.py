@@ -13,20 +13,33 @@ def normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def student_t5_cdf(x: float) -> float:
+_T5_UNIT_STD_SCALE = math.sqrt(5.0 / 3.0)
+
+
+def student_t5_cdf(x: float, unit_variance: bool = False) -> float:
     """Exact closed-form Student-t (df=5) CDF for fat-tailed BTC jump protection.
 
-    Strictly more conservative than Gaussian normal_cdf across all |x| > 0,
+    Strictly more conservative than Gaussian normal_cdf in the tails,
     preventing thin-tail overconfidence during crypto volatility spikes.
+    When `unit_variance=True`, rescales x by sqrt(5/3) so the distribution has
+    unit variance matching the empirical realized volatility estimator while
+    preserving fat tails (fixes systematic mid-range under-confidence).
     """
-    t = x / math.sqrt(5.0)
+    z = (x * _T5_UNIT_STD_SCALE) if unit_variance else x
+    t = z / math.sqrt(5.0)
     theta = math.atan(t)
     c = 1.0 / math.sqrt(1.0 + t * t)
     s = t * c
     return 0.5 + (theta + s * c * (1.0 + (2.0 / 3.0) * c * c)) / math.pi
 
 
-def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: float) -> float:
+def estimate_fair_prob(
+    spot: float,
+    open_price: float,
+    tau_s: float,
+    vol_bps: float,
+    unit_variance: bool = False,
+) -> float:
     """Estimate fat-tailed settlement probability p_fair for Up winning (S_T >= S_0)."""
     if tau_s <= 0.5:
         return 0.99 if spot >= open_price else 0.01
@@ -34,7 +47,7 @@ def estimate_fair_prob(spot: float, open_price: float, tau_s: float, vol_bps: fl
         return 0.50
     sigma_tau = max(1e-5, (vol_bps / 10000.0) * math.sqrt(tau_s / 300.0))
     d = math.log(spot / open_price) / sigma_tau
-    prob = student_t5_cdf(d)
+    prob = student_t5_cdf(d, unit_variance=unit_variance)
     return max(0.01, min(0.99, round(prob, 4)))
 
 
@@ -43,14 +56,15 @@ def estimate_p_fair(
     open_px: float,
     tau_s: float,
     vol_bps: float,
-    poly_price: Optional[float] = None
+    poly_price: Optional[float] = None,
+    unit_variance: bool = False,
 ) -> float:
     """Estimate probability that Chainlink 60s TWAP settles >= window strike `open_px`.
 
     Uses basis-adjusted live spot (`spot.price - spot.basis_ema`) when official
     strike and basis calibration are ready, incorporates the already-locked
     `[end-60, t]` average during the final 60s, protects against cross-chain
-    basis-drift sign inversion, and falls back strictly to single-chain Binance
+    basis-drift sign inversion, and falls back strictly to single-chain spot
     pricing when basis calibration is unavailable.
     """
     spot_px = float(getattr(spot, "price", 0.0) or 0.0)
@@ -61,7 +75,7 @@ def estimate_p_fair(
 
     if basis_ema is not None and spot_px > 0 and open_px > 0:
         cl_est = max(1e-6, spot_px - float(basis_ema))
-        # Guard against basis-EMA pullback inversion: if BOTH Binance live return
+        # Guard against basis-EMA pullback inversion: if BOTH live spot return
         # and fresh Chainlink TWAP are strictly on one side of open, cl_est must
         # not hallucinate the opposite direction due to a transient 60s basis lag.
         if poly_price is not None and float(poly_price) > 0 and bin_open > 0:
@@ -80,15 +94,18 @@ def estimate_p_fair(
             expected_close = (u * avg_realized + tau_s * cl_est) / 60.0
             sigma_5m = vol_bps / 10000.0
             std_close = max(1e-5, sigma_5m * math.sqrt((max(0.0, tau_s) / 300.0) / 3.0) * (max(0.0, tau_s) / 60.0))
-            prob = student_t5_cdf(math.log(max(1e-6, expected_close) / open_px) / std_close)
+            prob = student_t5_cdf(
+                math.log(max(1e-6, expected_close) / open_px) / std_close,
+                unit_variance=unit_variance,
+            )
             return max(0.01, min(0.99, round(prob, 4)))
         eff_tau = max(10.0, tau_s - 40.0)
-        return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps)
+        return estimate_fair_prob(cl_est, open_px, eff_tau, vol_bps, unit_variance=unit_variance)
 
     ref_open = bin_open if bin_open > 0 else float(open_px or 0.0)
     if ref_open > 0 and spot_px > 0:
         eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
-        return estimate_fair_prob(spot_px, ref_open, eff_tau, vol_bps)
+        return estimate_fair_prob(spot_px, ref_open, eff_tau, vol_bps, unit_variance=unit_variance)
     return 0.50
 
 

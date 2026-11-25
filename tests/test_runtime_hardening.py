@@ -369,7 +369,15 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         b_up = _book(0.55, 50.0, 0.57, 50.0)
         b_dn = _book(0.43, 50.0, 0.45, 50.0)
         spot = SpotState(timestamp=1150.0, price=65080.0, open_price=65000.0, realized_vol_bps=14.0)
-        p_pyr = dict(config.PARAMS, ENABLE_PYRAMID_ADD=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2, PYRAMID_MIN_PROB=0.70)
+        p_pyr = dict(
+            config.PARAMS,
+            ENABLE_PYRAMID_ADD=True,
+            MAX_LOTS=2,
+            MAX_ENTRIES_PER_WINDOW=2,
+            PYRAMID_MIN_PROB=0.70,
+            PYRAMID_MAX_ABOVE_AVG=0.20,
+            PYRAMID_MAX_PRICE=0.72,
+        )
         dec = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=150.0, params=p_pyr, p_fair=0.72, entries_count=1)
         self.assertIn(dec.action, ("taker_buy", "quote"))
         self.assertEqual(dec.side, "Up")
@@ -459,7 +467,15 @@ class TestV26PolicyUpgrades(unittest.TestCase):
         spot = SpotState(timestamp=1150.0, price=64900.0, open_price=65000.0, realized_vol_bps=14.0)
 
         # 0.5s after Leg-1 fill -> must NOT double-tap!
-        p_base = dict(config.PARAMS, ENABLE_PYRAMID_ADD=True, MAX_LOTS=2, MAX_ENTRIES_PER_WINDOW=2, PYRAMID_MIN_PROB=0.70)
+        p_base = dict(
+            config.PARAMS,
+            ENABLE_PYRAMID_ADD=True,
+            MAX_LOTS=2,
+            MAX_ENTRIES_PER_WINDOW=2,
+            PYRAMID_MIN_PROB=0.70,
+            PYRAMID_MAX_PRICE=0.72,
+            PYRAMID_MAX_ABOVE_AVG=0.05,
+        )
         p_early = dict(p_base, SECONDS_SINCE_LAST_ENTRY=0.5)
         dec_early = plan_decision(pos_up, pos_dn, b_up, b_dn, spot, tau_s=170.0, params=p_early, p_fair=0.20, entries_count=1)
         self.assertEqual(dec_early.action, "wait")

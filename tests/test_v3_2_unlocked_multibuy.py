@@ -68,19 +68,28 @@ class TestV32UnlockedMultibuy(unittest.TestCase):
         pos_dn = Position(0.0, 0.0)
         b_up = _book(0.49, 0.51)
         b_dn = _book(0.49, 0.51)
-        # P*(Up)=0.58 (< 0.70 old gate) still scales in 2nd lot at $0.51
+        # P*(Up)=0.58 (< 0.70 old gate) scales in 2nd lot when v3.2 relaxed add params are enabled
+        v32_add_params = dict(
+            config.PARAMS,
+            SECONDS_SINCE_LAST_ENTRY=5.0,
+            SECONDARY_ENTRY_COOLDOWN_S=4.0,
+            PYRAMID_MIN_TAKER_EDGE=0.035,
+            PYRAMID_MAX_ABOVE_AVG=None,
+            ALLOW_REENTRY_AFTER_PAIR=True,
+            REENTRY_COOLDOWN_S=4.0,
+        )
         dec_add = plan_decision(
             pos_up, pos_dn, b_up, b_dn, _spot(vel_bps=+0.8),
-            tau_s=180.0, params=dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=5.0),
+            tau_s=180.0, params=v32_add_params,
             p_fair=0.58, entries_count=1,
         )
         self.assertEqual(dec_add.action, "taker_buy")
         self.assertEqual(dec_add.side, "Up")
 
-        # After neutralizing (5 Up + 5 Down -> net_gap = 0), still re-enters when edge is positive
+        # After neutralizing (5 Up + 5 Down -> net_gap = 0), still re-enters when ALLOW_REENTRY_AFTER_PAIR=True
         dec_re = plan_decision(
             Position(5.0, 2.50), Position(5.0, 2.60), b_up, b_dn, _spot(vel_bps=-0.8),
-            tau_s=120.0, params=dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=5.0),
+            tau_s=120.0, params=v32_add_params,
             p_fair=0.40, entries_count=2,
         )
         self.assertEqual(dec_re.action, "taker_buy")
@@ -152,7 +161,7 @@ class TestV32UnlockedMultibuy(unittest.TestCase):
             p_fair=0.68,
             entries_count=1,
         )
-        self.assertIn(d_resumed.action, ("taker_buy", "maker_buy"))
+        self.assertIn(d_resumed.action, ("taker_buy", "quote"))
 
         p_working = dict(config.PARAMS)
         p_working["HAS_WORKING_ORDERS"] = True

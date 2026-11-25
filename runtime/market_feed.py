@@ -887,14 +887,17 @@ class MarketFeed:
             spot_ts = float(getattr(self, "_last_binance_t", 0.0) or 0.0)
             src = "stale"
 
-        # Calculate 2-3s rapid shift velocity in bps (never span across a USD<->USDT currency failover)
+        # Calculate 2-3s rapid shift velocity in bps (never span across a USD<->USDT currency failover or >5s outage)
         velocity_3s = 0.0
         cont_t = float(getattr(self, "_spot_continuity_t", 0.0) or 0.0)
         if current_px > 0 and not is_stale:
             for old_t, old_px in reversed(self.spot_history):
                 if old_t < cont_t - 1e-9:
                     break
-                if (t - old_t) >= 2.0:
+                dt_v = t - old_t
+                if dt_v > 5.0:
+                    break
+                if dt_v >= 2.0:
                     if old_px > 0:
                         velocity_3s = ((current_px - old_px) / old_px) * 10000.0
                     break

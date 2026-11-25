@@ -21,7 +21,7 @@
         </span>
         <span class="brand-name">PM-QUANT</span>
       </a>
-      <span class="brand-version" id="page-version">v3.2</span>
+      <span class="brand-version" id="page-version">v3.3</span>
     </div>
 
     <div class="sidebar-top">
@@ -522,11 +522,11 @@
         </div>
 
         <div class="stage-stepper" id="round-stage-stepper" aria-label="本轮所处阶段">
-          <span class="stage-step is-active" data-stage="observe">观察</span>
+          <span class="stage-step is-active" data-stage="observe">开盘校准</span>
           <span class="stage-line" data-line="0" aria-hidden="true"></span>
-          <span class="stage-step" data-stage="active" id="stage-step-active">扫描机会</span>
+          <span class="stage-step" data-stage="active" id="stage-step-active">早盘试探</span>
           <span class="stage-line" data-line="1" aria-hidden="true"></span>
-          <span class="stage-step" data-stage="freeze">尾盘锁定</span>
+          <span class="stage-step" data-stage="freeze" id="stage-step-freeze">尾盘收官</span>
           <span class="stage-line" data-line="2" aria-hidden="true"></span>
           <span class="stage-step" data-stage="settle">结算</span>
         </div>
@@ -578,8 +578,8 @@
 
             <!-- Crisp 1-Sentence Plain-Language Signal Strip Inside Chart (Zero Redundant Clock) -->
             <div class="chart-signal-strip" aria-live="polite">
-              <span class="css-pill is-wait" id="bulletin-status-badge"><span class="css-dot" id="console-state-dot" aria-hidden="true"></span><span id="bulletin-status-text">开盘观察</span></span>
-              <span class="css-msg" id="bulletin-latest-preview">先看前 1 分钟走势，暂不下单</span>
+              <span class="css-pill is-wait" id="bulletin-status-badge"><span class="css-dot" id="console-state-dot" aria-hidden="true"></span><span id="bulletin-status-text">开盘校准</span></span>
+              <span class="css-msg" id="bulletin-latest-preview">开盘前 20 秒校准基准价，随后轻仓试探入场</span>
             </div>
           </section>
 
@@ -955,6 +955,23 @@
             <div class="guide-item">
               <span class="guide-tag tag-bad">风控熔断</span>
               <div class="guide-desc">触发配置的日度回撤上限或连续亏损冷却期，强制禁止新开第一腿。</div>
+            </div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h3 class="guide-section-title">三、v3.3 节奏控仓与动态权重规则</h3>
+          <div class="guide-list">
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">权重执行</span>
+              <div class="guide-desc">保留 <strong>Maker 与 Taker 双通道</strong>：盘口宽且现货平稳时加权零费挂单，顺势启动或时间紧迫时加权直接吃单；支持胶着区低价高赔率错杀轻仓入场，并抑制高价过度领先追单。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-warn">节奏控仓</span>
+              <div class="guide-desc"><strong>前 20 秒</strong>校准基准价 → <strong>早盘（20~120s）</strong>限轻仓 5 股严禁早加仓 → <strong>中盘（120~255s）</strong>解锁控均价质量加仓（不追高、防反转送钱）→ <strong>尾盘 45s</strong>停开新仓、最后 15s 冻结。</div>
+            </div>
+            <div class="guide-item">
+              <span class="guide-tag tag-ok">终局反手</span>
+              <div class="guide-desc">确认反转且对侧具备独立正期望时，按最终结算盈亏反算一次性买入 <strong>5~10 整数股</strong>（受单窗总成本与最多 1 次翻面硬封顶，严防马丁双杀）。</div>
             </div>
           </div>
         </div>

@@ -30,6 +30,7 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
             MAX_QUOTE_ATTEMPTS=3,
             MAX_ORDERBOOK_SPREAD=0.06,
             ENABLE_ARBITRAGE_HEDGE=False,
+            EXECUTION_WEIGHTED_ROUTING=False,
         )
 
     def test_net_edge_maker_quote_when_model_edge_clears_05_cents(self):
@@ -68,10 +69,10 @@ class TestStrictNetEdgePolicy(unittest.TestCase):
         dec = plan_decision(pos, pos, book_up, book_dn, spot, tau_s=100.0, params=dict(self.params, ENABLE_DRIFT_MODE_B=False))
         self.assertEqual(dec.action, "wait")
 
-        # Coin-flip P*=0.51 < 0.52 even if ask is cheap ($0.30) must wait
+        # Coin-flip P*=0.51 < 0.52 even if ask is cheap ($0.30) must wait when value mode is off
         b_u = OrderBook(bids=[(0.29, 20.0)], asks=[(0.31, 20.0)])
         b_d = OrderBook(bids=[(0.68, 20.0)], asks=[(0.70, 20.0)])
-        dec_lowp = plan_decision(pos, pos, b_u, b_d, spot, tau_s=180.0, params=self.params, p_fair=0.51)
+        dec_lowp = plan_decision(pos, pos, b_u, b_d, spot, tau_s=180.0, params=dict(self.params, ENTRY_VALUE_ENABLE=False), p_fair=0.51)
         self.assertEqual(dec_lowp.action, "wait")
 
     def test_holding_preserves_full_convexity_when_hedge_disabled(self):

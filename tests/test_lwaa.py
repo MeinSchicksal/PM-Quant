@@ -20,6 +20,7 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
             config.PARAMS,
             ENTRY_MIN_TAU_S=15.0,
             ENTRY_MAX_TAU_S=240.0,
+            LATE_NO_NEW_ENTRY_TAU_S=0.0,
             ENTRY_MIN_PRICE=0.20,
             ENTRY_MAX_PRICE=0.70,
             MAX_QUOTE_ATTEMPTS=1,
@@ -113,10 +114,10 @@ class TestV24EntryAndLifecycle(unittest.TestCase):
             runner.step(1020.0, spot_early, book_up, book_dn)
             self.assertEqual(len(runner.fills), 0)
 
-            book_up_late = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)], source_t=1260.0)
-            book_dn_late = OrderBook(bids=[(0.39, 50.0)], asks=[(0.41, 50.0)], source_t=1260.0)
-            spot_late = SpotState(timestamp=1260.0, price=75200.0, open_price=75000.0, realized_vol_bps=14.0, binance_open_price=75000.0)
-            runner.step(1260.0, spot_late, book_up_late, book_dn_late, replay_mode=True)
+            book_up_mid = OrderBook(bids=[(0.58, 50.0)], asks=[(0.60, 50.0)], source_t=1200.0)
+            book_dn_mid = OrderBook(bids=[(0.39, 50.0)], asks=[(0.41, 50.0)], source_t=1200.0)
+            spot_mid = SpotState(timestamp=1200.0, price=75200.0, open_price=75000.0, realized_vol_bps=14.0, binance_open_price=75000.0)
+            runner.step(1200.0, spot_mid, book_up_mid, book_dn_mid, replay_mode=True)
             self.assertEqual(len(runner.fills), 1)
             self.assertEqual(runner.pos_up.shares, 5.0)
 
