@@ -1,15 +1,19 @@
-"""Strict Asian 60s-TWAP Net-Edge Policy Engine.
+"""Strict Asian 60s-TWAP Net-Edge Policy Engine (v3.2 unlocked probabilistic multi-buy).
 
-Single-brain decision cycle verified across 294 recorded windows (+$71.13 / 63.7% WR):
-1. Safety guards: circuit breaker, tail freeze (tau < 15s), stale feed/book.
-2. Position handling: hold Leg-1 to settlement by default to preserve full $1.00
-   upside convexity (no negative-convexity pair_cost<=1.00 profit cap). Only
-   allow extreme tail salvage (tau <= 30s, P* < 0.12, bid in [$0.06, $0.15]) or
-   opt-in deep arbitrage locks when explicitly enabled.
-3. Anti-toxicity guard: pull resting maker quotes on rapid spot shocks (>= 2.5 bps).
-4. Unified Net-Edge entry (tau in [15s, 240s], px in [$0.20, $0.75], P* >= 0.52):
-   - Taker IOC when net edge after official fee >= MIN_TAKER_EDGE (0.09).
-   - Zero-fee Maker quote when edge >= MIN_MAKER_EDGE (0.05) and attempts < 3.
+Single-brain decision cycle; all thresholds are defined in config.py PARAMS:
+1. Safety guards: optional circuit breaker, tail freeze (tau < ENTRY_MIN_TAU_S),
+   stale feed/book, extreme-vol storm pause (MAX_ENTRY_VOL_BPS).
+2. Position handling: hold to settlement by default to preserve full $1.00
+   upside convexity (profit-lock / salvage / hedge switches all disabled).
+   Leading-side multi-buy adds (Taker-only, net exposure capped by MAX_NET_LOTS)
+   and confirmed-reversal flips (Taker-only, FLIP_MIN_OPP_PROB leadership).
+3. Directional anti-toxicity: block fresh entries only AGAINST sharp spot moves
+   (ENTRY_MAX_ADVERSE_SPOT_BPS); pull resting maker quotes on ANY rapid shock
+   (>= ANTI_TOXICITY_SHOCK_BPS).
+4. Unified Net-Edge entry (tau in [ENTRY_MIN_TAU_S, ENTRY_MAX_TAU_S],
+   px in [ENTRY_MIN_PRICE, ENTRY_MAX_PRICE], P* >= ENTRY_MIN_PROB):
+   - Taker IOC first when net edge after official fee >= MIN_TAKER_EDGE.
+   - Zero-fee Maker fallback when edge >= MIN_MAKER_EDGE and spot is calm.
 """
 import math
 from typing import Dict, Optional
@@ -29,13 +33,13 @@ def required_entry_edge(
     base_edge: float,
     params: Dict[str, float],
 ) -> float:
-    """Compute dynamic required net edge accounting for high-price negative convexity and early-tau noise.
+    """Compute dynamic required net edge accounting for high-price negative convexity.
 
-    - In the golden launch zone (`price <= $0.54` and `tau_s <= 180s`), returns `base_edge` unchanged.
-    - Above `PRICE_EDGE_PIVOT` ($0.54), adds `(price - 0.54) * PRICE_EDGE_SLOPE` to compensate for
+    - At or below `PRICE_EDGE_PIVOT` ($0.55), returns `base_edge` unchanged.
+    - Above the pivot, adds `(price - pivot) * PRICE_EDGE_SLOPE` to compensate for
       worsening payoff odds (risking $0.62 to win $0.38 requires higher conviction than $0.50).
-    - Above `EARLY_TAU_PIVOT_S` (180s), smoothly adds up to `EARLY_TAU_MAX_PREMIUM` (+1.2% at 240s)
-      so early entries only fire when orderbook pricing genuinely lags spot.
+    - `EARLY_TAU_MAX_PREMIUM` is 0.0 in v3.2 (early-window time penalty removed);
+      the smooth early-tau premium branch only activates if it is re-enabled.
     """
     px_pivot = float(params.get("PRICE_EDGE_PIVOT", 0.54))
     px_slope = max(0.0, float(params.get("PRICE_EDGE_SLOPE", 0.18)))
@@ -166,7 +170,7 @@ def _plan_inventory_management(
     quote_attempts: int = 0,
     circuit_breaker_active: bool = False,
 ) -> Decision:
-    """Manage open directional inventory: black-swan lock, optional arb, tail salvage, or v2.6 secondary entry."""
+    """Manage open directional inventory: optional locks/salvage (disabled by default), leading-side multi-buy add, or confirmed-reversal flip."""
     fee_rate = float(params.get("TAKER_FEE_RATE", 0.07))
     lot_size = float(params.get("LOT_SIZE", 5.0))
     min_order_sh = max(lot_size, float(params.get("MIN_ORDER_SHARES", 5.0)))

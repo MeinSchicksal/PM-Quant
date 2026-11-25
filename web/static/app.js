@@ -888,49 +888,6 @@ function updateOverview(live, hist) {
     pnlEl.className = `hero-num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}`;
   }
 
-  // 收益趋势徽章（左上 Hero 卡右上角：无成交时隐藏，有成交即基于净值曲线实时给出清晰方向）
-  const trendPill = $("hero-trend-pill");
-  if (trendPill) {
-    const rawCurveArr = Array.isArray(hist.equity_curve) ? hist.equity_curve : [];
-    const nTraded = Number(hist.traded_rounds || hist.count || rawCurveArr.length || 0);
-    if (nTraded <= 0) {
-      trendPill.hidden = true;
-    } else {
-      let tr = hist.pnl_trend && hist.pnl_trend !== "pending" ? String(hist.pnl_trend) : "";
-      let slope = Number(hist.trend_slope || 0);
-      if (!tr) {
-        if (rawCurveArr.length >= 2) {
-          const ys = [0, ...rawCurveArr.map((p) => Number(p.cum_pnl ?? p.pnl ?? 0))];
-          const n = ys.length;
-          const mx = (n - 1) / 2;
-          const my = ys.reduce((a, b) => a + b, 0) / n;
-          let num = 0, den = 0;
-          for (let i = 0; i < n; i++) {
-            const dx = i - mx;
-            num += dx * (ys[i] - my);
-            den += dx * dx;
-          }
-          slope = den > 1e-9 ? num / den : 0;
-        } else {
-          slope = totalPnl;
-        }
-        if (slope > 0.05 && totalPnl > 0) tr = "up";
-        else if (slope < -0.05 && totalPnl < 0) tr = "down";
-        else tr = "flat";
-      }
-      const map = {
-        up: ["↗ 收益上行", "trend-up"],
-        down: ["↘ 收益下行", "trend-down"],
-        flat: ["→ 震荡横盘", "trend-flat"],
-      };
-      const [lbl, cls] = map[tr] || map.flat;
-      trendPill.hidden = false;
-      trendPill.textContent = lbl;
-      trendPill.className = `trend-pill ${cls}`;
-      trendPill.title = `线性趋势斜率 ${slope >= 0 ? "+" : ""}$${slope.toFixed(3)} / 场`;
-    }
-  }
-
   // 实验运行时长、开始时间、今日战绩与时均/日均收益速率条（净值曲线底部）
   let expStartTs = Number(hist.experiment_start_ts || 0);
   if (!(expStartTs > 0)) {
@@ -960,9 +917,9 @@ function updateOverview(live, hist) {
     const days = Math.floor(s / 86400);
     const hrs = Math.floor((s % 86400) / 3600);
     const mins = Math.floor((s % 3600) / 60);
-    if (days > 0) return `${days}天${hrs}时`;
-    if (hrs > 0) return `${hrs}时${String(mins).padStart(2, "0")}分`;
-    return `${Math.max(1, mins)}分钟`;
+    if (days > 0) return `${days}d ${String(hrs).padStart(2, "0")}h`;
+    if (hrs > 0) return `${hrs}h ${String(mins).padStart(2, "0")}m`;
+    return `${Math.max(1, mins)}m`;
   };
   const fmtStartBjt = (ts) => {
     if (!ts) return "始于 --";
@@ -977,7 +934,11 @@ function updateOverview(live, hist) {
     $("pace-elapsed").textContent = expStartTs > 0 ? fmtDuration(elapsedSec) : "--";
   }
   if ($("pace-start-at")) {
-    $("pace-start-at").textContent = fmtStartBjt(expStartTs);
+    const stText = fmtStartBjt(expStartTs);
+    $("pace-start-at").textContent = stText;
+    if ($("cs-runtime-wrap")) {
+      $("cs-runtime-wrap").title = `${stText}（累计持续运行）`;
+    }
   }
   const tdPnl = Number(hist.today_pnl || 0);
   const tdW = Number(hist.today_wins || 0);
@@ -1068,17 +1029,60 @@ function updateOverview(live, hist) {
     const ratio = grossSum > 0 ? Math.min(98, Math.max(2, (totalWon / grossSum) * 100)) : 50;
     winBarEl.style.width = `${ratio.toFixed(1)}%`;
   }
-  if (pfEl) {
+  // PF Visual Gauge (0.0 -> 1.0 breakeven @40% -> 1.5 good @60% -> 2.5+ @100%)
+  const pfFillEl = $("kpi-pf-fill");
+  const pfMarkerEl = $("kpi-pf-marker");
+  const pfVerdictEl = $("kpi-pf-verdict");
+  if ($("kpi-quality-samples")) {
+    $("kpi-quality-samples").textContent = String(tradedRounds);
+  }
+  {
+    let pfPct = 0;
+    let pfTone = "neutral";
+    let pfVerdict = "等待样本";
+    let pfDisplay = "--";
+    let hasPfSample = false;
     if (totalWon > 1e-6 && totalLost <= 1e-6) {
-      pfEl.textContent = "盈亏比 PF ∞";
-      pfEl.className = "bento-meta-text up";
+      hasPfSample = true;
+      pfPct = 100;
+      pfTone = "good";
+      pfDisplay = "∞";
+      pfVerdict = "暂未亏损";
     } else if (totalLost > 1e-6) {
-      const pf = totalWon / totalLost;
-      pfEl.textContent = `盈亏比 PF ${pf.toFixed(2)}`;
-      pfEl.className = `bento-meta-text ${pf >= 1.15 ? "up" : pf < 1.0 ? "down" : ""}`;
-    } else {
-      pfEl.textContent = "盈亏比 PF --";
-      pfEl.className = "bento-meta-text";
+      hasPfSample = true;
+      const pfVal = totalWon / totalLost;
+      pfDisplay = pfVal.toFixed(2);
+      pfPct = Math.max(0, Math.min(100, (pfVal / 2.5) * 100));
+      if (pfVal < 1.0) {
+        pfTone = "warn";
+        pfVerdict = "低于盈亏线";
+      } else if (pfVal < 1.15) {
+        pfTone = "mid";
+        pfVerdict = "微利平衡";
+      } else if (pfVal < 1.5) {
+        pfTone = "mid";
+        pfVerdict = "健康盈利";
+      } else {
+        pfTone = "good";
+        pfVerdict = "表现优秀";
+      }
+    }
+    if (pfEl) {
+      pfEl.textContent = pfDisplay;
+      pfEl.className = `pf-num-val is-${pfTone}`;
+    }
+    if (pfFillEl) {
+      pfFillEl.style.width = `${pfPct.toFixed(1)}%`;
+      pfFillEl.className = `pf-track-fill is-${pfTone}`;
+    }
+    if (pfMarkerEl) {
+      pfMarkerEl.style.left = `${pfPct.toFixed(1)}%`;
+      pfMarkerEl.style.opacity = hasPfSample ? "1" : "0";
+      pfMarkerEl.className = `pf-track-marker is-${pfTone}`;
+    }
+    if (pfVerdictEl) {
+      pfVerdictEl.textContent = pfVerdict;
+      pfVerdictEl.className = `pf-verdict-chip is-${pfTone}`;
     }
   }
 
@@ -1093,34 +1097,46 @@ function updateOverview(live, hist) {
     heroRoiEl.className = `cap-sub ${turnoverRoi >= 0 ? "up" : "down"}`;
   }
 
-  // Lower Left: Execution Structure Attribution (Clean Clickable Table)
+  // Lower Right: Execution Structure Attribution (Unified Flat-Card Visuals)
   const eb = hist.execution_breakdown || {};
+  const ebTotalCnt = ["maker", "taker", "flip"].reduce((s, k) => s + Number(eb[k]?.count || 0), 0);
   [
-    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr"],
-    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr"],
-    ["flip", "exec-card-flip", "exec-flip-cnt", "exec-flip-pnl", "exec-flip-wr"],
-  ].forEach(([key, cardId, cntId, pnlId, wrId]) => {
+    ["maker", "exec-card-maker", "exec-maker-cnt", "exec-maker-pnl", "exec-maker-wr", "exec-maker-bar", "exec-maker-avg", "exec-share-maker", "exec-pct-maker"],
+    ["taker", "exec-card-taker", "exec-taker-cnt", "exec-taker-pnl", "exec-taker-wr", "exec-taker-bar", "exec-taker-avg", "exec-share-taker", "exec-pct-taker"],
+    ["flip", "exec-card-flip", "exec-flip-cnt", "exec-flip-pnl", "exec-flip-wr", "exec-flip-bar", "exec-flip-avg", "exec-share-flip", "exec-pct-flip"],
+  ].forEach(([key, cardId, cntId, pnlId, wrId, barId, avgId, shareId, pctId]) => {
     const item = eb[key] || { count: 0, wins: 0, losses: 0, win_rate: 0, pnl: 0 };
     const c = Number(item.count || 0);
     const w = Number(item.wins || 0);
     const l = Number(item.losses || 0);
     const wr = Number(item.win_rate || 0);
     const p = Number(item.pnl || 0);
+    const sharePct = ebTotalCnt > 0 ? (c / ebTotalCnt) * 100 : 0;
+    const avgPer = c > 0 ? p / c : 0;
+
+    if ($(shareId)) $(shareId).style.width = `${sharePct.toFixed(1)}%`;
+    if ($(pctId)) $(pctId).textContent = `${sharePct.toFixed(0)}%`;
     if ($(cntId)) $(cntId).textContent = `${c} 场`;
     if ($(pnlId)) {
       $(pnlId).textContent = c > 0 ? fmtUsd(p, true) : "$0.00";
       $(pnlId).className = `exec-card-pnl num ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "") : ""}`;
     }
+    if ($(barId)) {
+      $(barId).style.width = c > 0 ? `${Math.max(4, Math.min(100, wr)).toFixed(1)}%` : "0%";
+      $(barId).className = `exec-wr-fill is-${key}`;
+    }
     if ($(wrId)) {
-      $(wrId).textContent = c > 0 ? `${wr.toFixed(1)}% (${w}-${l})` : "--";
+      $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% (${w}胜 ${l}负)` : "胜率 --";
+    }
+    if ($(avgId)) {
+      $(avgId).textContent = c > 0 ? `场均 ${fmtUsd(avgPer, true)}` : "场均 --";
+      $(avgId).className = `exec-ch-avg num ${c > 0 ? (avgPer > 1e-6 ? "up" : avgPer < -1e-6 ? "down" : "") : ""}`;
     }
     const card = $(cardId);
     if (card) {
       const isAlert = c >= 5 && wr < 45.0 && p < -1e-6;
       card.classList.toggle("is-alert", isAlert);
-      card.title = isAlert
-        ? "警示：该执行通道胜率偏低且持续亏损，点击直达场次记录复盘"
-        : "点击直达场次记录复盘该通道";
+      card.title = "点击筛选该通道的历史场次记录";
     }
   });
 
@@ -1177,22 +1193,72 @@ function updateOverview(live, hist) {
     }
   }
 
-  // Lower Right: Pure Typography 2x2 Strategy Edge Matrix
-  if ($("kpi-winrate")) $("kpi-winrate").textContent = `${winRate.toFixed(1)}%`;
-  if ($("kpi-winloss")) $("kpi-winloss").textContent = `${wins} 胜 · ${losses} 负 · ${flats} 平`;
+  // Lower Left (Primary): Visual 2x2 Strategy Quality Diagnostics
+  const rawRecords = Array.isArray(hist.records) ? hist.records : [];
+  const normRecords = rawRecords.map(normalizeRecord).filter(Boolean);
+  const chronoRecords = normRecords.slice().sort((a, b) => (a.start_ts || 0) - (b.start_ts || 0));
+
+  // Dynamic breakeven win rate: avgLoss / (avgWin + avgLoss)
+  const beWr = (avgWin > 1e-6 && avgLoss > 1e-6) ? (avgLoss / (avgWin + avgLoss)) * 100 : null;
+  const winrateEl = $("kpi-winrate");
+  if (winrateEl) {
+    winrateEl.textContent = `${winRate.toFixed(1)}%`;
+    winrateEl.className = "qm-val";
+  }
+  if ($("kpi-winloss")) {
+    const beTxt = beWr !== null ? ` · 保本线 ${beWr.toFixed(1)}%` : "";
+    $("kpi-winloss").textContent = `${wins} 胜 · ${losses} 负 · ${flats} 平${beTxt}`;
+  }
+  const winSeqEl = $("qm-win-sequence");
+  if (winSeqEl) {
+    const recentTraded = chronoRecords.filter((r) => r.traded).slice(-16);
+    const seqSlots = 16;
+    const padCnt = Math.max(0, seqSlots - recentTraded.length);
+    const cells = [];
+    for (let i = 0; i < padCnt; i++) {
+      cells.push(`<span class="qm-form-cell is-empty" title="待成交"></span>`);
+    }
+    recentTraded.forEach((r) => {
+      const p = Number(r.pnl || 0);
+      const cls = p > 1e-4 ? "is-win" : p < -1e-4 ? "is-loss" : "is-flat";
+      const lbl = p > 1e-4 ? "胜" : p < -1e-4 ? "负" : "平";
+      const winTxt = slugToWindowText(r.slug, r.start_ts, r.end_ts).range || r.slug;
+      cells.push(`<span class="qm-form-cell ${cls}" title="${escapeHtml(winTxt)} · ${lbl} ${fmtUsd(p, true)}">${lbl}</span>`);
+    });
+    setHtmlIfChanged(winSeqEl, cells.join(""));
+  }
 
   const avgPnlEl = $("kpi-avg-pnl");
   if (avgPnlEl) {
     avgPnlEl.textContent = fmtUsd(avgPnl, true);
     avgPnlEl.className = `qm-val ${avgPnl > 0 ? "up" : avgPnl < 0 ? "down" : ""}`;
   }
+
+  // Avg Win vs Avg Loss direct amount bars + ratio line
+  const barAvgWinEl = $("qm-bar-avgwin");
+  const barAvgLossEl = $("qm-bar-avgloss");
+  const avgWinAmtEl = $("kpi-avgwin-amt");
+  const avgLossAmtEl = $("kpi-avgloss-amt");
+  const maxAvgLeg = Math.max(avgWin, avgLoss, 0);
+  if (barAvgWinEl) {
+    barAvgWinEl.style.width = maxAvgLeg > 1e-6 ? `${Math.max(4, (avgWin / maxAvgLeg) * 100).toFixed(1)}%` : "0%";
+  }
+  if (barAvgLossEl) {
+    barAvgLossEl.style.width = maxAvgLeg > 1e-6 ? `${Math.max(4, (avgLoss / maxAvgLeg) * 100).toFixed(1)}%` : "0%";
+  }
+  if (avgWinAmtEl) avgWinAmtEl.textContent = `+$${avgWin.toFixed(2)}`;
+  if (avgLossAmtEl) avgLossAmtEl.textContent = `-$${avgLoss.toFixed(2)}`;
   if ($("kpi-avg-split")) {
-    $("kpi-avg-split").textContent = `均盈 +$${avgWin.toFixed(2)} · 均亏 -$${avgLoss.toFixed(2)}`;
+    if (avgWin > 1e-6 && avgLoss > 1e-6) {
+      $("kpi-avg-split").textContent = `单场赚赔比 ${(avgWin / avgLoss).toFixed(2)} : 1`;
+    } else if (avgWin > 1e-6) {
+      $("kpi-avg-split").textContent = "单场赚赔比 ∞ : 1（暂无亏损）";
+    } else {
+      $("kpi-avg-split").textContent = "单场赚赔比 --";
+    }
   }
 
   // Full-history Max Drawdown (in Equity Curve Header) & Total Fills (in Engine Attribution Header)
-  const rawRecords = Array.isArray(hist.records) ? hist.records : [];
-  const normRecords = rawRecords.map(normalizeRecord).filter(Boolean);
   let totalFills = Number.isFinite(Number(hist.total_fills)) ? Number(hist.total_fills) : 0;
   if (!Number.isFinite(Number(hist.total_fills))) {
     totalFills = normRecords.reduce((acc, r) => acc + r.fills_count, 0);
@@ -1201,23 +1267,69 @@ function updateOverview(live, hist) {
   const maxDdEl = $("kpi-max-dd");
   if (maxDdEl) {
     maxDdEl.textContent = maxDd > 1e-4 ? `-$${maxDd.toFixed(2)}` : "$0.00";
-    maxDdEl.className = maxDd > 1e-4 ? "down" : "";
+    maxDdEl.className = `cs-val ${maxDd > 1e-4 ? "down" : ""}`;
   }
   if ($("kpi-total-fills")) {
     $("kpi-total-fills").textContent = `共 ${totalFills} 笔成交`;
   }
 
   const partRate = totalRounds > 0 ? (tradedRounds / totalRounds) * 100 : 0;
+  const skippedRounds = Math.max(0, totalRounds - tradedRounds);
   const capTurnMultiple = initialCap > 0 ? turnover / initialCap : 0;
   if ($("kpi-participation-rate")) $("kpi-participation-rate").textContent = `${partRate.toFixed(1)}%`;
   if ($("kpi-participation-sub")) {
-    $("kpi-participation-sub").textContent = `成交 ${tradedRounds} / 监测 ${totalRounds} 场`;
+    $("kpi-participation-sub").textContent = `出手 ${tradedRounds} 场 · 观望 ${skippedRounds} 场（共 ${totalRounds} 场）`;
   }
-  if ($("kpi-turnover-mult")) {
-    $("kpi-turnover-mult").textContent = `${capTurnMultiple.toFixed(2)}x`;
+  const partTlEl = $("qm-part-timeline");
+  if (partTlEl) {
+    const recentAll = chronoRecords.slice(-24);
+    const tlSlots = 24;
+    const padCnt = Math.max(0, tlSlots - recentAll.length);
+    const bars = [];
+    for (let i = 0; i < padCnt; i++) {
+      bars.push(`<i class="qm-up-bar is-empty"></i>`);
+    }
+    recentAll.forEach((r) => {
+      const winTxt = slugToWindowText(r.slug, r.start_ts, r.end_ts).range || r.slug;
+      if (r.traded) {
+        bars.push(`<i class="qm-up-bar is-traded" title="${escapeHtml(winTxt)} · 已出手 (${fmtUsd(r.pnl, true)})"></i>`);
+      } else {
+        bars.push(`<i class="qm-up-bar is-skip" title="${escapeHtml(winTxt)} · 观望未出手"></i>`);
+      }
+    });
+    setHtmlIfChanged(partTlEl, bars.join(""));
   }
-  if ($("kpi-turnover-note")) {
-    $("kpi-turnover-note").textContent = `下注 ${fmtUsd(turnover)} · ROI ${fmtPct(turnoverRoi, true)}`;
+
+  // Primary Bet ROI + Zero-Centered Diverging Bar (-25% .. 0% .. +25%)
+  const roiValEl = $("kpi-turnover-roi-pill");
+  if (roiValEl) {
+    roiValEl.textContent = turnover > 1e-4 ? fmtPct(turnoverRoi, true) : "+0.00%";
+    roiValEl.className = `qm-val ${turnover > 1e-4 ? (turnoverRoi > 1e-6 ? "up" : turnoverRoi < -1e-6 ? "down" : "") : ""}`;
+  }
+  const turnNoteEl = $("kpi-turnover-note");
+  if (turnNoteEl) {
+    setHtmlIfChanged(
+      turnNoteEl,
+      `净盈亏 ${fmtUsd(totalPnl, true)} · 下注 ${fmtUsd(turnover)} · 周转 <span id="kpi-turnover-mult">${capTurnMultiple.toFixed(2)}x</span>`
+    );
+  }
+  const roiBarEl = $("qm-roi-bar");
+  if (roiBarEl) {
+    const spanHalf = Math.min(50, (Math.abs(turnoverRoi) / 25.0) * 50);
+    if (turnover > 1e-4 && turnoverRoi > 1e-6) {
+      roiBarEl.style.left = "50%";
+      roiBarEl.style.width = `${Math.max(2, spanHalf).toFixed(1)}%`;
+      roiBarEl.className = "qm-roi-bar is-pos";
+    } else if (turnover > 1e-4 && turnoverRoi < -1e-6) {
+      const wPct = Math.max(2, spanHalf);
+      roiBarEl.style.left = `${(50 - wPct).toFixed(1)}%`;
+      roiBarEl.style.width = `${wPct.toFixed(1)}%`;
+      roiBarEl.className = "qm-roi-bar is-neg";
+    } else {
+      roiBarEl.style.left = "50%";
+      roiBarEl.style.width = "0%";
+      roiBarEl.className = "qm-roi-bar";
+    }
   }
 
   // Render Cumulative Equity Curve
@@ -1396,39 +1508,42 @@ function drawEquityCurve(hist) {
   ctx.lineJoin = "round";
   ctx.stroke();
 
-  // Linear regression trendline overlay (visualizes whether equity is genuinely trending upward)
+  // Adaptive smooth local trend curve (zero-phase centered EMA / rolling trend that genuinely bends with local waves)
   if (coords.length >= 4) {
     const nT = coords.length;
-    let sumX = 0, sumY = 0;
-    for (let i = 0; i < nT; i++) { sumX += i; sumY += coords[i].cum_pnl; }
-    const meanX = sumX / nT;
-    const meanY = sumY / nT;
-    let num = 0, den = 0;
-    for (let i = 0; i < nT; i++) {
-      const dx = i - meanX;
-      num += dx * (coords[i].cum_pnl - meanY);
-      den += dx * dx;
+    const span = Math.max(3, Math.min(7, Math.round(nT * 0.28)));
+    const alpha = 2 / (span + 1);
+    const fwd = new Array(nT);
+    fwd[0] = coords[0].cum_pnl;
+    for (let i = 1; i < nT; i++) {
+      fwd[i] = alpha * coords[i].cum_pnl + (1 - alpha) * fwd[i - 1];
     }
-    if (den > 1e-9) {
-      const slope = num / den;
-      const intercept = meanY - slope * meanX;
-      const y0 = Math.max(padT, Math.min(padT + plotH, yOf(intercept)));
-      const y1 = Math.max(padT, Math.min(padT + plotH, yOf(intercept + slope * (nT - 1))));
-      const trendColor = slope > 0.05
-        ? (pal.isDark ? "rgba(52, 211, 153, 0.55)" : "rgba(5, 150, 105, 0.45)")
-        : slope < -0.05
-          ? (pal.isDark ? "rgba(251, 113, 133, 0.55)" : "rgba(225, 29, 72, 0.45)")
-          : (pal.isDark ? "rgba(251, 191, 36, 0.50)" : "rgba(180, 83, 9, 0.40)");
-      ctx.save();
-      ctx.strokeStyle = trendColor;
-      ctx.lineWidth = 1.4;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      ctx.moveTo(coords[0].x, y0);
-      ctx.lineTo(coords[nT - 1].x, y1);
-      ctx.stroke();
-      ctx.restore();
+    // Forward-backward blend eliminates phase lag so peaks/valleys align with local regime turns
+    const bwd = new Array(nT);
+    bwd[nT - 1] = fwd[nT - 1];
+    for (let i = nT - 2; i >= 0; i--) {
+      bwd[i] = alpha * fwd[i] + (1 - alpha) * bwd[i + 1];
     }
+    const tPts = coords.map((c, i) => ({
+      x: c.x,
+      y: Math.max(padT, Math.min(padT + plotH, yOf(bwd[i]))),
+    }));
+    ctx.save();
+    ctx.strokeStyle = pal.isDark ? "rgba(96, 165, 250, 0.72)" : "rgba(37, 99, 235, 0.62)";
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([5, 4]);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(tPts[0].x, tPts[0].y);
+    for (let i = 1; i < tPts.length - 1; i++) {
+      const mx = (tPts[i].x + tPts[i + 1].x) * 0.5;
+      const my = (tPts[i].y + tPts[i + 1].y) * 0.5;
+      ctx.quadraticCurveTo(tPts[i].x, tPts[i].y, mx, my);
+    }
+    ctx.lineTo(tPts[tPts.length - 1].x, tPts[tPts.length - 1].y);
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Terminal glowing endpoint dot
@@ -1472,14 +1587,30 @@ function drawEquityCurve(hist) {
     ctx.stroke();
   }
 
-  // X-axis labels
+  // Clean X-axis time boundary labels (spaced away from Y-axis to prevent overlap)
+  const _fmtCurveTs = (p) => {
+    const ts = Number(p?.ts || 0);
+    if (ts > 1e9) {
+      const d = new Date(ts * 1000);
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mi = String(d.getMinutes()).padStart(2, "0");
+      return `${mm}/${dd} ${hh}:${mi}`;
+    }
+    return "";
+  };
+  const xFirstPt = pts.length > 1 ? pts[1] : pts[0];
+  const xLastPt = pts[pts.length - 1];
+  const leftLbl = _fmtCurveTs(xFirstPt) || "#1";
+  const rightLbl = _fmtCurveTs(xLastPt) || `#${xLastPt.idx}`;
   ctx.fillStyle = pal.axis;
-  ctx.font = "500 10px 'JetBrains Mono', monospace";
+  ctx.font = "500 10px 'Inter', -apple-system, sans-serif";
   ctx.textBaseline = "top";
   ctx.textAlign = "left";
-  ctx.fillText("起点 #0", padL, padT + plotH + 7);
+  ctx.fillText(leftLbl, padL + 4, padT + plotH + 9);
   ctx.textAlign = "right";
-  ctx.fillText(`最新 #${pts[pts.length - 1].idx}`, w - padR, padT + plotH + 7);
+  ctx.fillText(rightLbl, w - padR, padT + plotH + 9);
 }
 
 function initEquityCurveInteractions() {
@@ -1519,48 +1650,37 @@ function initEquityCurveInteractions() {
     return { bestIdx, rect };
   };
 
-  const renderTooltipAt = (bestIdx, rect) => {
+  const renderTooltipAt = (bestIdx) => {
     equityHoverIdx = bestIdx;
     drawEquityCurve(cachedHistory);
 
     const pt = equityChartGeom.pts[bestIdx];
-    canvas.style.cursor = bestIdx > 0 && pt?.slug ? "pointer" : "default";
+    canvas.style.cursor = "crosshair";
     if (bestIdx === 0) {
       tooltip.innerHTML = `
-        <div class="tt-time">账户初始起点 (#0)</div>
-        <div class="tt-row"><span>初始本金</span><b>${fmtUsd(cachedHistory?.initial_capital || 100)}</b></div>
-        <div class="tt-row"><span>累计净收益</span><b>$0.00</b></div>
+        <span class="chb-idx">起点 #0</span>
+        <span class="chb-sep">·</span>
+        <span>本金 <b>${fmtUsd(cachedHistory?.initial_capital || 100)}</b></span>
       `;
     } else {
       const winInfo = slugToWindowText(pt.slug, pt.ts);
       const delta = Number(pt.round_pnl || 0);
       const cum = Number(pt.cum_pnl || 0);
       tooltip.innerHTML = `
-        <div class="tt-time">第 #${pt.idx} 场 · ${escapeHtml(winInfo.range)}</div>
-        <div class="tt-row">
-          <span>单场净损益</span>
-          <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtUsd(delta, true)}</b>
-        </div>
-        <div class="tt-row">
-          <span>累计已结算净利</span>
-          <b class="${cum > 0 ? "up" : cum < 0 ? "down" : ""}">${fmtUsd(cum, true)}</b>
-        </div>
-        <div class="tt-hint">点击直达本轮复盘 ›</div>
+        <span class="chb-idx">#${pt.idx} ${escapeHtml(winInfo.range)}</span>
+        <span class="chb-sep">·</span>
+        <span>单场 <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtUsd(delta, true)}</b></span>
+        <span class="chb-sep">·</span>
+        <span>累计 <b class="${cum > 0 ? "up" : cum < 0 ? "down" : ""}">${fmtUsd(cum, true)}</b></span>
       `;
     }
-
-    tooltip.style.left = "0px";
     tooltip.hidden = false;
-    const ttW = Math.max(210, tooltip.offsetWidth || 240);
-    const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, pt.x - ttW / 2));
-    tooltip.style.left = `${leftPos}px`;
-    tooltip.style.top = `10px`;
   };
 
   canvas.addEventListener("mousemove", (e) => {
     const hit = findNearestIdx(e.clientX);
     if (!hit) return;
-    renderTooltipAt(hit.bestIdx, hit.rect);
+    renderTooltipAt(hit.bestIdx);
   });
 
   canvas.addEventListener("mouseleave", () => {
@@ -1574,24 +1694,15 @@ function initEquityCurveInteractions() {
     const t = e.touches && e.touches[0];
     if (!t) return;
     const hit = findNearestIdx(t.clientX);
-    if (hit) renderTooltipAt(hit.bestIdx, hit.rect);
+    if (hit) renderTooltipAt(hit.bestIdx);
   }, { passive: true });
 
   canvas.addEventListener("touchmove", (e) => {
     const t = e.touches && e.touches[0];
     if (!t) return;
     const hit = findNearestIdx(t.clientX);
-    if (hit) renderTooltipAt(hit.bestIdx, hit.rect);
+    if (hit) renderTooltipAt(hit.bestIdx);
   }, { passive: true });
-
-  canvas.addEventListener("click", (e) => {
-    const hit = findNearestIdx(e.clientX);
-    const idx = hit ? hit.bestIdx : equityHoverIdx;
-    const slug = idx !== null && idx > 0 ? equityChartGeom?.pts?.[idx]?.slug : null;
-    if (slug) {
-      openRoundModal(slug);
-    }
-  });
 }
 
 // ============================================================================
@@ -2516,23 +2627,51 @@ function renderActionFeed(actions, startTs = 0) {
       const isSel = liveSelectedActionIdx === origIdx;
       const isFill = item.typeClass === "fill";
       const isSecondary = !isFill;
-      const specHtml = item.specStr && item.specStr !== "--"
-        ? `<span class="tl-spec">${escapeHtml(item.specStr)}</span>`
+      const px = Number(raw.price ?? raw.px ?? 0);
+      const sz = Number(raw.size ?? raw.shares ?? 0);
+      const notional = px > 0 && sz > 0 ? px * sz : 0;
+      const rawAct = String(raw.action || raw.kind || "").toLowerCase();
+      const tagCls = isFill
+        ? "fill"
+        : item.typeClass === "cancel"
+          ? "cancel"
+          : (rawAct === "wait" || rawAct === "skip" || rawAct === "block" || /暂缓|拦截|观望/.test(item.typeLabel || ""))
+            ? "wait"
+            : "quote";
+
+      if (isFill) {
+        return `
+          <li class="action-item tl-item clickable is-fill-hero ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该成交节点">
+            <div class="ex-card-top">
+              <div class="ex-badges">
+                <span class="ex-tag ${tagCls}">${escapeHtml(item.typeLabel)}</span>
+                <span class="ex-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
+              </div>
+              <span class="ex-time">${escapeHtml(item.timeStr)}</span>
+            </div>
+            <div class="ex-fill-metrics">
+              <span class="ex-spec">${escapeHtml(item.specStr || "--")}</span>
+              ${notional > 0 ? `<strong class="ex-notional">${fmtUsd(notional)}</strong>` : ""}
+            </div>
+            <div class="ex-reason">${escapeHtml(item.reasonStr)}</div>
+          </li>
+        `;
+      }
+
+      const inlineSpec = item.specStr && item.specStr !== "--"
+        ? `<span class="ex-spec-inline">${escapeHtml(item.specStr)}</span>`
         : "";
       return `
-        <li class="action-item tl-item clickable type-${item.typeClass} ${isFill ? "is-fill-hero" : ""} ${isSecondary ? "is-secondary" : ""} ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图高亮该节点并显示横纵延长线">
-          <span class="tl-rail" aria-hidden="true"><span class="tl-dot ${item.typeClass}"></span></span>
-          <div class="tl-body">
-            <div class="tl-head">
-              <div class="tl-meta">
-                <span class="tl-type ${item.typeClass}">${escapeHtml(item.typeLabel)}</span>
-                <span class="tl-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
-                ${specHtml}
-              </div>
-              <span class="tl-time">${escapeHtml(item.timeStr)}</span>
+        <li class="action-item tl-item clickable is-secondary ${isSel ? "selected" : ""}" data-action-idx="${origIdx}" title="点击在左图定位该节点">
+          <div class="ex-card-top">
+            <div class="ex-badges">
+              <span class="ex-tag ${tagCls}">${escapeHtml(item.typeLabel)}</span>
+              <span class="ex-side ${item.sideClass}">${escapeHtml(item.sideLabel)}</span>
+              ${inlineSpec}
             </div>
-            <div class="tl-reason">${escapeHtml(item.reasonStr)}</div>
+            <span class="ex-time">${escapeHtml(item.timeStr)}</span>
           </div>
+          <div class="ex-reason">${escapeHtml(item.reasonStr)}</div>
         </li>
       `;
     })
@@ -2773,44 +2912,20 @@ function drawLivePriceChart(live) {
     const lastX = xOfSec(lastPtPx.elapsed);
     const lastY = yOfPrice(lastPtPx.poly_spot);
 
-    // Above-strike green zone
+    // Unified clean finance-blue BTC price trajectory (eliminates red/green visual fatigue)
+    const priceLineColor = pal.isDark ? "#60a5fa" : "#2563eb";
+    const priceAreaGrad = ctx.createLinearGradient(0, priceTop, 0, priceTop + priceH);
+    priceAreaGrad.addColorStop(0, pal.isDark ? "rgba(96, 165, 250, 0.20)" : "rgba(37, 99, 235, 0.12)");
+    priceAreaGrad.addColorStop(1, "rgba(37, 99, 235, 0.00)");
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(padL, priceTop, plotW, Math.max(0, openY - priceTop));
-    ctx.clip();
-    const upGrad = ctx.createLinearGradient(0, priceTop, 0, openY);
-    upGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.14)");
-    upGrad.addColorStop(1, "rgba(16, 185, 129, 0.00)");
     tracePricePath();
-    ctx.lineTo(lastX, openY);
-    ctx.lineTo(firstX, openY);
+    ctx.lineTo(lastX, priceTop + priceH);
+    ctx.lineTo(firstX, priceTop + priceH);
     ctx.closePath();
-    ctx.fillStyle = upGrad;
+    ctx.fillStyle = priceAreaGrad;
     ctx.fill();
     tracePricePath();
-    ctx.strokeStyle = pal.up;
-    ctx.lineWidth = 2.0;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.stroke();
-    ctx.restore();
-
-    // Below-strike red zone
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(padL, openY, plotW, Math.max(0, priceTop + priceH - openY));
-    ctx.clip();
-    const dnGrad = ctx.createLinearGradient(0, openY, 0, priceTop + priceH);
-    dnGrad.addColorStop(0, "rgba(244, 63, 94, 0.00)");
-    dnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.14)");
-    tracePricePath();
-    ctx.lineTo(lastX, openY);
-    ctx.lineTo(firstX, openY);
-    ctx.closePath();
-    ctx.fillStyle = dnGrad;
-    ctx.fill();
-    tracePricePath();
-    ctx.strokeStyle = pal.down;
+    ctx.strokeStyle = priceLineColor;
     ctx.lineWidth = 2.0;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -2819,12 +2934,9 @@ function drawLivePriceChart(live) {
 
     // TradingView-style subtle horizontal guide to right axis + clean axis tag (no bulky pill on curve tip)
     const curDiff = openPx > 0 ? (lastPtPx.poly_spot - openPx) : 0;
-    const isUpNow = curDiff >= 0;
-    const tipColor = isUpNow ? pal.up : pal.down;
+    const tipColor = priceLineColor;
     ctx.save();
-    ctx.strokeStyle = isUpNow
-      ? (pal.isDark ? "rgba(16, 185, 129, 0.35)" : "rgba(5, 150, 105, 0.28)")
-      : (pal.isDark ? "rgba(244, 63, 94, 0.35)" : "rgba(225, 29, 72, 0.28)");
+    ctx.strokeStyle = pal.isDark ? "rgba(96, 165, 250, 0.36)" : "rgba(37, 99, 235, 0.28)";
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
     ctx.beginPath();
@@ -2836,9 +2948,7 @@ function drawLivePriceChart(live) {
     // Crisp minimalist terminal dot
     ctx.beginPath();
     ctx.arc(lastX, lastY, 5.5, 0, Math.PI * 2);
-    ctx.fillStyle = isUpNow
-      ? (pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.16)")
-      : (pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.16)");
+    ctx.fillStyle = pal.isDark ? "rgba(96, 165, 250, 0.22)" : "rgba(37, 99, 235, 0.16)";
     ctx.fill();
     ctx.beginPath();
     ctx.arc(lastX, lastY, 2.8, 0, Math.PI * 2);
@@ -2954,44 +3064,21 @@ function drawLivePriceChart(live) {
       const lx = xOfSec(lastP.elapsed);
       const ly = yOfProb(lastP.up_mid);
 
-      // Above 50% green baseline zone
+      // Unified calm teal curve for implied probability (distinct from price blue & PnL red/green)
+      const probLineColor = pal.isDark ? "#2dd4bf" : "#0d9488";
+      const probAreaGrad = ctx.createLinearGradient(0, probTop, 0, probTop + probH);
+      probAreaGrad.addColorStop(0, pal.isDark ? "rgba(45, 212, 191, 0.18)" : "rgba(13, 148, 136, 0.13)");
+      probAreaGrad.addColorStop(1, "rgba(13, 148, 136, 0.00)");
       ctx.save();
-      ctx.beginPath();
-      ctx.rect(padL, probTop, plotW, Math.max(0, midY - probTop));
-      ctx.clip();
-      const probUpGrad = ctx.createLinearGradient(0, probTop, 0, midY);
-      probUpGrad.addColorStop(0, pal.isDark ? "rgba(16, 185, 129, 0.22)" : "rgba(5, 150, 105, 0.16)");
-      probUpGrad.addColorStop(1, "rgba(16, 185, 129, 0.01)");
       traceProbPath();
-      ctx.lineTo(lx, midY);
-      ctx.lineTo(pFirstX, midY);
+      ctx.lineTo(lx, probTop + probH);
+      ctx.lineTo(pFirstX, probTop + probH);
       ctx.closePath();
-      ctx.fillStyle = probUpGrad;
+      ctx.fillStyle = probAreaGrad;
       ctx.fill();
       traceProbPath();
-      ctx.strokeStyle = pal.up;
-      ctx.lineWidth = 2.1;
-      ctx.lineJoin = "round";
-      ctx.stroke();
-      ctx.restore();
-
-      // Below 50% red baseline zone
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(padL, midY, plotW, Math.max(0, probTop + probH - midY));
-      ctx.clip();
-      const probDnGrad = ctx.createLinearGradient(0, midY, 0, probTop + probH);
-      probDnGrad.addColorStop(0, "rgba(244, 63, 94, 0.01)");
-      probDnGrad.addColorStop(1, pal.isDark ? "rgba(244, 63, 94, 0.22)" : "rgba(225, 29, 72, 0.16)");
-      traceProbPath();
-      ctx.lineTo(lx, midY);
-      ctx.lineTo(pFirstX, midY);
-      ctx.closePath();
-      ctx.fillStyle = probDnGrad;
-      ctx.fill();
-      traceProbPath();
-      ctx.strokeStyle = pal.down;
-      ctx.lineWidth = 2.1;
+      ctx.strokeStyle = probLineColor;
+      ctx.lineWidth = 2.0;
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
@@ -3053,12 +3140,10 @@ function drawLivePriceChart(live) {
         drawProbLevelLine(yProbPos, wLbl, "#2563eb", true, liveFocusSide === wSide);
       });
 
-      // Endpoint dot + horizontal guide to right axis (consistent with upper pane)
-      const probColor = lastP.up_mid >= 0.5 ? pal.up : pal.down;
+      // Endpoint dot + horizontal guide to right axis (matches calm teal probability curve)
+      const probColor = pal.isDark ? "#2dd4bf" : "#0d9488";
       ctx.save();
-      ctx.strokeStyle = lastP.up_mid >= 0.5
-        ? (pal.isDark ? "rgba(16, 185, 129, 0.30)" : "rgba(5, 150, 105, 0.24)")
-        : (pal.isDark ? "rgba(244, 63, 94, 0.30)" : "rgba(225, 29, 72, 0.24)");
+      ctx.strokeStyle = pal.isDark ? "rgba(45, 212, 191, 0.30)" : "rgba(13, 148, 136, 0.25)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
@@ -3616,7 +3701,7 @@ async function openRoundModal(slug) {
   cachedModalRecord = rec;
   const winInfo = slugToWindowText(slug, rec?.start_ts, rec?.end_ts);
 
-  if (titleEl) titleEl.textContent = `${winInfo.fullLabel} 轮次复盘详情`;
+  if (titleEl) titleEl.textContent = `${winInfo.fullLabel} 轮次复盘`;
   if (winnerEl) {
     const w = String(rec?.winner || "SETTLED").toUpperCase();
     winnerEl.className = `winner-pill ${w === "UP" ? "up" : w === "DOWN" ? "down" : "pending"}`;
@@ -3921,81 +4006,95 @@ function renderModalDetailContent(winData, rec) {
       <div class="review-kpi-col">
         <span class="review-kpi-label">${isProvisionalPrice ? "开盘基准 → 暂估收盘（待官方核验）" : "开盘基准 → 交割收盘"}</span>
         <span class="review-kpi-val">$${openShort} → $${closeShort}</span>
-        <span class="review-kpi-sub ${diffCls}">${diffSign}$${diffPx.toFixed(2)} (${diffSign}${diffPct.toFixed(3)}%)</span>
+        <span class="review-kpi-sub ${diffCls}">${fmtUsd(diffPx, true)} (${diffSign}${diffPct.toFixed(3)}%)</span>
       </div>
     </div>
 
-    <div class="detail-card">
+    <div class="detail-section">
       <div class="detail-card-head">
-        <span class="detail-card-title">${SVG_ICONS.chart}<span>5 分钟结算价格与盘口隐含概率</span></span>
+        <div class="detail-head-left">
+          <span class="detail-card-title">5 分钟结算价格与盘口隐含概率</span>
+          <div class="curve-hover-bar modal-readout-bar" id="modal-chart-tooltip" hidden aria-live="polite"></div>
+        </div>
         <div class="detail-card-legend">
-          <span><i class="legend-dot twap"></i>Chainlink 60s TWAP</span>
+          <span><i class="legend-dot twap"></i>Chainlink TWAP</span>
           <span><i class="legend-dot open-ref"></i>开盘基准</span>
-          <span><i class="legend-dot up-prob"></i>UP 盘口隐含 (%)</span>
-          <button type="button" class="modal-legend-toggle ${modalShowDeBasisSpot ? "is-active" : ""}" id="modal-toggle-spot" title="叠加按开盘去基差对齐的实时现货走势">
-            <i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加实时现货" : "叠加实时现货"}
-          </button>
+          <span><i class="legend-dot up-prob"></i>UP 隐含概率</span>
         </div>
       </div>
       <div class="history-canvas-box">
         <canvas id="modal-hist-canvas" height="265"></canvas>
-        <div class="chart-tooltip" id="modal-chart-tooltip" hidden></div>
       </div>
     </div>
 
-    <div class="detail-card table-card">
+    <div class="detail-section table-section">
       <div class="detail-card-head">
-        <span class="detail-card-title">${SVG_ICONS.list}<span>撮合与策略决策流水 (${actions.length} 条)</span></span>
-        <div class="modal-table-filters" id="modal-table-filter-group">
-          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "all" ? "active" : ""}" data-mtf="all">全部 (${enrichedActions.length})</button>
-          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "fill" ? "active" : ""}" data-mtf="fill">仅看成交 (${fillActionCount})</button>
-          <button type="button" class="modal-tf-btn ${modalActionFilterMode === "order" ? "active" : ""}" data-mtf="order">挂单与撤单 (${orderActionCount})</button>
-        </div>
+        <span class="detail-card-title"><span>撮合与策略决策流水</span><span class="detail-count-pill">${actions.length} 条</span></span>
+        ${
+          actions.length > 0
+            ? `<div class="modal-table-filters" id="modal-table-filter-group">
+                <button type="button" class="modal-tf-btn ${modalActionFilterMode === "all" ? "active" : ""}" data-mtf="all">全部 ${enrichedActions.length}</button>
+                <button type="button" class="modal-tf-btn ${modalActionFilterMode === "fill" ? "active" : ""}" data-mtf="fill">仅看成交 ${fillActionCount}</button>
+                <button type="button" class="modal-tf-btn ${modalActionFilterMode === "order" ? "active" : ""}" data-mtf="order">挂单与撤单 ${orderActionCount}</button>
+              </div>`
+            : ""
+        }
       </div>
-      <div class="table-wrap">
-        <table class="detail-actions-table">
-          <thead>
-            <tr>
-              <th>窗口时间</th>
-              <th>事件类型</th>
-              <th>方向</th>
-              <th class="num">价格</th>
-              <th class="num">股数</th>
-              <th class="num">金额</th>
-              <th>策略决策依据</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${
-              visibleActions.length === 0
-                ? `<tr><td colspan="7" class="action-empty">${actions.length === 0 ? "该窗口内策略未触发开仓动作 (全程观望)" : "当前筛选条件下无记录"}</td></tr>`
-                : visibleActions
-                    .map(({ raw: a, idx, isFill }) => {
-                      const item = formatActionItem(a, startTs);
-                      const px = Number(a.price ?? a.px ?? 0);
-                      const sz = Number(a.size ?? a.shares ?? 0);
-                      const notional = px * sz;
-                      const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
-                      const elapsed = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
-                      const evtCls = item.typeClass === "fill" ? "fill" : item.typeClass === "cancel" ? "cancel" : "quote";
+      ${
+        actions.length === 0
+          ? `<div class="modal-empty-state">本轮全程观望，未触发开仓或挂单动作</div>`
+          : `<div class="table-wrap">
+              <table class="detail-actions-table">
+                <thead>
+                  <tr>
+                    <th>窗口时间</th>
+                    <th>事件类型</th>
+                    <th>方向</th>
+                    <th class="num">价格</th>
+                    <th class="num">股数</th>
+                    <th class="num">金额</th>
+                    <th>策略决策依据</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${
+                    visibleActions.length === 0
+                      ? `<tr><td colspan="7" class="action-empty">当前筛选条件下无记录</td></tr>`
+                      : visibleActions
+                          .map(({ raw: a, idx, isFill }) => {
+                            const item = formatActionItem(a, startTs);
+                            const px = Number(a.price ?? a.px ?? 0);
+                            const sz = Number(a.size ?? a.shares ?? 0);
+                            const notional = px * sz;
+                            const actT = Number(a.t ?? a.ts ?? a.timestamp ?? startTs);
+                            const elapsed = Math.min(300, Math.max(0, startTs > 0 ? actT - startTs : actT));
+                            const rawAct = String(a.action || "").toLowerCase();
+                            const evtCls = item.typeClass === "fill"
+                              ? "fill"
+                              : item.typeClass === "cancel"
+                                ? "cancel"
+                                : (rawAct === "wait" || rawAct === "skip" || rawAct === "block" || /暂缓|拦截|观望/.test(item.typeLabel || ""))
+                                  ? "wait"
+                                  : "quote";
 
-                      return `
-                        <tr class="modal-action-row ${isFill ? "is-fill-row" : ""} ${modalSelectedActionIdx === idx ? "is-selected" : ""}" data-action-idx="${idx}" data-elapsed="${elapsed.toFixed(2)}">
-                          <td>${escapeHtml(item.timeStr)}</td>
-                          <td><span class="evt-tag ${evtCls}">${escapeHtml(item.typeLabel)}</span></td>
-                          <td><span class="side-txt ${item.sideClass || ""}">${escapeHtml(item.sideLabel)}</span></td>
-                          <td class="num">${px > 0 ? "$" + px.toFixed(2) : "--"}</td>
-                          <td class="num">${sz > 0 ? sz.toFixed(1) : "--"}</td>
-                          <td class="num">${notional > 0 ? fmtUsd(notional) : "--"}</td>
-                          <td class="reason-cell">${escapeHtml(item.reasonStr || "--")}</td>
-                        </tr>
-                      `;
-                    })
-                    .join("")
-            }
-          </tbody>
-        </table>
-      </div>
+                            return `
+                              <tr class="modal-action-row ${isFill ? "is-fill-row" : ""} ${px > 0 ? "has-nums" : "no-nums"} ${modalSelectedActionIdx === idx ? "is-selected" : ""}" data-action-idx="${idx}" data-elapsed="${elapsed.toFixed(2)}">
+                                <td class="num td-time">${escapeHtml(item.timeStr)}</td>
+                                <td class="td-evt"><span class="evt-tag ${evtCls}">${escapeHtml(item.typeLabel)}</span></td>
+                                <td class="td-side"><span class="side-txt ${item.sideClass || ""}">${escapeHtml(item.sideLabel)}</span></td>
+                                <td class="num td-px" data-lbl="价格">${px > 0 ? "$" + px.toFixed(2) : "--"}</td>
+                                <td class="num td-sz" data-lbl="股数">${sz > 0 ? sz.toFixed(1) : "--"}</td>
+                                <td class="num td-amt" data-lbl="金额">${notional > 0 ? fmtUsd(notional) : "--"}</td>
+                                <td class="reason-cell">${escapeHtml(item.reasonStr || "--")}</td>
+                              </tr>
+                            `;
+                          })
+                          .join("")
+                  }
+                </tbody>
+              </table>
+            </div>`
+      }
     </div>
   `;
 
@@ -4003,15 +4102,6 @@ function renderModalDetailContent(winData, rec) {
     drawModalHistoryChart(winData, rec);
     bindModalChartHover();
     bindModalActionRowClicks(winData, startTs);
-    const toggleSpotBtn = $("modal-toggle-spot");
-    if (toggleSpotBtn) {
-      toggleSpotBtn.addEventListener("click", () => {
-        modalShowDeBasisSpot = !modalShowDeBasisSpot;
-        toggleSpotBtn.classList.toggle("is-active", modalShowDeBasisSpot);
-        toggleSpotBtn.innerHTML = `<i class="legend-dot btc"></i>${modalShowDeBasisSpot ? "已叠加实时现货(去基差)" : "叠加实时现货(去基差)"}`;
-        drawModalHistoryChart(winData, rec);
-      });
-    }
     const filterGroup = $("modal-table-filter-group");
     if (filterGroup) {
       filterGroup.addEventListener("click", (e) => {
@@ -4030,8 +4120,8 @@ function drawModalHistoryChart(winData, rec) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  const w = Math.max(320, rect.width || 760);
-  const h = Math.max(230, rect.height || 265);
+  const w = Math.max(260, rect.width || 760);
+  const h = Math.max(200, rect.height || 265);
 
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -4486,11 +4576,9 @@ function drawModalHistoryChart(winData, rec) {
 }
 
 function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
-  const canvas = $("modal-hist-canvas");
   const tooltip = $("modal-chart-tooltip");
-  if (!canvas || !tooltip || !modalChartGeom || !modalChartGeom.pts?.length) return;
+  if (!tooltip || !modalChartGeom || !modalChartGeom.pts?.length) return;
 
-  const rect = canvas.getBoundingClientRect();
   let bestIdx = 0;
   let bestDist = Infinity;
   modalChartGeom.pts.forEach((p, idx) => {
@@ -4505,35 +4593,21 @@ function showModalTooltipForElapsed(elapsedSec, actionMeta = null) {
   const openPx = modalChartGeom.openPx || pt.poly_spot;
   const bps = openPx > 0 ? ((pt.poly_spot - openPx) / openPx) * 10000 : 0;
   const sign = bps > 0 ? "+" : "";
-  const basisDiff = pt.spot > 0 && pt.poly_spot > 0 ? pt.spot - pt.poly_spot : null;
-
-  const actionBanner = actionMeta
-    ? `<div class="tt-row" style="padding-bottom:4px;margin-bottom:4px;border-bottom:1px dashed var(--border)">
-         <span>${escapeHtml(actionMeta.typeLabel)}</span>
-         <b class="${actionMeta.sideClass || ""}">${escapeHtml(actionMeta.specStr || actionMeta.sideLabel)}</b>
-       </div>`
+  const mm = String(Math.floor(Math.max(0, elapsedSec) / 60)).padStart(2, "0");
+  const ss = String(Math.floor(Math.max(0, elapsedSec) % 60)).padStart(2, "0");
+  const actTxt = actionMeta
+    ? `<span class="chb-sep">·</span><b class="${actionMeta.sideClass || ""}">${escapeHtml(actionMeta.typeLabel)} ${escapeHtml(actionMeta.sideLabel)}</b>`
     : "";
 
   tooltip.innerHTML = `
-    <div class="tt-time" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-      <span>窗口第 ${Math.round(elapsedSec)} 秒</span>
-      <span class="${bps >= 0 ? "up" : "down"}">${sign}${bps.toFixed(1)} bps</span>
-    </div>
-    ${actionBanner}
-    <div class="tt-row"><span>Chainlink 60s TWAP</span><b>${fmtUsd(pt.poly_spot)}</b></div>
-    <div class="tt-row"><span>${escapeHtml(String(cachedLive?.spot_source || "现货").replace(/_ws$/i, "").toUpperCase())} 实时现货</span><b>${fmtUsd(pt.spot)}${basisDiff !== null ? ` (${basisDiff >= 0 ? "+" : ""}$${basisDiff.toFixed(1)})` : ""}</b></div>
-    <div class="tt-row"><span>UP 盘口隐含概率</span><b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></div>
+    <span class="chb-idx">+${mm}:${ss}</span>
+    <span class="chb-sep">·</span>
+    <span>TWAP <b>${fmtUsd(pt.poly_spot)}</b> <b class="${bps >= 0 ? "up" : "down"}">(${sign}${bps.toFixed(1)}bp)</b></span>
+    <span class="chb-sep">·</span>
+    <span>UP <b class="up">${pt.up_mid !== null ? (pt.up_mid * 100).toFixed(1) + "%" : "--"}</b></span>
+    ${actTxt}
   `;
-  tooltip.style.left = "0px";
   tooltip.hidden = false;
-
-  const hx = modalChartGeom.xOfSec(elapsedSec);
-  const ttW = Math.max(220, tooltip.offsetWidth || 280);
-  const rightLimit = rect.width - (modalChartGeom.padR || 52) - 8;
-  const rawLeft = hx + 16 + ttW > rightLimit ? hx - ttW - 16 : hx + 16;
-  const leftPos = Math.min(rect.width - ttW - 12, Math.max(12, rawLeft));
-  tooltip.style.left = `${leftPos}px`;
-  tooltip.style.top = `12px`;
 }
 
 function bindModalActionRowClicks(winData, startTs) {
@@ -4819,7 +4893,7 @@ function renderDecisionBulletin(live) {
       const padUsd = heldUp ? diffUsdNow : -diffUsdNow;
       if (tauS > 0 && tauS <= 15) {
         lTag = "尾盘开奖";
-        lCls = padUsd >= 0 ? "is-buy" : "is-down";
+        lCls = "is-warn";
         shortMsg = padUsd >= 0
           ? `最后 ${Math.round(tauS)} 秒，目前领先 +$${Math.abs(padUsd).toFixed(1)}，等开奖`
           : `最后 ${Math.round(tauS)} 秒，落后 -$${Math.abs(padUsd).toFixed(1)}，看能否翻盘`;

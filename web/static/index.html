@@ -218,7 +218,6 @@
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益与收益速率">
           <div class="card-head">
             <h2>累计净收益</h2>
-            <span class="trend-pill trend-pending" id="hero-trend-pill" hidden></span>
           </div>
 
           <div class="pnl-primary-block">
@@ -278,107 +277,222 @@
           </div>
         </section>
 
-        <!-- Card 2: Fixed-Height Interactive Equity Trajectory with Timeline & Axis Mode Switch -->
+        <!-- Card 2: Fixed-Height Interactive Equity Trajectory with Clean Header Stats -->
         <section class="panel equity-curve-card" aria-label="累计净值收益曲线">
           <div class="card-head curve-card-head">
-            <div class="curve-title-stack">
-              <div class="card-head-inline">
-                <h2>净值增长轨迹</h2>
-                <span class="exp-timeline-text" title="本次实验启动时间与累计运行时长">
-                  <span class="exp-live-dot" aria-hidden="true"></span>
-                  <span id="pace-start-at">始于 --</span>
-                  <span class="exp-sep">·</span>
-                  <span>已运行 <strong id="pace-elapsed">--</strong></span>
-                </span>
+            <div class="curve-title-row">
+              <h2>净值增长轨迹</h2>
+              <div class="curve-meta-pill" id="cs-runtime-wrap" title="实验启动时间与累计运行时长">
+                <span class="cm-dot" aria-hidden="true"></span>
+                <span>已运行 <strong id="pace-elapsed">--</strong></span>
+                <span class="cm-sep" aria-hidden="true">·</span>
+                <span><strong id="kpi-quality-samples">0</strong> 场结算</span>
               </div>
-              <span class="card-head-hint">悬停查看单轮 · 点击直达复盘 · 虚线为线性趋势</span>
+              <div class="curve-hover-bar" id="equity-tooltip" hidden aria-live="polite"></div>
+              <span id="pace-start-at" hidden>始于 --</span>
             </div>
             <div class="curve-head-right">
-              <div class="curve-extrema-text">
-                <span>峰值 <strong class="up" id="equity-peak-badge">+$0.00</strong></span>
-                <span class="exp-sep">·</span>
-                <span>回撤 <strong id="kpi-max-dd">$0.00</strong></span>
+              <div class="curve-stat-strip" aria-label="曲线极值概览">
+                <div class="cs-item">
+                  <span class="cs-label">历史峰值</span>
+                  <strong class="cs-val up" id="equity-peak-badge">+$0.00</strong>
+                </div>
+                <span class="cs-sep" aria-hidden="true"></span>
+                <div class="cs-item">
+                  <span class="cs-label">最大回撤</span>
+                  <strong class="cs-val down" id="kpi-max-dd">$0.00</strong>
+                </div>
               </div>
             </div>
           </div>
           <div class="equity-canvas-wrap">
             <canvas id="equity-curve-canvas" height="256"></canvas>
-            <div class="chart-tooltip" id="equity-tooltip" hidden></div>
           </div>
         </section>
       </div>
 
-      <!-- Row 3: Clean Lower Grid (Left: Clickable Execution Attribution Table | Right: Borderless 2x2 Edge Metrics) -->
+      <!-- Row 3: Visual Strategy Quality Metrics (Primary) + Subtle Execution Attribution (Secondary) -->
       <div class="overview-lower-grid">
-        <!-- Lower Left: Clean Financial Table (Click row to jump & filter history) -->
-        <section class="panel exec-breakdown-panel" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
-          <div class="bento-panel-head">
-            <div>
-              <h2>策略执行归因</h2>
-              <span class="bento-panel-sub">按整场控仓结构拆分 · 点击行可直达场次复盘</span>
-            </div>
-            <span class="bento-meta-text" id="kpi-total-fills">共 0 笔成交</span>
-          </div>
-
-          <div class="exec-table" role="table" aria-label="执行通道盈亏明细">
-            <div class="exec-table-head" role="row">
-              <span>执行结构</span>
-              <span class="num">场次</span>
-              <span class="num">胜率</span>
-              <span class="num">净盈亏</span>
-            </div>
-            <button type="button" class="exec-table-row" id="exec-card-maker" data-jump-exec="maker">
-              <span class="exec-ch-name">单边 · 首仓 Maker 挂单</span>
-              <span class="exec-ch-cnt num" id="exec-maker-cnt">0 场</span>
-              <span class="exec-ch-wr num" id="exec-maker-wr">--</span>
-              <strong class="exec-card-pnl num" id="exec-maker-pnl">$0.00</strong>
-            </button>
-            <button type="button" class="exec-table-row" id="exec-card-taker" data-jump-exec="taker">
-              <span class="exec-ch-name">单边 · Taker 吃单（含加仓）</span>
-              <span class="exec-ch-cnt num" id="exec-taker-cnt">0 场</span>
-              <span class="exec-ch-wr num" id="exec-taker-wr">--</span>
-              <strong class="exec-card-pnl num" id="exec-taker-pnl">$0.00</strong>
-            </button>
-            <button type="button" class="exec-table-row" id="exec-card-flip" data-jump-exec="flip">
-              <span class="exec-ch-name">双边 · 反转吃单调仓</span>
-              <span class="exec-ch-cnt num" id="exec-flip-cnt">0 场</span>
-              <span class="exec-ch-wr num" id="exec-flip-wr">--</span>
-              <strong class="exec-card-pnl num" id="exec-flip-pnl">$0.00</strong>
-            </button>
-          </div>
-        </section>
-
-        <!-- Lower Right: Pure Typography 2x2 Strategy Edge Matrix (Zero Bars, Zero Nested Boxes) -->
+        <!-- Lower Left (Primary): Visual 2x2 Strategy Quality Diagnostics + PF Scale Gauge -->
         <section class="panel quality-panel" aria-label="策略数学优势诊断">
           <div class="bento-panel-head">
             <div>
               <h2>策略质量指标</h2>
-              <span class="bento-panel-sub">胜率、期望收益与资金利用效率</span>
+              <span class="bento-panel-sub">用通俗图示看懂赚钱效率、赔率结构与资金周转</span>
             </div>
-            <span class="bento-meta-text" id="hero-pf-badge" title="盈亏比 (Profit Factor) = 累计盈利 / 累计亏损">PF --</span>
           </div>
 
-          <div class="quality-matrix">
-            <div class="qm-cell">
-              <span class="qm-label">有效胜率</span>
-              <strong class="qm-val" id="kpi-winrate">0.0%</strong>
-              <span class="qm-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平</span>
+          <!-- Top: Profit Factor Visual Scale Gauge -->
+          <div class="pf-gauge-box" aria-label="盈亏比刻度图示">
+            <div class="pf-gauge-head">
+              <div class="pf-gauge-title-wrap">
+                <span class="pf-gauge-title">盈亏比（获利因子 PF）</span>
+                <span class="pf-gauge-desc">每亏 $1 能从盈利场次赚回多少钱 · 1.0 盈亏线，≥1.15 健康，≥1.50 优秀</span>
+              </div>
+              <div class="pf-head-right">
+                <strong class="pf-num-val" id="hero-pf-badge" title="盈亏比 (Profit Factor) = 累计盈利 / 累计亏损">--</strong>
+                <span class="pf-verdict-chip" id="kpi-pf-verdict">等待样本</span>
+              </div>
             </div>
-            <div class="qm-cell">
-              <span class="qm-label">单场数学期望</span>
-              <strong class="qm-val" id="kpi-avg-pnl">$0.00</strong>
-              <span class="qm-sub" id="kpi-avg-split">均盈 +$0.00 · 均亏 -$0.00</span>
+            <div class="pf-track-wrap">
+              <div class="pf-track-fill" id="kpi-pf-fill" style="width: 0%;"></div>
+              <span class="pf-tick-line" style="left: 40%;" title="1.0 盈亏平衡线"></span>
+              <span class="pf-tick-line is-good" style="left: 60%;" title="1.5 优秀线"></span>
+              <span class="pf-track-marker" id="kpi-pf-marker" style="left: 0%; opacity: 0;"></span>
             </div>
-            <div class="qm-cell">
-              <span class="qm-label">窗口参与率</span>
-              <strong class="qm-val" id="kpi-participation-rate">0.0%</strong>
-              <span class="qm-sub" id="kpi-participation-sub">成交 0 / 监测 0 场</span>
+            <div class="pf-scale-labels" aria-hidden="true">
+              <span>0.0</span>
+              <span style="left: 40%;">1.0 盈亏线</span>
+              <span style="left: 60%;">1.5 优秀</span>
+              <span>2.5+</span>
             </div>
-            <div class="qm-cell">
-              <span class="qm-label">资金周转倍数</span>
-              <strong class="qm-val" id="kpi-turnover-mult">0.00x</strong>
-              <span class="qm-sub" id="kpi-turnover-note">下注 $0.00 · ROI +0.00%</span>
+          </div>
+
+          <div class="quality-matrix qm-visual-grid">
+            <!-- 1. Effective Win Rate (Recent Outcome Sequence Strip + Dynamic Breakeven Line) -->
+            <div class="qm-cell qm-visual-cell">
+              <div class="qm-cell-head">
+                <span class="qm-label">有效胜率</span>
+                <strong class="qm-val" id="kpi-winrate">0.0%</strong>
+              </div>
+              <div class="qm-form-strip" id="qm-win-sequence" aria-label="近期成交胜负序列"></div>
+              <span class="qm-sub" id="kpi-winloss">0 胜 · 0 负 · 0 平 · 保本线 --</span>
+              <span class="qm-explain">近 16 场战绩序列；保本胜率由均盈/均亏动态决定，超过即盈利</span>
             </div>
+
+            <!-- 2. Per-Round Expectancy (Soft Emerald vs Coral Direct Amount Bars) -->
+            <div class="qm-cell qm-visual-cell">
+              <div class="qm-cell-head">
+                <span class="qm-label">单场数学期望</span>
+                <strong class="qm-val" id="kpi-avg-pnl">$0.00</strong>
+              </div>
+              <div class="qm-payoff-viz" aria-label="均盈与均亏金额对比">
+                <div class="qm-payoff-row">
+                  <span class="qm-payoff-tag up">均盈</span>
+                  <div class="qm-payoff-track"><span class="qm-payoff-fill up" id="qm-bar-avgwin" style="width: 0%;"></span></div>
+                  <span class="qm-payoff-amt up" id="kpi-avgwin-amt">+$0.00</span>
+                </div>
+                <div class="qm-payoff-row">
+                  <span class="qm-payoff-tag down">均亏</span>
+                  <div class="qm-payoff-track"><span class="qm-payoff-fill down" id="qm-bar-avgloss" style="width: 0%;"></span></div>
+                  <span class="qm-payoff-amt down" id="kpi-avgloss-amt">-$0.00</span>
+                </div>
+              </div>
+              <span class="qm-sub" id="kpi-avg-split">单场赚赔比 --</span>
+              <span class="qm-explain">每出手一场平均净赚金额，绿条越长越能“大赚小亏”</span>
+            </div>
+
+            <!-- 3. Window Participation Rate (Statuspage-Style 24-Window Activity Heartbeat) -->
+            <div class="qm-cell qm-visual-cell">
+              <div class="qm-cell-head">
+                <span class="qm-label">窗口参与率</span>
+                <strong class="qm-val" id="kpi-participation-rate">0.0%</strong>
+              </div>
+              <div class="qm-uptime-strip" id="qm-part-timeline" aria-label="近24个5分钟窗口出手节奏"></div>
+              <span class="qm-sub" id="kpi-participation-sub">出手 0 场 · 观望 0 场（共 0 场）</span>
+              <span class="qm-explain">近 24 个 5 分钟窗口节奏：高蓝为出手，矮灰为静默观望</span>
+            </div>
+
+            <!-- 4. Bet ROI Primary (Zero-Centered Diverging Bar, Clean Right-Aligned Value) -->
+            <div class="qm-cell qm-visual-cell">
+              <div class="qm-cell-head">
+                <span class="qm-label">下注回报率 ROI</span>
+                <strong class="qm-val" id="kpi-turnover-roi-pill">+0.00%</strong>
+              </div>
+              <div class="qm-roi-gauge-wrap" aria-label="下注回报率双向刻度">
+                <div class="qm-roi-track">
+                  <span class="qm-roi-zero" title="0% 盈亏线"></span>
+                  <span class="qm-roi-bar" id="qm-roi-bar" style="left: 50%; width: 0%;"></span>
+                </div>
+                <div class="qm-roi-ticks" aria-hidden="true">
+                  <span>-25%</span><span>0%</span><span>+25%</span>
+                </div>
+              </div>
+              <span class="qm-sub" id="kpi-turnover-note">净盈亏 $0.00 · 下注 $0.00 · 周转 <span id="kpi-turnover-mult">0.00x</span></span>
+              <span class="qm-explain">每押出 $1 的平均净回报（≥+3% 稳健）；总收益 = ROI × 周转</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Lower Right: Visual Execution Attribution (Unified Flat-Card Style) -->
+        <section class="panel exec-breakdown-panel" id="exec-breakdown-strip" aria-label="策略执行结构归因诊断">
+          <div class="bento-panel-head">
+            <div>
+              <h2>执行结构明细</h2>
+              <span class="bento-panel-sub">按成交方式拆解占比、胜率与盈亏贡献</span>
+            </div>
+            <span class="curve-meta-pill exec-fills-pill" id="kpi-total-fills">共 0 笔成交</span>
+          </div>
+
+          <!-- Stacked Channel Share Bar (Pure Flat Colors, No Gradient) -->
+          <div class="exec-share-block" aria-label="执行通道场次占比">
+            <div class="exec-share-bar">
+              <span class="exec-share-seg is-maker" id="exec-share-maker" style="width: 0%"></span>
+              <span class="exec-share-seg is-taker" id="exec-share-taker" style="width: 0%"></span>
+              <span class="exec-share-seg is-flip" id="exec-share-flip" style="width: 0%"></span>
+            </div>
+            <div class="exec-share-legend">
+              <span><i class="es-dot is-maker"></i>Maker <strong id="exec-pct-maker">0%</strong></span>
+              <span><i class="es-dot is-taker"></i>Taker <strong id="exec-pct-taker">0%</strong></span>
+              <span><i class="es-dot is-flip"></i>反转调仓 <strong id="exec-pct-flip">0%</strong></span>
+            </div>
+          </div>
+
+          <!-- 3 Unified Metric Sub-Cards (Matches Strategy Quality Cards) -->
+          <div class="exec-cards-stack">
+            <button type="button" class="exec-ch-card" id="exec-card-maker" data-jump-exec="maker">
+              <div class="exec-ch-top">
+                <div class="exec-ch-title">
+                  <i class="es-dot is-maker" aria-hidden="true"></i>
+                  <span class="exec-ch-name">单边 · Maker 挂单</span>
+                  <span class="exec-ch-cnt num" id="exec-maker-cnt">0 场</span>
+                </div>
+                <strong class="exec-card-pnl num" id="exec-maker-pnl">$0.00</strong>
+              </div>
+              <div class="exec-wr-track" aria-hidden="true">
+                <div class="exec-wr-fill is-maker" id="exec-maker-bar" style="width: 0%"></div>
+              </div>
+              <div class="exec-ch-foot">
+                <span class="exec-ch-wr num" id="exec-maker-wr">胜率 --</span>
+                <span class="exec-ch-avg num" id="exec-maker-avg">场均 --</span>
+              </div>
+            </button>
+
+            <button type="button" class="exec-ch-card" id="exec-card-taker" data-jump-exec="taker">
+              <div class="exec-ch-top">
+                <div class="exec-ch-title">
+                  <i class="es-dot is-taker" aria-hidden="true"></i>
+                  <span class="exec-ch-name">单边 · Taker 吃单</span>
+                  <span class="exec-ch-cnt num" id="exec-taker-cnt">0 场</span>
+                </div>
+                <strong class="exec-card-pnl num" id="exec-taker-pnl">$0.00</strong>
+              </div>
+              <div class="exec-wr-track" aria-hidden="true">
+                <div class="exec-wr-fill is-taker" id="exec-taker-bar" style="width: 0%"></div>
+              </div>
+              <div class="exec-ch-foot">
+                <span class="exec-ch-wr num" id="exec-taker-wr">胜率 --</span>
+                <span class="exec-ch-avg num" id="exec-taker-avg">场均 --</span>
+              </div>
+            </button>
+
+            <button type="button" class="exec-ch-card" id="exec-card-flip" data-jump-exec="flip">
+              <div class="exec-ch-top">
+                <div class="exec-ch-title">
+                  <i class="es-dot is-flip" aria-hidden="true"></i>
+                  <span class="exec-ch-name">双边 · 反转调仓</span>
+                  <span class="exec-ch-cnt num" id="exec-flip-cnt">0 场</span>
+                </div>
+                <strong class="exec-card-pnl num" id="exec-flip-pnl">$0.00</strong>
+              </div>
+              <div class="exec-wr-track" aria-hidden="true">
+                <div class="exec-wr-fill is-flip" id="exec-flip-bar" style="width: 0%"></div>
+              </div>
+              <div class="exec-ch-foot">
+                <span class="exec-ch-wr num" id="exec-flip-wr">胜率 --</span>
+                <span class="exec-ch-avg num" id="exec-flip-avg">场均 --</span>
+              </div>
+            </button>
           </div>
         </section>
       </div>
@@ -437,7 +551,7 @@
                   <div class="chart-hero-sub-row">
                     <span>开盘基准 <strong id="chart-stat-open">$0.00</strong></span>
                     <span class="chart-sub-dot" aria-hidden="true">·</span>
-                    <span>看涨概率 <strong class="up" id="chart-stat-prob-up">--%</strong></span>
+                    <span>看涨概率 <strong class="prob-teal" id="chart-stat-prob-up">--%</strong></span>
                     <span hidden><strong id="chart-stat-spot">$0.00</strong><strong id="chart-stat-high">$0.00</strong><strong id="chart-stat-low">$0.00</strong><strong id="chart-stat-range">0.0 bps</strong></span>
                   </div>
                 </div>
@@ -558,7 +672,7 @@
                 <button type="button" class="af-btn" data-af="fill">仅成交</button>
                 <button type="button" class="af-btn" data-af="thoughts">策略思路</button>
               </div>
-              <span class="orders-hint" id="console-feed-hint">点击定位左图</span>
+              <span class="orders-hint" id="console-feed-hint" hidden></span>
             </div>
 
             <ol class="action-feed" id="live-action-feed">
