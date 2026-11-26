@@ -50,8 +50,8 @@ PARAMS = {
     "QUEUE_CANCEL_CONSERVATIVE_MULT": 1.03,  # Conservative 3% buffer on physical L2 depth cap (never looser than reality)
     "BOOK_CONSISTENCY_TOLERANCE": 0.015,     # Allow 1-tick async WS frame jitter across Up/Down streams (still blocks arb/cross)
 
-    # 2. v3.3 Clean Entry Engine (Taker-First + Calm Maker Fallback + Unit-Variance t5)
-    "MODEL_T5_UNIT_VARIANCE": True,   # Normalize Student-t(5) by sqrt(5/3) to remove mid-range under-confidence
+    # 2. v3.3 Clean Entry Engine (Taker-First + Calm Maker Fallback + Calibrated Raw t5)
+    "MODEL_T5_UNIT_VARIANCE": False,  # 关闭 sqrt(5/3) 放大：避免中段 P* 虚高 +3%~+5.5% 击穿 0.035 边际导致开盘抢跑与卡点早加仓
     "ENABLE_MAKER_ENTRY": True,       # Keep zero-fee Maker fallback when Taker edge isn't met & spot is calm
     "DIRECTIONAL_ANTI_TOXICITY": True,# Only block adverse moves; ALLOW Taker IOC in the direction of spot momentum
     "ENTRY_MIN_TAU_S": 15.0,          # Tail freeze cutoff (tau < 15s: cancel resting quotes, hold inventory)

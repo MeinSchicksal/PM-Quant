@@ -33,7 +33,7 @@ class TestV210ExperimentalIntegrityAndDiagnostics(unittest.TestCase):
     def test_v210_preserves_v29_strategy_baseline_and_honest_latency_cap(self):
         self.assertEqual(config.VERSION, "v3.3")
         self.assertTrue(config.PARAMS["ENABLE_MAKER_ENTRY"])
-        self.assertTrue(config.PARAMS["MODEL_T5_UNIT_VARIANCE"])
+        self.assertFalse(config.PARAMS["MODEL_T5_UNIT_VARIANCE"])
         self.assertTrue(config.PARAMS["DIRECTIONAL_ANTI_TOXICITY"])
         self.assertEqual(config.PARAMS["MAX_LOTS"], 4)
         self.assertEqual(config.PARAMS["MAX_NET_LOTS"], 2)
