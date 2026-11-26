@@ -313,15 +313,15 @@ def _plan_inventory_management(
     )
     strict_book = bool(params.get("STRICT_BOOK_CONSISTENCY", True))
     held_book_valid = (bu is not None) and (au is None or bu < au)
-    dual_books_consistent = opp_book_valid
-    if strict_book:
-        if au is not None and ad is not None and bu is not None and bd is not None:
-            dual_books_consistent = (
-                (au + ad >= 1.0 - book_tol - 1e-9)
-                and (bu + bd <= 1.0 + book_tol + 1e-9)
-                and (bu < au)
-                and (bd < ad)
-            )
+    dual_quotes_consistent = True
+    if strict_book and au is not None and ad is not None and bu is not None and bd is not None:
+        dual_quotes_consistent = (
+            (au + ad >= 1.0 - book_tol - 1e-9)
+            and (bu + bd <= 1.0 + book_tol + 1e-9)
+            and (bu < au)
+            and (bd < ad)
+        )
+    dual_books_consistent = opp_book_valid and dual_quotes_consistent
     spot_is_stale = bool(getattr(spot, "is_stale", False))
     basis_anomaly = bool(params.get("BASIS_ANOMALY_ACTIVE", False))
     window_unwound = bool(params.get("WINDOW_UNWOUND", False))
@@ -339,7 +339,7 @@ def _plan_inventory_management(
         and not spot_is_stale
         and not basis_anomaly
         and held_book_valid
-        and (not strict_book or dual_books_consistent)
+        and dual_quotes_consistent
         and held_shares >= min_order_sh - 1e-4
         and opp_shares < 1e-4
         and tau_s >= tp_min_tau - 1e-6

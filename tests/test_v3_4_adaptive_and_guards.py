@@ -242,6 +242,16 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         self.assertEqual(d_finish.action, "taker_unwind")
         self.assertEqual(d_finish.size, 6.0)
 
+        # 3) Dead opposite book (opp asks/bids completely empty at $0.98) must NOT block selling winning leg
+        bu_98 = OrderBook(bids=[(0.98, 50.0)], asks=[], source_t=1000.0, received_at=1000.0)
+        bd_empty = OrderBook(bids=[], asks=[], source_t=1000.0, received_at=1000.0)
+        d_dead_opp = plan_decision(
+            Position(5.0, 2.60), Position(), bu_98, bd_empty, _spot(vol=15.0), tau_s=60.0,
+            params=p_tp, p_fair=0.98, entries_count=1,
+        )
+        self.assertEqual(d_dead_opp.action, "taker_unwind")
+        self.assertEqual(d_dead_opp.size, 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
