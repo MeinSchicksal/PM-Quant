@@ -320,6 +320,39 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         # Recent tail remains high resolution (last 200 ticks untouched)
         self.assertEqual([p["t"] for p in compacted[-200:]], [p["t"] for p in pts[-200:]])
 
+    def test_partial_fill_cannot_overshoot_max_net_lots_or_early_probe_cap(self):
+        p = dict(
+            config.PARAMS,
+            AVAILABLE_CAPITAL=100.0,
+            COMMITTED_WINDOW_COST=5.50,
+            SECONDS_SINCE_LAST_ENTRY=20.0,
+            ENTRY_SIDE_PROB=0.60,
+            HAS_WORKING_ORDERS=False,
+        )
+        bu, bd = _book(0.55, 0.56), _book(0.44, 0.45)
+
+        # Holding 9.85 shares: adding 5.0 would hit 14.85 > 10.0 -> MUST BLOCK
+        d_over10 = plan_decision(
+            Position(9.85, 5.50), Position(), bu, bd, _spot(vol=15.0), tau_s=160.0,
+            params=p, p_fair=0.70, entries_count=2,
+        )
+        self.assertEqual(d_over10.action, "wait")
+
+        # Holding 4.93 shares in first 60s early-probe phase (tau=250s > 240s) -> MUST BLOCK same-side add
+        d_early_dup = plan_decision(
+            Position(4.93, 2.80), Position(), bu, bd, _spot(vol=15.0), tau_s=250.0,
+            params=dict(p, COMMITTED_WINDOW_COST=2.80), p_fair=0.70, entries_count=1,
+        )
+        self.assertEqual(d_early_dup.action, "wait")
+
+        # Holding 4.93 shares after 60s (tau=160s <= 240s): 4.93 + 5.0 = 9.93 <= 10.0 -> ALLOWED
+        d_mid_ok = plan_decision(
+            Position(4.93, 2.80), Position(), bu, bd, _spot(vol=15.0), tau_s=160.0,
+            params=dict(p, COMMITTED_WINDOW_COST=2.80), p_fair=0.70, entries_count=1,
+        )
+        self.assertEqual(d_mid_ok.action, "taker_buy")
+        self.assertEqual(d_mid_ok.side, "Up")
+
 
 if __name__ == "__main__":
     unittest.main()

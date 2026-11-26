@@ -9,7 +9,7 @@ import json
 import time
 import signal
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,7 +87,7 @@ class PipelineDriver:
         # jobs (open-price calibration & next-window prewarm) so slow tasks never starve rollover.
         self._bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_slow")
         self._fast_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pm_bg_fast")
-        self._taker_book_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_taker_book")
+        self._taker_book_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pm_taker_book")
         self._reconcile_future = None
         self._open_calib_future = None
         self._prewarm_future = None
@@ -688,14 +688,25 @@ class PipelineDriver:
                         def _fetch_both():
                             f_du = self._taker_book_executor.submit(_one, "token_up", "Up")
                             f_dd = self._taker_book_executor.submit(_one, "token_down", "Down")
-                            try:
-                                r_u = f_du.result(timeout=0.75)
-                            except Exception:
+                            # Share a single parallel 0.65s deadline (< runner 0.85s timeout) so slow REST
+                            # falls back cleanly to fresh live book_ws instead of timing out at 0.75+0.75=1.50s.
+                            futures_wait([f_du, f_dd], timeout=0.65)
+                            r_u = None
+                            if f_du.done():
+                                try:
+                                    r_u = f_du.result(timeout=0.0)
+                                except Exception:
+                                    r_u = None
+                            if r_u is None:
                                 tok_u = active_tokens.get("token_up")
                                 r_u = self.book_ws.get_order_book(tok_u, max_age_s=1.5, require_recent_msg=True) if tok_u else None
-                            try:
-                                r_d = f_dd.result(timeout=0.75)
-                            except Exception:
+                            r_d = None
+                            if f_dd.done():
+                                try:
+                                    r_d = f_dd.result(timeout=0.0)
+                                except Exception:
+                                    r_d = None
+                            if r_d is None:
                                 tok_d = active_tokens.get("token_down")
                                 r_d = self.book_ws.get_order_book(tok_d, max_age_s=1.5, require_recent_msg=True) if tok_d else None
                             return (r_u, r_d)
