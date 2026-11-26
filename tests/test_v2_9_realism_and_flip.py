@@ -20,8 +20,8 @@ def _book(bid_px, bid_sz, ask_px, ask_sz, t=1200.0):
 
 class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
     def test_v29_version_and_calibrated_defaults(self):
-        self.assertEqual(config.VERSION, "v3.3")
-        self.assertEqual(config.BATCH_ID, "v3.3")
+        self.assertEqual(config.VERSION, "v3.4")
+        self.assertEqual(config.BATCH_ID, "v3.4")
         self.assertAlmostEqual(config.PARAMS["LATENCY_S"], 0.18, places=4)
         self.assertAlmostEqual(config.PARAMS["CANCEL_LATENCY_S"], 0.18, places=4)
         self.assertTrue(config.PARAMS["LATENCY_DYNAMIC_FROM_RTT"])
@@ -106,12 +106,19 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         )
         self.assertEqual(dec_soon.action, "wait")
 
-        # 4. Held Up is winning strongly (P*_held=0.94), opposite Down ask=$0.06 -> NOT adverse, must NOT bleed black-swan premium
+        # 4. Held Up is winning strongly (P*_held=0.94), opposite Down ask=$0.06 -> must NEVER bleed black-swan hedge on Down;
+        #    in v3.4 with ENABLE_EXTREME_TAKE_PROFIT=True, bid=$0.94 at tau=45s triggers Up take-profit unwind, while bid=$0.91 holds.
         b_up_win = _book(0.94, 50.0, 0.95, 50.0)
         b_dn_bs = _book(0.05, 50.0, 0.06, 50.0)
         spot_calm = SpotState(timestamp=1250.0, price=65080.0, open_price=65000.0, realized_vol_bps=14.0)
-        dec_hold = plan_decision(
+        dec_tp = plan_decision(
             pos_up, pos_dn, b_up_win, b_dn_bs, spot_calm,
+            tau_s=45.0, params=p_fast, p_fair=0.94, entries_count=1,
+        )
+        self.assertEqual(dec_tp.action, "taker_unwind")
+        self.assertEqual(dec_tp.side, "Up")
+        dec_hold = plan_decision(
+            pos_up, pos_dn, _book(0.91, 50.0, 0.92, 50.0), _book(0.08, 50.0, 0.09, 50.0), spot_calm,
             tau_s=45.0, params=p_fast, p_fair=0.94, entries_count=1,
         )
         self.assertEqual(dec_hold.action, "wait")

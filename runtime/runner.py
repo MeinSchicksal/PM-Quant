@@ -245,6 +245,12 @@ class PaperRunner:
         self._basis_ema = None
         self._basis_updated_t = 0.0
         self._basis_sample_count = 0
+        self._basis_anomaly_active = False
+        self._basis_recover_since = None
+        self._last_basis_dev_usd = 0.0
+        self.window_unwound = False
+        self._ext_div_since_up = None
+        self._ext_div_since_dn = None
         self._last_basis_poly_px = None
         self._last_basis_poly_t = 0.0
         self._last_hist_t = 0.0
@@ -348,6 +354,9 @@ class PaperRunner:
         self.realized_unwind_pnl = 0.0
         self.unwind_cost_basis = 0.0
         self.unwind_proceeds = 0.0
+        self.window_unwound = False
+        self._ext_div_since_up = None
+        self._ext_div_since_dn = None
         self.entries_count = 0
         self.flips_count = 0
         self.quote_attempts = 0
@@ -445,6 +454,7 @@ class PaperRunner:
         except (TypeError, ValueError):
             self.unwind_cost_basis = 0.0
             self.unwind_proceeds = 0.0
+        self.window_unwound = bool(raw.get("window_unwound", False)) or (self.unwind_proceeds > 1e-6)
 
         restored_actions = raw.get("actions")
         if isinstance(restored_actions, list):
@@ -791,6 +801,8 @@ class PaperRunner:
                 self.unwind_cost_basis = getattr(self, "unwind_cost_basis", 0.0) + cost_removed
                 self.unwind_proceeds = getattr(self, "unwind_proceeds", 0.0) + proceeds_unwind
                 self.realized_unwind_pnl = self.unwind_proceeds - self.unwind_cost_basis
+                if action.action == "taker_unwind":
+                    self.window_unwound = True
             if action.action == "taker_unwind":
                 purpose = "unwind"
             elif action.action == "taker_buy":
@@ -1021,7 +1033,33 @@ class PaperRunner:
                 if math.isfinite(inst_basis):
                     if self._basis_ema is None:
                         self._basis_ema = inst_basis
+                        self._last_basis_dev_usd = 0.0
+                        self._basis_anomaly_active = False
+                        self._basis_recover_since = None
                     else:
+                        # v3.4: Detect sudden spot-vs-Chainlink basis desync before Huber-clipping
+                        raw_dev = abs(inst_basis - self._basis_ema)
+                        self._last_basis_dev_usd = round(raw_dev, 2)
+                        b_max = float(config.PARAMS.get("BASIS_ANOMALY_MAX_USD", 0.0) or 0.0)
+                        b_rec = float(config.PARAMS.get("BASIS_ANOMALY_RECOVER_USD", 50.0) or 50.0)
+                        b_rec_s = float(config.PARAMS.get("BASIS_ANOMALY_RECOVER_S", 5.0) or 5.0)
+                        if self._basis_sample_count >= 10 and b_max > 0.0:
+                            if raw_dev > b_max:
+                                self._basis_anomaly_active = True
+                                self._basis_recover_since = None
+                            elif self._basis_anomaly_active:
+                                if raw_dev <= b_rec:
+                                    if self._basis_recover_since is None:
+                                        self._basis_recover_since = now
+                                    elif (now - self._basis_recover_since) >= b_rec_s:
+                                        self._basis_anomaly_active = False
+                                        self._basis_recover_since = None
+                                else:
+                                    self._basis_recover_since = None
+                        elif b_max <= 0.0:
+                            self._basis_anomaly_active = False
+                            self._basis_recover_since = None
+
                         # Huber-clip single-sample basis jump once warmed up + slow low-pass EMA
                         # so 60s V-shaped pullbacks do not jerk the exchange basis estimate.
                         sample = inst_basis
@@ -1037,6 +1075,9 @@ class PaperRunner:
                         self._last_basis_poly_t = float(poly_spot_ts)
 
         basis_max_age = float(config.PARAMS.get("BASIS_MAX_AGE_S", 120.0))
+        if self._basis_ema is not None and (now - self._basis_updated_t) > basis_max_age:
+            self._basis_anomaly_active = False
+            self._basis_recover_since = None
         basis_ready = (
             (self._basis_ema is not None)
             and ((now - self._basis_updated_t) <= basis_max_age)
@@ -1403,6 +1444,26 @@ class PaperRunner:
             self.pos_up.cash if net_gap > 1e-4
             else (self.pos_down.cash if net_gap < -1e-4 else 0.0)
         )
+        max_plaus = float(config.PARAMS.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0)
+        if max_plaus > 0.0 and book_up.best_ask is not None and book_down.best_ask is not None:
+            gap_u = float(p_fair) - float(book_up.best_ask)
+            gap_d = (1.0 - float(p_fair)) - float(book_down.best_ask)
+            if gap_u > max_plaus + 1e-9:
+                if getattr(self, "_ext_div_since_up", None) is None:
+                    self._ext_div_since_up = now
+            else:
+                self._ext_div_since_up = None
+            if gap_d > max_plaus + 1e-9:
+                if getattr(self, "_ext_div_since_dn", None) is None:
+                    self._ext_div_since_dn = now
+            else:
+                self._ext_div_since_dn = None
+        else:
+            self._ext_div_since_up = None
+            self._ext_div_since_dn = None
+        ext_div_up_s = max(0.0, now - self._ext_div_since_up) if getattr(self, "_ext_div_since_up", None) is not None else 0.0
+        ext_div_dn_s = max(0.0, now - self._ext_div_since_dn) if getattr(self, "_ext_div_since_dn", None) is not None else 0.0
+
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
@@ -1415,6 +1476,11 @@ class PaperRunner:
             CIRCUIT_BREAKER_ACTIVE=cb_active,
             CIRCUIT_BREAKER_REASON=cb_reason,
             BASIS_READY=basis_ready,
+            BASIS_ANOMALY_ACTIVE=bool(getattr(self, "_basis_anomaly_active", False)),
+            BASIS_DEV_USD=float(getattr(self, "_last_basis_dev_usd", 0.0) or 0.0),
+            EXTREME_DIV_UP_S=ext_div_up_s,
+            EXTREME_DIV_DOWN_S=ext_div_dn_s,
+            WINDOW_UNWOUND=bool(getattr(self, "window_unwound", False)),
             BOOK_MOM_UP=mkt_mom_up,
             BOOK_MOM_DOWN=mkt_mom_down,
             REQUIRE_STRIKE_AND_BASIS=(
@@ -1585,8 +1651,8 @@ class PaperRunner:
                 else:
                     held_basis_flip = 0.0
                     max_flip_pair = 2.0
-                    base_tk = float(config.PARAMS.get("MIN_TAKER_EDGE", 0.038))
-                    req_edge = required_entry_edge(sig_px, tau, base_tk, config.PARAMS)
+                    base_tk = float(config.PARAMS.get("MIN_TAKER_EDGE", 0.035))
+                    req_edge = required_entry_edge(sig_px, tau, base_tk, config.PARAMS, vol_bps=vol_bps)
 
                 if action.utility is None:
                     return raw_cap
@@ -1603,7 +1669,10 @@ class PaperRunner:
                     req_p = (
                         req_edge
                         if (is_flip_order or is_pyramid_order)
-                        else required_entry_edge(p, tau, float(config.PARAMS.get("MIN_TAKER_EDGE", 0.038)), config.PARAMS, p_side=p_est)
+                        else required_entry_edge(
+                            p, tau, float(config.PARAMS.get("MIN_TAKER_EDGE", 0.035)),
+                            config.PARAMS, p_side=p_est, vol_bps=vol_bps,
+                        )
                     )
                     if (p_est - (p + f_p)) >= req_p - 1e-6:
                         best_lim = p
@@ -2335,6 +2404,9 @@ class PaperRunner:
             "realized_unwind_pnl": round(getattr(self, "realized_unwind_pnl", 0.0), 4),
             "unwind_cost_basis": round(getattr(self, "unwind_cost_basis", 0.0), 4),
             "unwind_proceeds": round(getattr(self, "unwind_proceeds", 0.0), 4),
+            "window_unwound": bool(getattr(self, "window_unwound", False)),
+            "basis_anomaly_active": bool(getattr(self, "_basis_anomaly_active", False)),
+            "basis_dev_usd": round(float(getattr(self, "_last_basis_dev_usd", 0.0) or 0.0), 2),
             "network": getattr(self, "net_stats", {}),
             "api_schema_guard": getattr(self, "_api_schema_guard", {"paused": False, "source": "", "reason": ""}),
             "last_decision": self.decisions[-1] if self.decisions else None,

@@ -30,12 +30,14 @@ def required_entry_edge(
     base_edge: float,
     params: Dict[str, float],
     p_side: Optional[float] = None,
+    vol_bps: Optional[float] = None,
 ) -> float:
-    """Compute dynamic required net edge accounting for odds skew & optional early tau.
+    """Compute dynamic required net edge accounting for odds skew, early tau & storm vol.
 
     - At or below `PRICE_EDGE_PIVOT` ($0.55), no extra price premium.
     - Above the pivot, adds `(price - pivot) * PRICE_EDGE_SLOPE` to protect average entry odds.
     - Above `EARLY_TAU_PIVOT_S`, adds optional smooth early-window premium up to `EARLY_TAU_MAX_PREMIUM`.
+    - Above `VOL_EDGE_PIVOT_BPS` (25 bps), adds smooth volatility cushion up to `VOL_EDGE_MAX_PREMIUM`.
     """
     px_pivot = float(params.get("PRICE_EDGE_PIVOT", 0.55))
     px_slope = max(0.0, float(params.get("PRICE_EDGE_SLOPE", 0.05)))
@@ -49,7 +51,31 @@ def required_entry_edge(
     else:
         tau_prem = 0.0
 
-    return float(base_edge) + px_prem + tau_prem
+    vol_prem = 0.0
+    if vol_bps is not None:
+        vol_pivot = float(params.get("VOL_EDGE_PIVOT_BPS", 25.0))
+        vol_slope = max(0.0, float(params.get("VOL_EDGE_SLOPE", 0.0)))
+        vol_max_prem = max(0.0, float(params.get("VOL_EDGE_MAX_PREMIUM", 0.0)))
+        if float(vol_bps) > vol_pivot and vol_slope > 0.0 and vol_max_prem > 0.0:
+            vol_prem = min(vol_max_prem, (float(vol_bps) - vol_pivot) * vol_slope)
+
+    return float(base_edge) + px_prem + tau_prem + vol_prem
+
+
+def _effective_adverse_spot_thresh(live_vol: float, params: Dict[str, float]) -> float:
+    """Compute dimensionless 2.5s adverse-spot shock threshold scaled by live 5m vol.
+
+    Preserves the tight calm-market floor (`min(ANTI_TOXICITY_SHOCK_BPS, ENTRY_MAX_ADVERSE_SPOT_BPS)`)
+    while smoothly scaling up in volatile sessions using `1.05 * sigma_2.5s` up to `VOL_ADAPTIVE_SHOCK_CAP_BPS`.
+    """
+    anti_toxic_bps = float(params.get("ANTI_TOXICITY_SHOCK_BPS", 2.5))
+    max_adverse_spot = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
+    base = min(anti_toxic_bps, max_adverse_spot) if max_adverse_spot > 0.0 else anti_toxic_bps
+    if not bool(params.get("VOL_ADAPTIVE_SHOCK", False)):
+        return base
+    sigma_2p5 = max(0.0, float(live_vol)) * math.sqrt(2.5 / 300.0)
+    cap = float(params.get("VOL_ADAPTIVE_SHOCK_CAP_BPS", 4.5))
+    return max(base, min(cap, 1.05 * sigma_2p5))
 
 
 def _walk_ask_vwap(book: OrderBook, size: float) -> tuple:
@@ -71,6 +97,28 @@ def _walk_ask_vwap(book: OrderBook, size: float) -> tuple:
     return filled, notional / filled, worst_px
 
 
+def _walk_bid_vwap(book: OrderBook, size: float, min_px: float = 0.0) -> tuple:
+    """Compute visible L2 bid (filled, vwap, worst_px) at or above `min_px` before Taker sell IOC."""
+    filled = 0.0
+    notional = 0.0
+    worst_px = 0.0
+    for px, sz in (getattr(book, "bids", None) or []):
+        fpx = float(px)
+        if fpx < min_px - 1e-6:
+            break
+        if filled >= size - 1e-9:
+            break
+        take = min(size - filled, float(sz))
+        if take <= 0.0:
+            continue
+        filled += take
+        notional += take * fpx
+        worst_px = fpx
+    if filled <= 1e-9:
+        return 0.0, 0.0, 0.0
+    return filled, notional / filled, worst_px
+
+
 def _compute_ioc_buy_limit(
     sig_px: float,
     p_side: float,
@@ -83,6 +131,7 @@ def _compute_ioc_buy_limit(
     max_pair_cost: Optional[float] = None,
     held_basis: float = 0.0,
     min_sweep_px: Optional[float] = None,
+    vol_bps: Optional[float] = None,
 ) -> float:
     """Compute exact pre-submission IOC buy limit price (1c tick).
 
@@ -101,7 +150,11 @@ def _compute_ioc_buy_limit(
         f_p = taker_fee_per_share(p, fee_rate)
         if max_pair_cost is not None and (held_basis + p + f_p > max_pair_cost + 1e-6):
             continue
-        req = required_entry_edge(p, tau_s, base_edge, params, p_side=p_side) if use_dynamic_edge else base_edge
+        req = (
+            required_entry_edge(p, tau_s, base_edge, params, p_side=p_side, vol_bps=vol_bps)
+            if use_dynamic_edge
+            else base_edge
+        )
         if (p_side - (p + f_p)) >= req - 1e-6:
             return p
     return round(floor_tick, 2)
@@ -268,11 +321,57 @@ def _plan_inventory_management(
                 and (bd < ad)
             )
     spot_is_stale = bool(getattr(spot, "is_stale", False))
+    basis_anomaly = bool(params.get("BASIS_ANOMALY_ACTIVE", False))
+
+    # 0) v3.4 Extreme Take-Profit Unwind (inventory-reducing: allowed even under circuit breaker):
+    #    Locks in >= $0.94 L2 bid VWAP while >= 30s remains and model confirms >= 90% lead,
+    #    where Polymarket taker fee vanishes (~$0.004/sh) and reversal tail risk dominates.
+    tp_enabled = bool(params.get("ENABLE_EXTREME_TAKE_PROFIT", False))
+    tp_min_bid = float(params.get("TAKE_PROFIT_MIN_BID", 0.94))
+    tp_min_tau = float(params.get("TAKE_PROFIT_MIN_TAU_S", 30.0))
+    tp_min_prob = float(params.get("TAKE_PROFIT_MIN_PROB", 0.90))
+    if (
+        tp_enabled
+        and not spot_is_stale
+        and not basis_anomaly
+        and held_shares >= min_order_sh - 1e-4
+        and opp_shares < 1e-4
+        and tau_s >= tp_min_tau - 1e-6
+        and p_fair_held >= tp_min_prob - 1e-6
+        and held_book.best_bid is not None
+        and held_book.best_bid >= tp_min_bid - 1e-6
+    ):
+        vis_filled, vis_vwap, _ = _walk_bid_vwap(held_book, held_shares, min_px=tp_min_bid)
+        if vis_filled >= held_shares - 1e-6 and vis_vwap >= tp_min_bid - 1e-6:
+            fee = taker_fee_per_share(vis_vwap, fee_rate)
+            net_unit = vis_vwap - fee
+            sell_lim = round(tp_min_bid, 2)
+            return Decision(
+                action="taker_unwind",
+                side=held_side,
+                price=round(vis_vwap, 4),
+                size=held_shares,
+                utility=round(held_shares * (net_unit - held_basis), 4),
+                limit_price=sell_lim,
+                reason=(
+                    f"v3.4 极端浮盈落袋 IOC: 卖出 {held_shares:.0f} 股 {held_side} "
+                    f"@ bid=${vis_vwap:.3f} (限价>=${sell_lim:.2f}, 均价=${held_basis:.2f}, "
+                    f"P*={p_fair_held:.2f}, tau={tau_s:.0f}s)"
+                ),
+                intent="take_profit_unwind",
+            )
 
     # Under reduce-only circuit breaker, never open secondary risk (pyramid add / reversal flip)
     if circuit_breaker_active:
         return _wait(
             f"Circuit breaker reduce-only: 持有 {held_shares:.0f} 股 {held_side} @ ${held_basis:.2f}，禁止加仓/反手",
+            urgent=True,
+        )
+
+    if basis_anomaly:
+        b_dev = float(params.get("BASIS_DEV_USD", 0.0) or 0.0)
+        return _wait(
+            f"v3.4: 基差瞬变脱锚防灾暂停 (偏离=${b_dev:.1f})，持有 {held_shares:.0f} 股 {held_side} 禁止加仓/反手",
             urgent=True,
         )
 
@@ -286,6 +385,8 @@ def _plan_inventory_management(
     max_entry_vol = float(params.get("MAX_ENTRY_VOL_BPS", 75.0))
     live_vol = float(getattr(spot, "realized_vol_bps", 15.0) or 15.0)
     is_storm_vol = max_entry_vol > 0 and live_vol > max_entry_vol
+    maker_max_vol = float(params.get("MAKER_MAX_VOL_BPS", 0.0) or 0.0)
+    maker_vol_ok = (maker_max_vol <= 0.0) or (live_vol <= maker_max_vol + 1e-9)
     is_toxic_or_stale = (
         bool(getattr(spot, "is_toxic_shock", False))
         or vel_bps >= anti_toxic_bps
@@ -311,8 +412,10 @@ def _plan_inventory_management(
     max_taker_spread = float(params.get("MAX_TAKER_SPREAD", max_book_spread))
     max_quote_attempts = int(params.get("MAX_QUOTE_ATTEMPTS", 3))
     vel_signed_inv = float(getattr(spot, "velocity_bps", 0.0) or 0.0)
-    max_adverse_spot = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
-    adverse_thresh = min(anti_toxic_bps, max_adverse_spot) if max_adverse_spot > 0.0 else anti_toxic_bps
+    adverse_thresh = _effective_adverse_spot_thresh(live_vol, params)
+    max_plaus_edge = float(params.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0)
+    max_plaus_persist = float(params.get("MAX_PLAUSIBLE_EDGE_PERSIST_S", 3.0) or 3.0)
+    held_div_dur = float(params.get("EXTREME_DIV_UP_S" if held_side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
 
     if (
         held_shares >= lot_size - 1e-4
@@ -384,22 +487,29 @@ def _plan_inventory_management(
                 vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(held_book, lot_size)
                 eff_ask = vis_vwap if vis_filled >= lot_size - 1e-6 else ask
                 if vis_filled >= lot_size - 1e-6 and p_min_px <= eff_ask <= p_max_px + 1e-6:
+                    div_anomalous = (
+                        max_plaus_edge > 0.0
+                        and (p_fair_held - eff_ask) > max_plaus_edge + 1e-9
+                        and held_div_dur >= max_plaus_persist - 1e-6
+                    )
                     fee = taker_fee_per_share(eff_ask, fee_rate)
                     need_cash = lot_size * (eff_ask + fee)
                     tk_edge = p_fair_held - (eff_ask + fee)
                     req_pyr_edge = (
-                        required_entry_edge(eff_ask, tau_s, p_tk_edge, params, p_side=p_fair_held)
+                        required_entry_edge(eff_ask, tau_s, p_tk_edge, params, p_side=p_fair_held, vol_bps=live_vol)
                         if use_dyn_pyr_edge
                         else p_tk_edge
                     )
                     if (
-                        tk_edge >= req_pyr_edge - 1e-9
+                        not div_anomalous
+                        and tk_edge >= req_pyr_edge - 1e-9
                         and available_cap + 1e-9 >= need_cash
                         and committed + need_cash <= window_budget + 1e-9
                     ):
                         ioc_lim = _compute_ioc_buy_limit(
                             eff_ask, p_fair_held, p_tk_edge, tau_s, fee_rate, params,
                             p_max_px, use_dynamic_edge=use_dyn_pyr_edge, min_sweep_px=vis_worst,
+                            vol_bps=live_vol,
                         )
                         return Decision(
                             action="taker_buy",
@@ -415,6 +525,7 @@ def _plan_inventory_management(
             mk_cap = min(p_max_px, 0.78)
             if (
                 pyr_allow_maker
+                and maker_vol_ok
                 and not is_toxic_or_stale
                 and not _has_heavy_ask_wall(held_book, params)
                 and quote_attempts < max_quote_attempts
@@ -531,6 +642,7 @@ def _plan_inventory_management(
             bid = opp_book.best_bid
             if (
                 flip_allow_maker
+                and maker_vol_ok
                 and not is_toxic_or_stale
                 and not _has_heavy_ask_wall(opp_book, params)
                 and quote_attempts < max_quote_attempts
@@ -635,6 +747,15 @@ def plan_decision(
         return _wait(f"Circuit breaker active ({cb_msg}): new Leg-1 disabled", urgent=True)
 
     if (
+        not bool(params.get("ALLOW_REENTRY_AFTER_UNWIND", False))
+        and bool(params.get("WINDOW_UNWOUND", False))
+    ):
+        return _wait(
+            "v3.4: 本窗已完成极端浮盈落袋，停止二次开仓并观望至结算",
+            urgent=True,
+        )
+
+    if (
         not bool(params.get("ALLOW_REENTRY_AFTER_PAIR", True))
         and u_shares > 1e-4
         and d_shares > 1e-4
@@ -702,6 +823,10 @@ def plan_decision(
     if getattr(spot, "is_stale", False):
         return _wait("v2.3: Spot price stale, holding off entry", urgent=True)
 
+    if bool(params.get("BASIS_ANOMALY_ACTIVE", False)):
+        b_dev = float(params.get("BASIS_DEV_USD", 0.0) or 0.0)
+        return _wait(f"v3.4: 基差瞬变脱锚防灾暂停 (偏离=${b_dev:.1f})", urgent=True)
+
     # Book consistency check (no fake shifting; tolerates 1-tick async WS jitter)
     au, ad = book_up.best_ask, book_down.best_ask
     bu, bd = book_up.best_bid, book_down.best_bid
@@ -743,10 +868,16 @@ def plan_decision(
     budget_blocked_msg = None
     knife_blocked_msg = None
     knife_urgent = False
+    div_blocked_msg = None
+    high_vol_maker_msg = None
 
     enable_book_drop = bool(params.get("ENABLE_BOOK_DROP_GUARD", False))
     book_drop_max = float(params.get("BOOK_DROP_GUARD_MAX", 0.03))
-    max_adverse_spot_bps = float(params.get("ENTRY_MAX_ADVERSE_SPOT_BPS", 0.0) or 0.0)
+    adverse_spot_thresh = _effective_adverse_spot_thresh(live_vol, params)
+    maker_max_vol = float(params.get("MAKER_MAX_VOL_BPS", 0.0) or 0.0)
+    maker_vol_ok = (maker_max_vol <= 0.0) or (live_vol <= maker_max_vol + 1e-9)
+    max_plaus_edge = float(params.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0)
+    max_plaus_persist = float(params.get("MAX_PLAUSIBLE_EDGE_PERSIST_S", 3.0) or 3.0)
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
         if p_side < min_prob:
@@ -764,31 +895,37 @@ def plan_decision(
                 continue
 
         # Directional toxicity: block entry if spot is moving sharply AGAINST this side
-        adverse_spot_thresh = (
-            min(anti_toxic_bps, max_adverse_spot_bps)
-            if max_adverse_spot_bps > 0.0
-            else anti_toxic_bps
-        )
         adverse_shock = (
             (side == "Up" and vel_signed <= -adverse_spot_thresh)
             or (side == "Down" and vel_signed >= adverse_spot_thresh)
         )
         if adverse_shock:
             knife_blocked_msg = (
-                f"v3.3: 现货逆向急跌防接飞刀 ({side}, 现货速度={vel_signed:+.1f} bps)"
+                f"v3.3: 现货逆向急跌防接飞刀 ({side}, 现货速度={vel_signed:+.1f} bps, 阈值={adverse_spot_thresh:.1f} bps)"
             )
             continue
 
+        side_div_dur = float(params.get("EXTREME_DIV_UP_S" if side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
         ask = tb.best_ask
         if ask is not None and min_entry_px <= ask <= max_entry_px + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
             if min_entry_px <= eff_ask <= max_entry_px + 1e-6 and vis_filled >= size - 1e-6:
+                if (
+                    max_plaus_edge > 0.0
+                    and (p_side - eff_ask) > max_plaus_edge + 1e-9
+                    and side_div_dur >= max_plaus_persist - 1e-6
+                ):
+                    div_blocked_msg = (
+                        f"v3.4: 持续极端分歧防灾拦截 ({side} P*={p_side:.2f} vs ask=${eff_ask:.2f}, "
+                        f"持续{side_div_dur:.1f}s >= {max_plaus_persist:.1f}s)"
+                    )
+                    continue
                 fee = taker_fee_per_share(eff_ask, fee_rate)
                 need_cash = size * (eff_ask + fee)
                 taker_edge = p_side - (eff_ask + fee)
-                req_tk_edge = required_entry_edge(eff_ask, tau_s, min_taker_edge, params, p_side=p_side)
+                req_tk_edge = required_entry_edge(eff_ask, tau_s, min_taker_edge, params, p_side=p_side, vol_bps=live_vol)
                 if taker_edge >= req_tk_edge - 1e-9:
                     if available_cap + 1e-9 < need_cash:
                         budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
@@ -798,11 +935,11 @@ def plan_decision(
                         if best_taker is None or taker_edge > best_taker[0]:
                             ioc_lim = _compute_ioc_buy_limit(
                                 eff_ask, p_side, min_taker_edge, tau_s, fee_rate, params, max_entry_px,
-                                min_sweep_px=vis_worst,
+                                min_sweep_px=vis_worst, vol_bps=live_vol,
                             )
                             best_taker = (taker_edge, side, eff_ask, fee, ioc_lim)
 
-        # Passive Maker fallback: strictly forbidden during ANY spot shock (adverse selection)
+        # Passive Maker fallback: strictly forbidden during ANY spot shock or high-vol regime
         bid = tb.best_bid
         if (
             enable_maker
@@ -812,21 +949,36 @@ def plan_decision(
             and bid is not None
             and min_entry_px <= bid <= max_entry_px + 1e-6
         ):
-            maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
-            maker_px = min(max_entry_px, max(min_entry_px, maker_px))
-            need_cash = size * maker_px
-            maker_edge = p_side - maker_px
-            req_mk_edge = required_entry_edge(maker_px, tau_s, min_maker_edge, params, p_side=p_side)
-            if maker_edge >= req_mk_edge - 1e-9:
-                if available_cap + 1e-9 < need_cash:
-                    budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
-                elif committed + need_cash > window_budget + 1e-9:
-                    budget_blocked_msg = f"v3.3: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓"
-                elif _has_heavy_ask_wall(tb, params):
-                    wall_blocked_msg = f"v3.3: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
+            if not maker_vol_ok:
+                high_vol_maker_msg = (
+                    f"v3.4: 高波动暂停被动 Maker 挂单 (5m波动率 {live_vol:.1f} > {maker_max_vol:.0f} bps)"
+                )
+            else:
+                maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
+                maker_px = min(max_entry_px, max(min_entry_px, maker_px))
+                if (
+                    max_plaus_edge > 0.0
+                    and (p_side - maker_px) > max_plaus_edge + 1e-9
+                    and side_div_dur >= max_plaus_persist - 1e-6
+                ):
+                    div_blocked_msg = (
+                        f"v3.4: 持续极端分歧拦截 Maker ({side} P*={p_side:.2f} vs bid=${maker_px:.2f}, "
+                        f"持续{side_div_dur:.1f}s)"
+                    )
                 else:
-                    if best_maker is None or maker_edge > best_maker[0]:
-                        best_maker = (maker_edge, side, maker_px, p_side)
+                    need_cash = size * maker_px
+                    maker_edge = p_side - maker_px
+                    req_mk_edge = required_entry_edge(maker_px, tau_s, min_maker_edge, params, p_side=p_side, vol_bps=live_vol)
+                    if maker_edge >= req_mk_edge - 1e-9:
+                        if available_cap + 1e-9 < need_cash:
+                            budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
+                        elif committed + need_cash > window_budget + 1e-9:
+                            budget_blocked_msg = f"v3.3: 单窗成本包络已用 ${committed:.2f}/${window_budget:.2f}，拒绝继续开仓"
+                        elif _has_heavy_ask_wall(tb, params):
+                            wall_blocked_msg = f"v3.3: 盘口卖墙压盘拦截 Maker 挂单 ({side} bid=${maker_px:.2f}, P*={p_side:.2f})"
+                        else:
+                            if best_maker is None or maker_edge > best_maker[0]:
+                                best_maker = (maker_edge, side, maker_px, p_side)
 
     # Clean Taker-First routing: take immediately when post-fee edge clears; fall back to Maker in calm wide spreads
     if best_taker is not None:
@@ -839,7 +991,7 @@ def plan_decision(
             size=size,
             utility=round(edge, 4),
             limit_price=ioc_lim,
-            reason=f"v3.3 净边际吃单 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+            reason=f"v3.4 净边际吃单 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
             intent="entry_lead",
         )
 
@@ -851,18 +1003,24 @@ def plan_decision(
             price=maker_px,
             size=size,
             utility=round(edge, 4),
-            reason=f"v3.3 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
+            reason=f"v3.4 净边际挂单 Maker: {side} bid=${maker_px:.2f} (P*={p_side:.2f}, 零费边际={edge:+.3f})",
             intent="entry_lead",
         )
 
     if is_shock_any:
         return _wait(f"v2.9: Anti-toxicity spot shock ({vel_bps:.1f} bps), pulling quotes", urgent=True)
 
+    if div_blocked_msg:
+        return _wait(div_blocked_msg, urgent=True)
+
     if knife_blocked_msg:
         return _wait(knife_blocked_msg, urgent=knife_urgent)
 
     if budget_blocked_msg:
         return _wait(budget_blocked_msg, urgent=True)
+
+    if high_vol_maker_msg:
+        return _wait(high_vol_maker_msg, urgent=True)
 
     if wall_blocked_msg:
         # Urgent cancel so any already-resting passive bid directly in front of

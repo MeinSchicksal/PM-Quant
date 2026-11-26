@@ -1,4 +1,4 @@
-"""PM-Quant Configuration & Single Source of Truth (v3.3).
+"""PM-Quant Configuration & Single Source of Truth (v3.4).
 
 All model parameters, version identity, and filesystem layout are derived here.
 No version logic or branching should exist in downstream modules.
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # Semantic Version Identity (v<Major>.<Minor>)
-VERSION = "v3.3"
+VERSION = "v3.4"
 BATCH_ID = VERSION
 
 # Root Directory
@@ -69,6 +69,13 @@ PARAMS = {
     "PRICE_EDGE_SLOPE": 0.05,         # +0.5% required edge per +$0.10 above $0.55
     "EARLY_TAU_PIVOT_S": 240.0,
     "EARLY_TAU_MAX_PREMIUM": 0.0,     # Disabled: first-60s 5-share cap already handles early-window noise
+    # v3.4 Volatility-Adaptive Physics (zero change in calm <=25bps regime; smooth protection in storms):
+    "VOL_EDGE_PIVOT_BPS": 25.0,       # <=25 bps (~85% of session): zero extra vol edge premium
+    "VOL_EDGE_SLOPE": 0.0008,         # +0.8% required edge per +10 bps realized vol above pivot
+    "VOL_EDGE_MAX_PREMIUM": 0.030,    # Cap vol edge premium at +3.0%
+    "MAKER_MAX_VOL_BPS": 35.0,        # Pause passive Maker bids when 5m vol > 35 bps (avoid toxic sweeps)
+    "VOL_ADAPTIVE_SHOCK": True,       # Scale adverse-spot threshold with 2.5s physical sigma (floored at base)
+    "VOL_ADAPTIVE_SHOCK_CAP_BPS": 4.5,# Cap adapted adverse-spot threshold so true crashes still trigger block
     "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
     "MAKER_MIN_WALL_SHARES": 200.0,
     "MAX_ENTRY_VOL_BPS": 75.0,        # Extreme liquidation cascade storm guard (pause new entries when 5m vol > 75 bps)
@@ -78,11 +85,16 @@ PARAMS = {
     "MAX_QUEUE_WAIT_S": 8.0,          # Shorter Maker queue wait (8s) so stale quotes don't hang
     "QUEUE_HEAD_PROTECT_SHARES": 25.0,# Protect resting Maker quote if remaining queue_ahead <= 25 shares at best_bid
     "ANTI_TOXICITY_SHOCK_BPS": 2.5,   # Pull resting maker quotes when 2-3s spot move >= 2.5 bps
-    # Pre-trade knife-drop guard (zero look-ahead):
+    # Pre-trade knife-drop & anomaly/desync guards (zero look-ahead):
     "ENABLE_BOOK_DROP_GUARD": False,  # 默认关闭：单看盘口跌3¢不结合现货方向易误杀正常折价好单，保留开关备研
     "BOOK_DROP_GUARD_WINDOW_S": 5.0,  # 盘口急砸回望窗口（秒）
     "BOOK_DROP_GUARD_MAX": 0.03,      # 5s 内盘口跌幅 >= $0.03 触发阈值
     "ENTRY_MAX_ADVERSE_SPOT_BPS": 1.5,# 方向性防接飞刀：现货 2-3s 已反向急跌超 1.5 bps 时禁止逆势开仓
+    "BASIS_ANOMALY_MAX_USD": 80.0,    # 基差瞬变脱锚熔断：热身后 |inst_basis - basis_ema| > $80 暂停开仓/加仓
+    "BASIS_ANOMALY_RECOVER_USD": 50.0,# 基差脱锚恢复回滞线：偏离回落至 <= $50 并稳定后自动恢复
+    "BASIS_ANOMALY_RECOVER_S": 5.0,   # 基差脱锚稳定恢复所需连续秒数
+    "MAX_PLAUSIBLE_EDGE": 0.24,       # 持续性极端分歧拦截：P* - ask > 24% 持续超 3s 视为数据源异常/知情大单压盘
+    "MAX_PLAUSIBLE_EDGE_PERSIST_S": 3.0, # 放行 0~3s 瞬时极速现货滞后套利，仅拦截持续不收敛的异常分歧
 
     # 3. Position Management (v3.3: Trend-Confirming Add + Breakeven-Gated Dynamic Flip)
     "ALLOW_REENTRY_AFTER_PAIR": False,# 完成反手后不再同窗反复重开，防锯齿磨损
@@ -121,6 +133,12 @@ PARAMS = {
     "FLIP_TARGET_PROFIT_USD": 0.0,    # 终局目标仅求保本，不强行多买额外敞口
     "FLIP_MAX_SHARES": 12.0,          # 单次反手上限 12 股（可完整覆盖 10 股中盘仓位翻面）
     "FLIP_MAX_TOTAL_WINDOW_COST": 14.0,# 含反手单窗总投入上限 $14.00（与 10 股持仓翻面保本配平）
+    # v3.4 Phase 2: Extreme Take-Profit Unwind (169-window L2 replay: +$51.28 -> +$68.64, MaxDD -$16.12 -> -$11.44, t=+2.63)
+    "ENABLE_EXTREME_TAKE_PROFIT": True,  # 极端浮盈主动落袋总开关（已通过 169 场全量 L2 延迟回放验证）
+    "TAKE_PROFIT_MIN_BID": 0.94,         # 真实 L2 买盘可完整吃下的最低均价与卖单 IOC 硬底价（手续费仅 ~$0.004/股）
+    "TAKE_PROFIT_MIN_TAU_S": 30.0,       # 仅在剩余 >=30s 仍有翻车风险时落袋（最后 30s TWAP 已大半锁定，持有至结算）
+    "TAKE_PROFIT_MIN_PROB": 0.90,        # 模型同步确认大幅领先（防买一偶发异常高价误触）
+    "ALLOW_REENTRY_AFTER_UNWIND": False, # 止盈落袋后本窗彻底收工，严禁二次开仓反复磨损
 
     # 4. Realism & Data Integrity Guards (Zero Self-Deception)
     "STRICT_BOOK_CONSISTENCY": True,  # Reject inconsistent/crossed snapshots instead of shifting prices artificially
@@ -216,6 +234,13 @@ def validate_params(params=None):
     max_tau = float(p.get("ENTRY_MAX_TAU_S", 280.0))
     if late_tau > 0.0 and not (min_tau <= late_tau <= max_tau):
         errors.append(f"LATE_NO_NEW_ENTRY_TAU_S={late_tau} must lie in [{min_tau}, {max_tau}]")
+    b_max = float(p.get("BASIS_ANOMALY_MAX_USD", 0.0) or 0.0)
+    b_rec = float(p.get("BASIS_ANOMALY_RECOVER_USD", 0.0) or 0.0)
+    if b_max > 0.0 and b_rec > b_max:
+        errors.append(f"BASIS_ANOMALY_RECOVER_USD={b_rec} exceeds BASIS_ANOMALY_MAX_USD={b_max}")
+    tp_bid = float(p.get("TAKE_PROFIT_MIN_BID", 0.94))
+    if not (0.50 <= tp_bid <= 0.99):
+        errors.append(f"TAKE_PROFIT_MIN_BID={tp_bid} must lie in [0.50, 0.99]")
     if errors:
         raise ValueError("Inconsistent risk parameters: " + "; ".join(errors))
     return True

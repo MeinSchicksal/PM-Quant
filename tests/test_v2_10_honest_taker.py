@@ -31,7 +31,7 @@ def _book(bid_px, bid_sz, ask_px, ask_sz, t=1200.0):
 
 class TestV210ExperimentalIntegrityAndDiagnostics(unittest.TestCase):
     def test_v210_preserves_v29_strategy_baseline_and_honest_latency_cap(self):
-        self.assertEqual(config.VERSION, "v3.3")
+        self.assertEqual(config.VERSION, "v3.4")
         self.assertTrue(config.PARAMS["ENABLE_MAKER_ENTRY"])
         self.assertFalse(config.PARAMS["MODEL_T5_UNIT_VARIANCE"])
         self.assertTrue(config.PARAMS["DIRECTIONAL_ANTI_TOXICITY"])
