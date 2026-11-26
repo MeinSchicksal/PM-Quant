@@ -133,9 +133,9 @@ PARAMS = {
     "FLIP_TARGET_PROFIT_USD": 0.0,    # 终局目标仅求保本，不强行多买额外敞口
     "FLIP_MAX_SHARES": 12.0,          # 单次反手上限 12 股（可完整覆盖 10 股中盘仓位翻面）
     "FLIP_MAX_TOTAL_WINDOW_COST": 14.0,# 含反手单窗总投入上限 $14.00（与 10 股持仓翻面保本配平）
-    # v3.4 Phase 2: Extreme Take-Profit Unwind (169-window L2 replay: +$51.28 -> +$68.64, MaxDD -$16.12 -> -$11.44, t=+2.63)
-    "ENABLE_EXTREME_TAKE_PROFIT": True,  # 极端浮盈主动落袋总开关（已通过 169 场全量 L2 延迟回放验证）
-    "TAKE_PROFIT_MIN_BID": 0.94,         # 真实 L2 买盘可完整吃下的最低均价与卖单 IOC 硬底价（手续费仅 ~$0.004/股）
+    # v3.4 Phase 2: Extreme Take-Profit Unwind (OFF by default: 8-day 1004-win reversal 4.1% < 6.4% cost; 4-day L2 hold-to-expiry +$321.83 > TP +$298.68)
+    "ENABLE_EXTREME_TAKE_PROFIT": False, # 经 8 天 1004 场与 4 天全量 L2 实证：默认关闭提前卖出，完整保留持有至结算的正期望收益
+    "TAKE_PROFIT_MIN_BID": 0.94,         # 保留开关与硬底价逻辑供未来研究（默认关闭不触发）
     "TAKE_PROFIT_MIN_TAU_S": 30.0,       # 仅在剩余 >=30s 仍有翻车风险时落袋（最后 30s TWAP 已大半锁定，持有至结算）
     "TAKE_PROFIT_MIN_PROB": 0.90,        # 模型同步确认大幅领先（防买一偶发异常高价误触）
     "ALLOW_REENTRY_AFTER_UNWIND": False, # 止盈落袋后本窗彻底收工，严禁二次开仓反复磨损

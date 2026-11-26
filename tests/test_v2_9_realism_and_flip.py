@@ -106,19 +106,13 @@ class TestV29CalibratedRealismAndDynamicFlip(unittest.TestCase):
         )
         self.assertEqual(dec_soon.action, "wait")
 
-        # 4. Held Up is winning strongly (P*_held=0.94), opposite Down ask=$0.06 -> must NEVER bleed black-swan hedge on Down;
-        #    in v3.4 with ENABLE_EXTREME_TAKE_PROFIT=True, bid=$0.94 at tau=45s triggers Up take-profit unwind, while bid=$0.91 holds.
+        # 4. Held Up is winning strongly (P*_held=0.94), opposite Down ask=$0.06 -> hold to settlement by default
+        #    (must NOT bleed black-swan hedge on Down or prematurely sell when ENABLE_EXTREME_TAKE_PROFIT=False).
         b_up_win = _book(0.94, 50.0, 0.95, 50.0)
         b_dn_bs = _book(0.05, 50.0, 0.06, 50.0)
         spot_calm = SpotState(timestamp=1250.0, price=65080.0, open_price=65000.0, realized_vol_bps=14.0)
-        dec_tp = plan_decision(
-            pos_up, pos_dn, b_up_win, b_dn_bs, spot_calm,
-            tau_s=45.0, params=p_fast, p_fair=0.94, entries_count=1,
-        )
-        self.assertEqual(dec_tp.action, "taker_unwind")
-        self.assertEqual(dec_tp.side, "Up")
         dec_hold = plan_decision(
-            pos_up, pos_dn, _book(0.91, 50.0, 0.92, 50.0), _book(0.08, 50.0, 0.09, 50.0), spot_calm,
+            pos_up, pos_dn, b_up_win, b_dn_bs, spot_calm,
             tau_s=45.0, params=p_fast, p_fair=0.94, entries_count=1,
         )
         self.assertEqual(dec_hold.action, "wait")
