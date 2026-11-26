@@ -74,7 +74,7 @@ def _effective_adverse_spot_thresh(live_vol: float, params: Dict[str, float]) ->
     if not bool(params.get("VOL_ADAPTIVE_SHOCK", False)):
         return base
     sigma_2p5 = max(0.0, float(live_vol)) * math.sqrt(2.5 / 300.0)
-    cap = float(params.get("VOL_ADAPTIVE_SHOCK_CAP_BPS", 4.5))
+    cap = float(params.get("VOL_ADAPTIVE_SHOCK_CAP_BPS", 3.5))
     return max(base, min(cap, 1.05 * sigma_2p5))
 
 
@@ -430,9 +430,13 @@ def _plan_inventory_management(
     #       opposite side confirms clear probability leadership + positive standalone EV (never passive Maker).
     max_tau = float(params.get("ENTRY_MAX_TAU_S", 280.0))
     sec_cooldown = float(params.get("SECONDARY_ENTRY_COOLDOWN_S", 15.0))
+    reentry_cooldown_inv = float(params.get("REENTRY_COOLDOWN_S", 0.0) or 0.0)
+    flips_used_inv = int(params.get("FLIPS_USED", 0) or 0)
+    is_post_flip_inv = (opp_shares > 1e-4) or (flips_used_inv > 0)
+    eff_pyr_cooldown = max(sec_cooldown, reentry_cooldown_inv) if is_post_flip_inv else sec_cooldown
     flip_cooldown = float(params.get("FLIP_COOLDOWN_S", 5.0))
     elapsed_since_entry = params.get("SECONDS_SINCE_LAST_ENTRY")
-    pyr_cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= sec_cooldown - 1e-6)
+    pyr_cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= eff_pyr_cooldown - 1e-6)
     flip_cooldown_ok = (elapsed_since_entry is None) or (float(elapsed_since_entry) >= flip_cooldown - 1e-6)
 
     committed = float(params.get("COMMITTED_WINDOW_COST", 0.0))
@@ -447,7 +451,7 @@ def _plan_inventory_management(
     held_div_dur = float(params.get("EXTREME_DIV_UP_S" if held_side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
 
     if (
-        held_shares >= lot_size - 1e-4
+        held_shares >= 1.0 - 1e-4
         and entries_count < max_entries
         and tau_s <= max_tau
         and not spot_is_stale
@@ -482,7 +486,10 @@ def _plan_inventory_management(
             and (not spot_is_stale)
             and (not adverse_held_shock)
         ) if bool(params.get("DIRECTIONAL_ANTI_TOXICITY", True)) else (not is_toxic_or_stale)
-        allow_add_after_flip = bool(params.get("PYRAMID_ALLOW_AFTER_FLIP", False))
+        allow_add_after_flip = (
+            bool(params.get("PYRAMID_ALLOW_AFTER_FLIP", False))
+            and bool(params.get("ALLOW_REENTRY_AFTER_PAIR", True))
+        )
         entry_side_prob = params.get("ENTRY_SIDE_PROB")
         max_prob_drop = float(params.get("PYRAMID_MAX_PROB_DROP", 0.0) or 0.0)
         prob_not_deteriorated = (
@@ -491,7 +498,8 @@ def _plan_inventory_management(
             or (float(entry_side_prob) - p_fair_held) <= max_prob_drop + 1e-6
         )
         if (
-            books_ok
+            held_shares >= lot_size - 1e-4
+            and books_ok
             and pyr_taker_ok
             and pyr_cooldown_ok
             and prob_not_deteriorated
@@ -967,12 +975,48 @@ def plan_decision(
         if p_side < min_prob:
             continue
 
+        # Partial-fill (< 1 lot, e.g. 4.93sh) reversal protection:
+        # Never blindly buy a fixed 5-share opposite lot that locks in a guaranteed loss;
+        # route opposite-side reversal signals through breakeven-gated flip logic instead.
+        is_partial_reversal = (
+            (u_shares >= 1.0 - 1e-4 and d_shares < 1e-4 and side == "Down")
+            or (d_shares >= 1.0 - 1e-4 and u_shares < 1e-4 and side == "Up")
+        )
+        if is_partial_reversal:
+            held_s_pr: Side = "Up" if u_shares > d_shares else "Down"
+            opp_s_pr: Side = "Down" if held_s_pr == "Up" else "Up"
+            d_pr = _plan_inventory_management(
+                held_side=held_s_pr,
+                held_shares=abs(net_gap),
+                held_total_shares=u_shares if held_s_pr == "Up" else d_shares,
+                held_basis=pos_up.avg_price if held_s_pr == "Up" else pos_down.avg_price,
+                opp_side=opp_s_pr,
+                opp_shares=d_shares if held_s_pr == "Up" else u_shares,
+                opp_book=book_down if held_s_pr == "Up" else book_up,
+                held_book=book_up if held_s_pr == "Up" else book_down,
+                p_fair_held=p_up if held_s_pr == "Up" else p_down,
+                spot=spot,
+                tau_s=tau_s,
+                params=params,
+                entries_count=entries_count,
+                quote_attempts=quote_attempts,
+                circuit_breaker_active=cb_active,
+            )
+            if d_pr.action != "wait":
+                return d_pr
+            continue
+
         # Post-flip / paired-inventory re-entry discipline:
         # 1) Never buy back the abandoned opposite direction once MAX_FLIPS_PER_WINDOW is spent
         #    (blocks bypassing MAX_FLIPS_PER_WINDOW=1 when |net_gap| < 5 falls through here).
-        # 2) Enforce the same PYRAMID_* filters (min_prob, max_prob_drop, max_above_avg, allow_maker).
+        # 2) Enforce the EXACT same PYRAMID_* filters (min_prob, max_prob_drop, max_above_avg,
+        #    max_spread, min_taker_edge, allow_maker) as _plan_inventory_management so |net|=4
+        #    and |net|=5 behave identically.
         side_max_px = max_entry_px
         side_allow_maker = enable_maker
+        side_max_taker_spread = max_taker_spread
+        side_min_taker_edge = min_taker_edge
+        side_use_dyn_edge = True
         if is_post_flip_pair_reentry:
             if locked_post_flip_side is not None and side != locked_post_flip_side:
                 if flips_used_top >= max_flips_top or not flip_allow_multi_top:
@@ -989,6 +1033,9 @@ def plan_decision(
             if max_above_pf is not None and side_pos_avg > 1e-6:
                 side_max_px = min(side_max_px, side_pos_avg + float(max_above_pf))
             side_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
+            side_max_taker_spread = min(max_taker_spread, float(params.get("PYRAMID_MAX_SPREAD", max_taker_spread)))
+            side_min_taker_edge = float(params.get("PYRAMID_MIN_TAKER_EDGE", min_taker_edge))
+            side_use_dyn_edge = bool(params.get("PYRAMID_USE_DYNAMIC_EDGE", True))
 
         # Guard against partial-fill cap overshoot (e.g. 4.93sh partial fill in first 60s or 9.85sh -> 14.85sh)
         side_after = (u_shares + size) if side == "Up" else (d_shares + size)
@@ -1025,7 +1072,7 @@ def plan_decision(
 
         side_div_dur = float(params.get("EXTREME_DIV_UP_S" if side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
         ask = tb.best_ask
-        if ask is not None and min_entry_px <= ask <= side_max_px + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
+        if ask is not None and min_entry_px <= ask <= side_max_px + 1e-6 and tb.spread <= side_max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
@@ -1043,7 +1090,11 @@ def plan_decision(
                 fee = taker_fee_per_share(eff_ask, fee_rate)
                 need_cash = size * (eff_ask + fee)
                 taker_edge = p_side - (eff_ask + fee)
-                req_tk_edge = required_entry_edge(eff_ask, tau_s, min_taker_edge, params, p_side=p_side, vol_bps=live_vol)
+                req_tk_edge = (
+                    required_entry_edge(eff_ask, tau_s, side_min_taker_edge, params, p_side=p_side, vol_bps=live_vol)
+                    if side_use_dyn_edge
+                    else side_min_taker_edge
+                )
                 if taker_edge >= req_tk_edge - 1e-9:
                     if available_cap + 1e-9 < need_cash:
                         budget_blocked_msg = f"v3.3: Insufficient capital (${available_cap:.2f}) for entry (${need_cash:.2f})"
@@ -1052,7 +1103,8 @@ def plan_decision(
                     else:
                         if best_taker is None or taker_edge > best_taker[0]:
                             ioc_lim = _compute_ioc_buy_limit(
-                                eff_ask, p_side, min_taker_edge, tau_s, fee_rate, params, side_max_px,
+                                eff_ask, p_side, side_min_taker_edge, tau_s, fee_rate, params, side_max_px,
+                                use_dynamic_edge=side_use_dyn_edge,
                                 min_sweep_px=vis_worst, vol_bps=live_vol,
                             )
                             if ioc_lim is not None:
@@ -1103,6 +1155,17 @@ def plan_decision(
     if best_taker is not None:
         edge, side, ask, fee, ioc_lim = best_taker
         p_side = p_up if side == "Up" else p_down
+        if is_post_flip_pair_reentry:
+            return Decision(
+                action="taker_buy",
+                side=side,
+                price=round(ask, 4),
+                size=size,
+                utility=round(edge, 4),
+                limit_price=ioc_lim,
+                reason=f"v3.4 翻后顺势加仓 IOC: {side} ask=${ask:.2f} (限价=${ioc_lim:.2f}, P*={p_side:.2f}, 扣费净边际={edge:+.3f})",
+                intent="pyramid_add",
+            )
         return Decision(
             action="taker_buy",
             side=side,

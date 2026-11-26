@@ -67,11 +67,11 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         p = dict(config.PARAMS)
         # Calm 15 bps -> floor stays tight at 1.5 bps
         self.assertAlmostEqual(_effective_adverse_spot_thresh(15.0, p), 1.5, places=3)
-        # Volatile 45 bps -> 1.05 * 45 * sqrt(2.5/300) = 4.31 bps (doesn't false-block 2.0 bps noise)
-        th45 = _effective_adverse_spot_thresh(45.0, p)
-        self.assertTrue(4.0 < th45 <= 4.5)
-        # Extreme 70 bps -> capped at 4.5 bps so real crashes still trigger block
-        self.assertAlmostEqual(_effective_adverse_spot_thresh(70.0, p), 4.5, places=3)
+        # Volatile 30 bps -> 1.05 * 30 * sqrt(2.5/300) = 2.88 bps (doesn't false-block 2.0 bps noise)
+        th30 = _effective_adverse_spot_thresh(30.0, p)
+        self.assertTrue(2.5 < th30 <= 3.5)
+        # Extreme 70 bps -> capped at 3.5 bps aligned with TOXICITY_SHOCK_BPS=3.5 (no inversion)
+        self.assertAlmostEqual(_effective_adverse_spot_thresh(70.0, p), 3.5, places=3)
 
     def test_persistent_extreme_divergence_allows_burst_blocks_sustained(self):
         p = dict(config.PARAMS, AVAILABLE_CAPITAL=100.0, COMMITTED_WINDOW_COST=0.0)
@@ -553,6 +553,76 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
             self.assertEqual(r.last_record.get("winner"), "Up")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_strategy_harmony_post_flip_unified_and_partial_fill_breakeven_flip(self):
+        """Verify unified post-flip add rules across |net|=4 vs |net|=5 and breakeven flip on 4.93sh partial fill."""
+        # 1) |net|=4 (UP=5, DN=9) and |net|=5 (UP=5, DN=10) must agree on cooldown (10s), spread (0.08), and intent
+        for dn_sh in (9.0, 10.0):
+            cost = 2.60 + dn_sh * 0.52
+            p_base = dict(
+                config.PARAMS,
+                AVAILABLE_CAPITAL=100.0,
+                COMMITTED_WINDOW_COST=cost,
+                FLIPS_USED=1,
+                LAST_FLIP_SIDE="Down",
+                ENTRY_SIDE_PROB=0.65,
+                HAS_WORKING_ORDERS=False,
+            )
+            # 7s < 10s cooldown -> BOTH wait
+            d_cd = plan_decision(
+                Position(5.0, 2.60), Position(dn_sh, dn_sh * 0.52),
+                _book(0.42, 0.49), _book(0.51, 0.58), _spot(vol=15.0), tau_s=120.0,
+                params=dict(p_base, SECONDS_SINCE_LAST_ENTRY=7.0), p_fair=0.20, entries_count=2,
+            )
+            self.assertEqual(d_cd.action, "wait")
+            # 11s >= 10s, spread=0.09 > 0.08 -> BOTH wait
+            d_sp = plan_decision(
+                Position(5.0, 2.60), Position(dn_sh, dn_sh * 0.52),
+                _book(0.42, 0.51), _book(0.49, 0.58), _spot(vol=15.0), tau_s=120.0,
+                params=dict(p_base, SECONDS_SINCE_LAST_ENTRY=11.0), p_fair=0.20, entries_count=2,
+            )
+            self.assertEqual(d_sp.action, "wait")
+            # 11s >= 10s, spread=0.07 <= 0.08 -> BOTH taker_buy with intent="pyramid_add"
+            d_ok = plan_decision(
+                Position(5.0, 2.60), Position(dn_sh, dn_sh * 0.52),
+                _book(0.42, 0.49), _book(0.51, 0.58), _spot(vol=15.0), tau_s=120.0,
+                params=dict(p_base, SECONDS_SINCE_LAST_ENTRY=11.0), p_fair=0.20, entries_count=2,
+            )
+            self.assertEqual(d_ok.action, "taker_buy")
+            self.assertEqual(d_ok.side, "Down")
+            self.assertEqual(d_ok.intent, "pyramid_add")
+            # Disabling ALLOW_REENTRY_AFTER_PAIR blocks BOTH |net|=4 and |net|=5
+            d_off = plan_decision(
+                Position(5.0, 2.60), Position(dn_sh, dn_sh * 0.52),
+                _book(0.42, 0.49), _book(0.51, 0.58), _spot(vol=15.0), tau_s=120.0,
+                params=dict(p_base, SECONDS_SINCE_LAST_ENTRY=11.0, ALLOW_REENTRY_AFTER_PAIR=False),
+                p_fair=0.20, entries_count=2,
+            )
+            self.assertEqual(d_off.action, "wait")
+
+        # 2) Partial fill 4.93sh Up @$0.55 ($2.71) reversing to Down @$0.55 (P*dn=0.80):
+        #    MUST route to breakeven flip (7 shares), NEVER buy 5 shares locking a -$0.55 guaranteed loss!
+        p_pf = dict(
+            config.PARAMS,
+            AVAILABLE_CAPITAL=100.0,
+            COMMITTED_WINDOW_COST=2.71,
+            HELD_LEG_COST=2.71,
+            SECONDS_SINCE_LAST_ENTRY=15.0,
+            FLIPS_USED=0,
+            HAS_WORKING_ORDERS=False,
+        )
+        d_pf_flip = plan_decision(
+            Position(4.93, 2.71), Position(), _book(0.44, 0.45), _book(0.54, 0.55),
+            _spot(vol=15.0), tau_s=120.0, params=p_pf, p_fair=0.20, entries_count=1,
+        )
+        self.assertEqual(d_pf_flip.action, "taker_buy")
+        self.assertEqual(d_pf_flip.side, "Down")
+        self.assertEqual(d_pf_flip.intent, "reversal_flip")
+        self.assertEqual(d_pf_flip.size, 7.0)
+
+        # 3) validate_params rejects VOL_ADAPTIVE_SHOCK_CAP_BPS > TOXICITY_SHOCK_BPS
+        with self.assertRaises(ValueError):
+            config.validate_params(dict(config.PARAMS, VOL_ADAPTIVE_SHOCK_CAP_BPS=4.5, TOXICITY_SHOCK_BPS=3.5))
 
 
 if __name__ == "__main__":

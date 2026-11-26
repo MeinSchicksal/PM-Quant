@@ -75,7 +75,7 @@ PARAMS = {
     "VOL_EDGE_MAX_PREMIUM": 0.030,    # Cap vol edge premium at +3.0%
     "MAKER_MAX_VOL_BPS": 35.0,        # Pause passive Maker bids when 5m vol > 35 bps (avoid toxic sweeps)
     "VOL_ADAPTIVE_SHOCK": True,       # Scale adverse-spot threshold with 2.5s physical sigma (floored at base)
-    "VOL_ADAPTIVE_SHOCK_CAP_BPS": 4.5,# Cap adapted adverse-spot threshold so true crashes still trigger block
+    "VOL_ADAPTIVE_SHOCK_CAP_BPS": 3.5,# Cap adapted adverse-spot threshold aligned with TOXICITY_SHOCK_BPS=3.5 (no inversion)
     "MAKER_MAX_ASK_IMBALANCE": 4.0,   # Skip passive Maker bid when top-5 ask wall >= 4x bid depth & >= 200 shares
     "MAKER_MIN_WALL_SHARES": 200.0,
     "MAX_ENTRY_VOL_BPS": 75.0,        # Extreme liquidation cascade storm guard (pause new entries when 5m vol > 75 bps)
@@ -240,6 +240,8 @@ def validate_params(params=None):
         errors.append("VOL_EDGE_PIVOT_BPS must be non-negative")
     if float(p.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0) < 0.0:
         errors.append("MAX_PLAUSIBLE_EDGE must be non-negative")
+    if float(p.get("VOL_ADAPTIVE_SHOCK_CAP_BPS", 3.5)) > float(p.get("TOXICITY_SHOCK_BPS", 3.5)) + 1e-6:
+        errors.append("VOL_ADAPTIVE_SHOCK_CAP_BPS exceeds TOXICITY_SHOCK_BPS")
     pyr_min_t = float(p.get("PYRAMID_MIN_TAU_S", 30.0))
     pyr_max_t = float(p.get("PYRAMID_MAX_TAU_S", 240.0))
     if pyr_min_t > pyr_max_t:
