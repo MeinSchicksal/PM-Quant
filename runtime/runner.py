@@ -1426,14 +1426,16 @@ class PaperRunner:
             for pt in getattr(self, "pending_takers", [])
             if pt.get("is_buy", True)
         )
-        committed_cost = (
+        unwind_pnl_now = float(getattr(self, "realized_unwind_pnl", 0.0) or 0.0)
+        net_window_cash = (
             self.pos_up.cash
             + self.pos_down.cash
-            - getattr(self, "realized_unwind_pnl", 0.0)
+            - unwind_pnl_now
             + pending_cancel_locked
             + pending_taker_locked
         )
-        available_cap = total_equity_cap - committed_cost
+        committed_cost = max(0.0, net_window_cash)
+        available_cap = total_equity_cap - net_window_cash
         last_entry_t = getattr(self, "last_entry_fill_t", None)
         secs_since_entry = max(0.0, now - float(last_entry_t)) if last_entry_t is not None else 9999.0
         book_drop_win_s = float(config.PARAMS.get("BOOK_DROP_GUARD_WINDOW_S", 5.0))
@@ -2333,7 +2335,9 @@ class PaperRunner:
             }
 
         total_equity = self._initial_capital + self.total_pnl
-        pos_committed = self.pos_up.cash + self.pos_down.cash - getattr(self, "realized_unwind_pnl", 0.0)
+        unwind_pnl_live = float(getattr(self, "realized_unwind_pnl", 0.0) or 0.0)
+        net_pos_cash = self.pos_up.cash + self.pos_down.cash - unwind_pnl_live
+        pos_committed = max(0.0, net_pos_cash)
         reserved_orders = (
             sum(max(0.0, o.remaining) * o.price for o in self.working_orders if getattr(o, "is_buy", True))
             + sum(max(0.0, o.remaining) * o.price for o in self.pending_cancels if getattr(o, "is_buy", True))
@@ -2343,7 +2347,7 @@ class PaperRunner:
                 if pt.get("is_buy", True)
             )
         )
-        free_capital = total_equity - pos_committed - reserved_orders
+        free_capital = total_equity - net_pos_cash - reserved_orders
 
         state = {
             "batch_id": config.BATCH_ID,

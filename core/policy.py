@@ -311,8 +311,10 @@ def _plan_inventory_management(
         opp_book.best_ask is not None
         and (opp_book.best_bid is None or opp_book.best_bid < opp_book.best_ask)
     )
+    strict_book = bool(params.get("STRICT_BOOK_CONSISTENCY", True))
+    held_book_valid = (bu is not None) and (au is None or bu < au)
     dual_books_consistent = opp_book_valid
-    if bool(params.get("STRICT_BOOK_CONSISTENCY", True)):
+    if strict_book:
         if au is not None and ad is not None and bu is not None and bd is not None:
             dual_books_consistent = (
                 (au + ad >= 1.0 - book_tol - 1e-9)
@@ -322,6 +324,8 @@ def _plan_inventory_management(
             )
     spot_is_stale = bool(getattr(spot, "is_stale", False))
     basis_anomaly = bool(params.get("BASIS_ANOMALY_ACTIVE", False))
+    window_unwound = bool(params.get("WINDOW_UNWOUND", False))
+    allow_reentry_after_unwind = bool(params.get("ALLOW_REENTRY_AFTER_UNWIND", False))
 
     # 0) v3.4 Extreme Take-Profit Unwind (inventory-reducing: allowed even under circuit breaker):
     #    Locks in >= $0.94 L2 bid VWAP while >= 30s remains and model confirms >= 90% lead,
@@ -334,6 +338,8 @@ def _plan_inventory_management(
         tp_enabled
         and not spot_is_stale
         and not basis_anomaly
+        and held_book_valid
+        and (not strict_book or dual_books_consistent)
         and held_shares >= min_order_sh - 1e-4
         and opp_shares < 1e-4
         and tau_s >= tp_min_tau - 1e-6
@@ -466,6 +472,7 @@ def _plan_inventory_management(
             and pyr_taker_ok
             and pyr_cooldown_ok
             and prob_not_deteriorated
+            and (allow_reentry_after_unwind or not window_unwound)
             and bool(params.get("ENABLE_PYRAMID_ADD", False))
             and (allow_add_after_flip or opp_shares < 1e-4)
             and held_shares < max_net_shares_cap - 1e-4
@@ -610,7 +617,7 @@ def _plan_inventory_management(
                         need_cash = flip_sz * (eff_ask + fee)
                         tk_edge = p_opp - (eff_ask + fee)
                         req_flip_edge = (
-                            required_entry_edge(eff_ask, tau_s, f_tk_edge, params, p_side=p_opp)
+                            required_entry_edge(eff_ask, tau_s, f_tk_edge, params, p_side=p_opp, vol_bps=live_vol)
                             if flip_use_dyn_edge
                             else f_tk_edge
                         )
@@ -628,6 +635,7 @@ def _plan_inventory_management(
                                 max_pair_cost=flip_max_pair if flip_max_pair < 1.5 else None,
                                 held_basis=held_basis,
                                 min_sweep_px=vis_worst,
+                                vol_bps=live_vol,
                             )
                             return Decision(
                                 action="taker_buy",

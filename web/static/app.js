@@ -683,7 +683,29 @@ function translateDecisionReason(rawReason) {
     return `开盘前 20 秒校准基准价，暂不下单${left}`;
   }
   if (/尾盘收官期停止新开仓/i.test(s)) {
-    return "进入最后 45 秒尾盘收官期，不再新开仓，准备迎接下一轮";
+    return "进入最后 30 秒尾盘收官期，不再新开仓，准备迎接下一轮";
+  }
+  if (/极端浮盈落袋 IOC/i.test(s)) {
+    const sm = s.match(/卖出\s*([\d.]+)\s*股\s*(Up|Down)\s*@\s*bid=\$?([\d.]+)/i);
+    if (sm) {
+      return `浮盈已达高位，以 $${sm[3]} 卖出 ${sm[1]} 股${dirCn(sm[2])}提前落袋锁定利润`;
+    }
+    return "浮盈已达极高价区，主动卖出提前落袋锁定利润";
+  }
+  if (/本窗已完成极端浮盈落袋/i.test(s)) {
+    return "本轮已高位止盈落袋，停止二次开仓，静待下一轮";
+  }
+  if (/基差瞬变脱锚防灾暂停/i.test(s)) {
+    const dm = s.match(/偏离=\$?([\d.]+)/);
+    return dm
+      ? `现货与基准价突发脱锚（偏离 $${dm[1]}），防灾暂停下单等收敛`
+      : "现货与基准价突发脱锚，防灾暂停下单等待收敛";
+  }
+  if (/持续极端分歧/i.test(s)) {
+    return "模型与盘口分歧过大且持续不收敛，暂不追单防异常";
+  }
+  if (/高波动暂停被动 Maker/i.test(s)) {
+    return "当前 BTC 波动剧烈，暂停挂被动买单（仅保留高边际吃单）";
   }
   if ((m = s.match(/Tail freeze\s*\(tau\s*([\d.]+)s/i)) || /尾盘冻结|cutoff|tau too low|Late window/i.test(s)) {
     return "临近本轮结束（最后 15 秒），冻结下单，已有持仓安心等待结算";
@@ -2028,8 +2050,8 @@ function updateMarket(live) {
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);
   renderSideForecast("pnl-forecast-down", "DOWN", dnWinNet);
 
-  // Always keep probability track visible; auto-expand holding bottom-line section beneath it when holding
-  const hasAnyHolding = upShares > 1e-6 || dnShares > 1e-6 || totalCost > 1e-6;
+  // Always keep probability track visible; auto-expand holding bottom-line section beneath it when holding or unwound
+  const hasAnyHolding = upShares > 1e-6 || dnShares > 1e-6 || totalCost > 1e-6 || Math.abs(unwindPnl) > 1e-6;
   const holdView = $("battle-holding-view");
   const battleCard = $("copilot-battle-card");
   if (holdView) holdView.hidden = !hasAnyHolding;
@@ -2308,7 +2330,9 @@ function formatActionItem(a, startTs = 0) {
   const rawReason = String(a.reason || a.msg || "").trim();
   const isRealFill = (act === "fill" || act === "taker_partial") && px > 0 && sz > 0 && !/错失|拒单|拦截|reject/i.test(rawReason);
 
-  let typeLabel = "撮合成交";
+  const purpLower = String(a.purpose || "entry").toLowerCase();
+  const isUnwindProfit = purpLower === "unwind" && /落袋|止盈/i.test(rawReason);
+  let typeLabel = purpLower === "unwind" ? (isUnwindProfit ? "浮盈落袋" : "卖出平仓") : "撮合成交";
   let typeClass = "fill";
   if (act === "quote") {
     typeLabel = "限价挂单";
@@ -2320,7 +2344,7 @@ function formatActionItem(a, startTs = 0) {
     typeLabel = "暂缓拦截";
     typeClass = "reject";
   } else if (act === "taker_partial") {
-    typeLabel = "部分成交";
+    typeLabel = purpLower === "unwind" ? "部分落袋" : "部分成交";
     typeClass = "fill";
   }
 
@@ -2333,10 +2357,14 @@ function formatActionItem(a, startTs = 0) {
   if (rawReason) {
     reasonStr = translateDecisionReason(rawReason);
   } else if (isRealFill) {
-    const kindTag = String(a.kind || "").toLowerCase() === "taker" ? "主动买入" : "挂单排队";
-    const purp = String(a.purpose || "entry").toLowerCase();
-    const purpTag = purp === "hedge" ? "对冲锁利" : purp === "unwind" ? "尾盘止损" : "建仓";
-    reasonStr = `${kindTag}成交（${purpTag}）`;
+    const purp = purpLower;
+    if (purp === "unwind") {
+      reasonStr = "主动卖出平仓成交（浮盈落袋）";
+    } else {
+      const kindTag = String(a.kind || "").toLowerCase() === "taker" ? "主动买入" : "挂单排队";
+      const purpTag = purp === "hedge" ? "对冲锁利" : "建仓";
+      reasonStr = `${kindTag}成交（${purpTag}）`;
+    }
   } else if (act === "quote") {
     const ahead = Number(a.queue_ahead ?? 0);
     reasonStr = ahead <= 1 ? "已挂单排在最前，等待对手成交" : `已挂限价单，前方还有 ${ahead.toFixed(1)} 股排队`;
@@ -3646,7 +3674,7 @@ function classifyModalActions(actions, fills) {
         stageLabel = "极深黑天鹅锁利";
         stageCls = "hedge";
       } else if (purp === "unwind") {
-        stageLabel = "尾盘防守回收";
+        stageLabel = /落袋|止盈/i.test(rawReason) ? "浮盈落袋" : "尾盘防守回收";
         stageCls = "hedge";
       } else {
         if (isPrimaryChartCallout) entryLegsCount += 1;
@@ -4733,6 +4761,19 @@ function renderDecisionBulletin(live) {
         lCls = "is-down";
         shortMsg = `目前落后 -$${Math.abs(padUsd).toFixed(1)}，剩 ${Math.round(tauS)} 秒看能否反超`;
       }
+    } else if (Boolean(live?.window_unwound) || /本窗已完成极端浮盈落袋/i.test(curRawReason)) {
+      const uPnlLive = Number(live?.realized_unwind_pnl || 0);
+      lTag = "已落袋";
+      lCls = "is-buy";
+      shortMsg = `本轮已高位止盈落袋（${fmtUsd(uPnlLive, true)}），安心等下一轮`;
+    } else if (Boolean(live?.basis_anomaly_active) || /基差瞬变脱锚/i.test(curRawReason)) {
+      lTag = "脱锚暂停";
+      lCls = "is-warn";
+      shortMsg = "现货与基准价突发脱锚，暂停开仓等待收敛";
+    } else if (/持续极端分歧/i.test(curRawReason)) {
+      lTag = "分歧避险";
+      lCls = "is-warn";
+      shortMsg = "模型与盘口分歧持续异常，暂不追单";
     } else if (/Anti-toxicity|Toxic|shock|极端巨震|风暴避险/i.test(curRawReason)) {
       lTag = "急震暂停";
       lCls = "is-warn";
@@ -4812,10 +4853,15 @@ function renderDecisionBulletin(live) {
   };
 
   const resolveThoughtTag = (item, text) => {
+    const raw = `${item.reason || ""} ${text || ""}`;
+    if (item.action === "taker_unwind") {
+      return /落袋|止盈/i.test(raw) ? ["浮盈落袋", "is-buy"] : ["风控止损", "is-warn"];
+    }
     if (item.action && item.action !== "wait" && tagMap[item.action]) {
       return tagMap[item.action];
     }
-    const raw = `${item.reason || ""} ${text || ""}`;
+    if (/本窗已完成极端浮盈落袋|已高位止盈落袋/i.test(raw)) return ["已落袋", "is-buy"];
+    if (/基差瞬变脱锚|持续极端分歧|高波动暂停被动 Maker/i.test(raw)) return ["防灾避险", "is-warn"];
     if (/开盘前|校准基准|Observation/i.test(raw)) return ["开盘校准", "is-calm"];
     if (/剧烈波动|急跌|急涨|防接飞刀|避险|Anti-toxicity|Toxic|shock|风暴|暂停下单/i.test(raw)) return ["风控避险", "is-warn"];
     if (/延迟|同步|超时|网络|断流/i.test(raw)) return ["延迟暂缓", "is-warn"];

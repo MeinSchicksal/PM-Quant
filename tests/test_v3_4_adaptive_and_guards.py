@@ -189,6 +189,12 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
             self.assertTrue(r1.window_unwound)
             self.assertAlmostEqual(r1.pos_up.shares, 0.0, places=6)
             r1._write_live(t0 + 181.0, _spot(price=65200.0, open_px=65000.0), bu_rich, bd_rich)
+            import json as _json
+            live_snap = _json.loads(r1.live_file.read_text(encoding="utf-8"))
+            # Regression: profitable unwind must NEVER produce negative committed_cost in live.json
+            self.assertGreaterEqual(live_snap["committed_cost"], 0.0)
+            self.assertAlmostEqual(live_snap["committed_cost"], 0.0, places=4)
+            self.assertGreater(live_snap["available_capital"], 104.0)
 
             # Crash-resume restores window_unwound and exact unwind accounting
             r2 = PaperRunner(ledger_dir=tmp)
@@ -197,6 +203,44 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
             r2.close_window(64800.0, official_winner="Down")  # Even if market later reverses to Down!
             # Realized profit locked in: 10 * 0.95 - fee(~0.0332) - $5.20 cost ≈ +$4.2668
             self.assertGreater(r2.total_pnl, 4.20)
+
+    def test_audit_regressions_crossed_book_unwind_and_partial_unwind_no_pyramid(self):
+        p_tp = dict(
+            config.PARAMS,
+            ENABLE_EXTREME_TAKE_PROFIT=True,
+            TAKE_PROFIT_MIN_BID=0.94,
+            TAKE_PROFIT_MIN_TAU_S=30.0,
+            TAKE_PROFIT_MIN_PROB=0.90,
+            AVAILABLE_CAPITAL=100.0,
+            COMMITTED_WINDOW_COST=3.00,
+            SECONDS_SINCE_LAST_ENTRY=20.0,
+            ENTRY_SIDE_PROB=0.65,
+        )
+        # 1) Crossed / inconsistent book (bid=0.96 >= ask=0.95) must NEVER trigger bogus unwind
+        bu_crossed = OrderBook(bids=[(0.96, 50.0)], asks=[(0.95, 50.0)], source_t=1000.0, received_at=1000.0)
+        bd_ok = _book(0.03, 0.04)
+        d_cross = plan_decision(
+            Position(5.0, 2.60), Position(), bu_crossed, bd_ok, _spot(vol=15.0), tau_s=90.0,
+            params=p_tp, p_fair=0.95, entries_count=1,
+        )
+        self.assertEqual(d_cross.action, "wait")
+
+        # 2) Partial unwind leaves 6 shares (>= 5) with WINDOW_UNWOUND=True:
+        #    Must block pyramid_add when bid drops to $0.60, yet still allow finishing unwind at >= $0.94
+        pos_rem = Position(6.0, 3.12)
+        d_no_add = plan_decision(
+            pos_rem, Position(), _book(0.59, 0.60), _book(0.40, 0.41), _spot(vol=15.0), tau_s=120.0,
+            params=dict(p_tp, WINDOW_UNWOUND=True), p_fair=0.72, entries_count=1,
+        )
+        self.assertEqual(d_no_add.action, "wait")
+
+        bu_rich = OrderBook(bids=[(0.95, 20.0)], asks=[(0.96, 20.0)], source_t=1000.0, received_at=1000.0)
+        d_finish = plan_decision(
+            pos_rem, Position(), bu_rich, bd_ok, _spot(vol=15.0), tau_s=90.0,
+            params=dict(p_tp, WINDOW_UNWOUND=True), p_fair=0.95, entries_count=1,
+        )
+        self.assertEqual(d_finish.action, "taker_unwind")
+        self.assertEqual(d_finish.size, 6.0)
 
 
 if __name__ == "__main__":
