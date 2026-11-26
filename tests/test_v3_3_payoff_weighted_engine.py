@@ -185,14 +185,26 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         self.assertEqual(d_recov.size, 11.0)
         self.assertLessEqual(5.20 + d_recov.size * 0.52, float(config.PARAMS["FLIP_MAX_TOTAL_WINDOW_COST"]) + 0.05)
 
-        # After an integer-share flip (e.g. 5 Up + 7 Down -> net_gap = -2 < 5), must hold to settlement
-        p_after = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=6.5)
+        # After an integer-share flip (e.g. 5 Up + 7 Down -> net_gap = -2 < 5):
+        # 1) When ALLOW_REENTRY_AFTER_PAIR=False, holds to settlement
+        p_after_lock = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=6.5, ALLOW_REENTRY_AFTER_PAIR=False)
         d_hold = plan_decision(
             Position(5.0, 2.60), Position(7.0, 3.90), _book(0.26, 0.28), _book(0.70, 0.72),
-            _spot(vel=-0.5), tau_s=85.0, params=p_after, p_fair=0.15, entries_count=2,
+            _spot(vel=-0.5), tau_s=85.0, params=p_after_lock, p_fair=0.15, entries_count=2,
         )
         self.assertEqual(d_hold.action, "wait")
         self.assertIn("持有至结算", d_hold.reason)
+
+        # 2) In v3.4 default (ALLOW_REENTRY_AFTER_PAIR=True, PYRAMID_ALLOW_AFTER_FLIP=True),
+        #    once 10s cooldown passes and the flipped side confirms strong edge, allows trend add within caps
+        p_after_v34 = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=6.5, SECONDS_SINCE_LAST_ENTRY=15.0)
+        d_readd = plan_decision(
+            Position(5.0, 2.60), Position(7.0, 3.90), _book(0.26, 0.28), _book(0.70, 0.72),
+            _spot(vel=-0.5), tau_s=85.0, params=p_after_v34, p_fair=0.15, entries_count=2,
+        )
+        self.assertEqual(d_readd.action, "taker_buy")
+        self.assertEqual(d_readd.side, "Down")
+        self.assertEqual(d_readd.size, 5.0)
 
     def test_flip_shares_steps_down_on_thin_top_level_when_breakeven_still_holds(self):
         """When L1 ask is thin and L2 raises VWAP slightly, step down if breakeven holds or block if not."""

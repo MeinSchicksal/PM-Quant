@@ -96,11 +96,11 @@ PARAMS = {
     "MAX_PLAUSIBLE_EDGE": 0.24,       # 持续性极端分歧拦截：P* - ask > 24% 持续超 3s 视为数据源异常/知情大单压盘
     "MAX_PLAUSIBLE_EDGE_PERSIST_S": 3.0, # 放行 0~3s 瞬时极速现货滞后套利，仅拦截持续不收敛的异常分歧
 
-    # 3. Position Management (v3.3: Trend-Confirming Add + Breakeven-Gated Dynamic Flip)
-    "ALLOW_REENTRY_AFTER_PAIR": False,# 完成反手后不再同窗反复重开，防锯齿磨损
+    # 3. Position Management (v3.4: Trend-Confirming Add + Breakeven-Gated Dynamic Flip + Post-Flip Trend Add)
+    "ALLOW_REENTRY_AFTER_PAIR": True, # 4日512场L2实证(+$332.8->+$376.8, MaxDD -$38.1->-$30.9, 4/4日全胜): 保本反手后若新方向确认且过10s冷却，允许顺势加仓放大胜果（仍受单窗4笔/净敞口10股硬上限）
     "REENTRY_COOLDOWN_S": 10.0,
     "ENABLE_PYRAMID_ADD": True,       # 开启中盘顺势加仓（防下跌摊平 + 前 60s 禁加仓）
-    "PYRAMID_ALLOW_AFTER_FLIP": False,# 反手调仓后禁止继续加仓
+    "PYRAMID_ALLOW_AFTER_FLIP": True, # 保本反手站稳后允许顺势加仓 1 笔将救命局转为反败为胜（仍锁死最多翻 1 次）
     "PYRAMID_ALLOW_MAKER": False,     # 加仓仅使用 Taker IOC
     "PYRAMID_USE_DYNAMIC_EDGE": True, # 与开仓使用统一动态净边际标准
     "SECONDARY_ENTRY_COOLDOWN_S": 6.0,# 加仓冷却 6s，避免同帧信号机械翻倍
