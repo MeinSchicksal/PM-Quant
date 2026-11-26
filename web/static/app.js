@@ -760,15 +760,19 @@ function translateDecisionReason(rawReason) {
     }
   }
 
-  // 5. 质量控均价加仓 / 终局反转调仓 / 再入场冷却 / 锁利 / 尾盘止损
-  if (/优质控均价加仓|顺势确认加仓|顺势概率优势加仓/i.test(s)) {
+  // 5. 质量控均价加仓 / 翻后顺势加仓 / 终局反转调仓 / 再入场冷却 / 锁利 / 尾盘止损
+  if (/优质控均价加仓|翻后顺势加仓|顺势确认加仓|顺势概率优势加仓/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
     const avgm = s.match(/均价=\$?([\d.]+)/i);
+    const tag = /翻后顺势加仓/i.test(s) ? "反手确认后顺势加仓" : "优质加仓";
     if (sm) {
       const avgTxt = avgm ? `（原均价 $${avgm[1]}）` : "";
-      return `胜率稳健且不追高，以 $${sm[2]} 优质加仓${dirCn(sm[1])}${avgTxt}`;
+      return `胜率稳健且不追高，以 $${sm[2]} ${tag}${dirCn(sm[1])}${avgTxt}`;
     }
     return "胜率稳健且价格占优，执行控均价加仓";
+  }
+  if (/反手调仓已完成|反手配平后再加仓|已禁顺势加仓/i.test(s)) {
+    return "反手调仓后暂不追加仓位，安心持有至结算";
   }
   if (/终局反转反买|不对劲反买|反买/i.test(s)) {
     const sm = s.match(/(Up|Down)\s+(?:ask|bid)=\$?([\d.]+)/i);
@@ -780,7 +784,9 @@ function translateDecisionReason(rawReason) {
     return "行情确认反转，按终局目标一次性买入反方向调仓";
   }
   if (/波段再入场冷却/i.test(s)) {
-    return "刚完成对冲调仓，短冷却 4 秒后重新观察领先方向";
+    const cdm = s.match(/<\s*([\d.]+)s/i);
+    const cdTxt = cdm ? `${Math.round(parseFloat(cdm[1]))} 秒` : "10 秒";
+    return `刚完成调仓，短冷却 ${cdTxt}后重新观察领先方向`;
   }
   if (/Deep Arbitrage|黑天鹅锁利|Arbitrage\s+lock|Trailing\s+Pair\s+Lock/i.test(s)) {
     return "发现双边套利机会，买入另一侧提前锁定无风险利润";

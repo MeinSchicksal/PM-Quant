@@ -497,9 +497,14 @@ def _plan_inventory_management(
             or max_prob_drop <= 0.0
             or (float(entry_side_prob) - p_fair_held) <= max_prob_drop + 1e-6
         )
+        basis_add_ok = (
+            not params.get("REQUIRE_STRIKE_AND_BASIS", False)
+            or (bool(params.get("BASIS_READY", True)) and float(getattr(spot, "open_price", 0.0) or 0.0) > 0.0)
+        )
         if (
             held_shares >= lot_size - 1e-4
             and books_ok
+            and basis_add_ok
             and pyr_taker_ok
             and pyr_cooldown_ok
             and prob_not_deteriorated
@@ -861,6 +866,8 @@ def plan_decision(
         return _wait(f"Max entries per window reached ({entries_count}/{max_entries}), waiting for next window", urgent=True)
 
     reentry_cd = float(params.get("REENTRY_COOLDOWN_S", 0.0) or 0.0)
+    if is_post_flip_pair_reentry:
+        reentry_cd = max(reentry_cd, float(params.get("SECONDARY_ENTRY_COOLDOWN_S", 0.0) or 0.0))
     elapsed_flat = params.get("SECONDS_SINCE_LAST_ENTRY")
     if entries_count > 0 and reentry_cd > 0.0 and elapsed_flat is not None and float(elapsed_flat) < reentry_cd - 1e-6:
         return _wait(f"波段再入场冷却 ({float(elapsed_flat):.1f}s < {reentry_cd:.1f}s)", urgent=False)
@@ -1012,6 +1019,7 @@ def plan_decision(
         # 2) Enforce the EXACT same PYRAMID_* filters (min_prob, max_prob_drop, max_above_avg,
         #    max_spread, min_taker_edge, allow_maker) as _plan_inventory_management so |net|=4
         #    and |net|=5 behave identically.
+        side_min_px = min_entry_px
         side_max_px = max_entry_px
         side_allow_maker = enable_maker
         side_max_taker_spread = max_taker_spread
@@ -1028,6 +1036,7 @@ def plan_decision(
             if ent_prob_pf is not None and max_drop_pf > 0.0 and (float(ent_prob_pf) - p_side) > max_drop_pf + 1e-6:
                 continue
             side_pos_avg = pos_up.avg_price if side == "Up" else pos_down.avg_price
+            side_min_px = float(params.get("PYRAMID_MIN_PRICE", min_entry_px))
             side_max_px = min(side_max_px, float(params.get("PYRAMID_MAX_PRICE", max_entry_px)))
             max_above_pf = params.get("PYRAMID_MAX_ABOVE_AVG")
             if max_above_pf is not None and side_pos_avg > 1e-6:
@@ -1072,11 +1081,11 @@ def plan_decision(
 
         side_div_dur = float(params.get("EXTREME_DIV_UP_S" if side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
         ask = tb.best_ask
-        if ask is not None and min_entry_px <= ask <= side_max_px + 1e-6 and tb.spread <= side_max_taker_spread + 1e-6:
+        if ask is not None and side_min_px <= ask <= side_max_px + 1e-6 and tb.spread <= side_max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
-            if min_entry_px <= eff_ask <= side_max_px + 1e-6 and vis_filled >= size - 1e-6:
+            if side_min_px <= eff_ask <= side_max_px + 1e-6 and vis_filled >= size - 1e-6:
                 if (
                     max_plaus_edge > 0.0
                     and (p_side - eff_ask) > max_plaus_edge + 1e-9
