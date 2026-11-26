@@ -132,14 +132,17 @@ def _compute_ioc_buy_limit(
     held_basis: float = 0.0,
     min_sweep_px: Optional[float] = None,
     vol_bps: Optional[float] = None,
-) -> float:
+) -> Optional[float]:
     """Compute exact pre-submission IOC buy limit price (1c tick).
 
     Guarantees that any fill at or below this limit still clears the required
     post-fee net edge (and optional pair-cost cap) natively on the venue CLOB,
-    while never rounding below the visible multi-level sweep worst price.
+    while rejecting multi-level sweeps whose worst price violates `max_cap_px`
+    or leaves no positive-edge limit tick.
     """
     ioc_slip = max(0.0, float(params.get("TAKER_IOC_SLIPPAGE_TICKS", 0.02)))
+    if min_sweep_px is not None and float(min_sweep_px) > max_cap_px + 1e-6:
+        return None
     floor_px = max(sig_px, float(min_sweep_px or 0.0))
     floor_tick = min(0.99, max_cap_px, math.ceil(floor_px * 100.0 - 1e-9) / 100.0)
     cap = min(0.99, max_cap_px, max(floor_tick, round(sig_px + ioc_slip, 2)))
@@ -157,7 +160,14 @@ def _compute_ioc_buy_limit(
         )
         if (p_side - (p + f_p)) >= req - 1e-6:
             return p
-    return round(floor_tick, 2)
+    # Fallback only if rounding floor_tick itself still yields strictly positive post-fee edge
+    # (never emit a negative-EV limit price above fair value).
+    f_fl = taker_fee_per_share(floor_tick, fee_rate)
+    if max_pair_cost is not None and (held_basis + floor_tick + f_fl > max_pair_cost + 1e-6):
+        return None
+    if (p_side - (floor_tick + f_fl)) > 1e-6:
+        return round(floor_tick, 2)
+    return None
 
 
 def _compute_flip_shares(
@@ -170,11 +180,16 @@ def _compute_flip_shares(
     available_cap: float,
     window_budget: float,
     params: Dict[str, float],
+    max_opp_total_shares: Optional[float] = None,
+    max_net_shares_cap: Optional[float] = None,
+    held_total_shares: float = 0.0,
 ) -> float:
     """Compute payoff-driven integer flip shares (5..FLIP_MAX_SHARES) in one shot.
 
     Steps down integer shares against actual visible L2 ask VWAP so a thin top
     level never causes a valid rescue flip to be dropped entirely when q-1 fits.
+    Enforces hard side-total (`MAX_LOTS`) and net-exposure (`MAX_NET_LOTS` / early cap)
+    ceilings so a flip can never overshoot configured position caps.
     When `FLIP_REQUIRE_BREAKEVEN` is True, refuses any partial/half-way flip that
     cannot reach settlement breakeven on the flipped side (eliminating guaranteed-loss locks).
     """
@@ -193,7 +208,7 @@ def _compute_flip_shares(
     max_sh = max(min_sh_int, int(float(params.get("FLIP_MAX_SHARES", 12.0))))
     q_cap = min(q_target, max_sh)
 
-    # Cap by hard per-window flip total cost, available bankroll, and visible L2 depth
+    # Cap by hard per-window flip total cost, available bankroll, position caps, and visible L2 depth
     max_flip_total_cost = float(params.get("FLIP_MAX_TOTAL_WINDOW_COST", window_budget))
     eff_budget = min(window_budget, max_flip_total_cost)
     rem_cash = max(0.0, min(available_cap, eff_budget - committed))
@@ -203,6 +218,14 @@ def _compute_flip_shares(
     vis_depth = sum(float(sz) for _, sz in (getattr(opp_book, "asks", None) or []))
     max_depth_int = int(math.floor(vis_depth + 1e-6))
     q_upper = min(max_sh, max_depth_int)
+    if max_opp_total_shares is not None:
+        max_by_total = int(math.floor(max(0.0, float(max_opp_total_shares) - float(opp_shares)) + 1e-6))
+        q_upper = min(q_upper, max_by_total)
+    if max_net_shares_cap is not None:
+        max_by_net = int(math.floor(max(0.0, float(held_total_shares) + float(max_net_shares_cap) - float(opp_shares)) + 1e-6))
+        q_upper = min(q_upper, max_by_net)
+    if q_upper < min_sh_int:
+        return 0.0
 
     if req_breakeven:
         # Search upward from L1-estimated q_target to find the smallest integer q
@@ -220,7 +243,7 @@ def _compute_flip_shares(
                 return float(q)
         return 0.0
 
-    q_start = min(q_cap, max_depth_int)
+    q_start = min(q_cap, q_upper)
     for q in range(q_start, min_sh_int - 1, -1):
         vis_filled, vis_vwap, _ = _walk_ask_vwap(opp_book, float(q))
         if vis_filled < float(q) - 1e-6:
@@ -518,16 +541,17 @@ def _plan_inventory_management(
                             p_max_px, use_dynamic_edge=use_dyn_pyr_edge, min_sweep_px=vis_worst,
                             vol_bps=live_vol,
                         )
-                        return Decision(
-                            action="taker_buy",
-                            side=held_side,
-                            price=round(eff_ask, 4),
-                            size=lot_size,
-                            utility=round(tk_edge, 4),
-                            limit_price=ioc_lim,
-                            reason=f"优质控均价加仓 IOC: {held_side} ask=${eff_ask:.2f} (均价=${held_basis:.2f}, 限价=${ioc_lim:.2f}, P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
-                            intent="pyramid_add",
-                        )
+                        if ioc_lim is not None:
+                            return Decision(
+                                action="taker_buy",
+                                side=held_side,
+                                price=round(eff_ask, 4),
+                                size=lot_size,
+                                utility=round(tk_edge, 4),
+                                limit_price=ioc_lim,
+                                reason=f"优质控均价加仓 IOC: {held_side} ask=${eff_ask:.2f} (均价=${held_basis:.2f}, 限价=${ioc_lim:.2f}, P*={p_fair_held:.2f}, 净边际={tk_edge:+.3f})",
+                                intent="pyramid_add",
+                            )
             bid = held_book.best_bid
             mk_cap = min(p_max_px, 0.78)
             if (
@@ -570,6 +594,7 @@ def _plan_inventory_management(
         flip_allow_maker = bool(params.get("FLIP_ALLOW_MAKER", False))
         flip_allow_multi = bool(params.get("FLIP_ALLOW_MULTI", False))
         flip_use_dyn_edge = bool(params.get("FLIP_USE_DYNAMIC_EDGE", False))
+        opp_div_dur = float(params.get("EXTREME_DIV_UP_S" if opp_side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
         adverse_opp_shock = (
             (opp_side == "Up" and vel_signed_inv <= -adverse_thresh)
             or (opp_side == "Down" and vel_signed_inv >= adverse_thresh)
@@ -597,6 +622,11 @@ def _plan_inventory_management(
             ask = opp_book.best_ask
             if ask is not None and f_min_px - 1e-6 <= ask <= f_max_px + 1e-6:
                 held_leg_cost = float(params.get("HELD_LEG_COST", held_shares * held_basis) or (held_shares * held_basis))
+                eff_flip_net_cap = (
+                    lot_size
+                    if (early_phase_min_tau > 0.0 and tau_s > early_phase_min_tau)
+                    else max_net_shares_cap
+                )
                 flip_sz = _compute_flip_shares(
                     held_leg_cost=held_leg_cost,
                     committed=committed,
@@ -607,11 +637,19 @@ def _plan_inventory_management(
                     available_cap=available_cap,
                     window_budget=window_budget,
                     params=params,
+                    max_opp_total_shares=max_shares_cap,
+                    max_net_shares_cap=eff_flip_net_cap,
+                    held_total_shares=held_total_shares,
                 )
                 if flip_sz >= min_order_sh - 1e-4:
                     vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(opp_book, flip_sz)
                     eff_ask = vis_vwap if vis_filled >= flip_sz - 1e-6 else ask
                     if vis_filled >= flip_sz - 1e-6 and f_min_px - 1e-6 <= eff_ask <= f_max_px + 1e-6:
+                        flip_div_anomalous = (
+                            max_plaus_edge > 0.0
+                            and (p_opp - eff_ask) > max_plaus_edge + 1e-9
+                            and opp_div_dur >= max_plaus_persist - 1e-6
+                        )
                         fee = taker_fee_per_share(eff_ask, fee_rate)
                         pair_cost = held_basis + eff_ask + fee
                         need_cash = flip_sz * (eff_ask + fee)
@@ -624,7 +662,8 @@ def _plan_inventory_management(
                         max_flip_total = float(params.get("FLIP_MAX_TOTAL_WINDOW_COST", window_budget))
                         eff_flip_budget = min(window_budget, max_flip_total) if bool(params.get("FLIP_PAYOFF_SIZING", False)) else window_budget
                         if (
-                            pair_cost <= flip_max_pair + 1e-6
+                            not flip_div_anomalous
+                            and pair_cost <= flip_max_pair + 1e-6
                             and tk_edge >= req_flip_edge - 1e-9
                             and available_cap + 1e-9 >= need_cash
                             and committed + need_cash <= eff_flip_budget + 1e-9
@@ -632,21 +671,22 @@ def _plan_inventory_management(
                             ioc_lim = _compute_ioc_buy_limit(
                                 eff_ask, p_opp, f_tk_edge, tau_s, fee_rate, params,
                                 f_max_px, use_dynamic_edge=flip_use_dyn_edge,
-                                max_pair_cost=flip_max_pair if flip_max_pair < 1.5 else None,
+                                max_pair_cost=flip_max_pair if flip_max_pair < 1.999 else None,
                                 held_basis=held_basis,
                                 min_sweep_px=vis_worst,
                                 vol_bps=live_vol,
                             )
-                            return Decision(
-                                action="taker_buy",
-                                side=opp_side,
-                                price=round(eff_ask, 4),
-                                size=flip_sz,
-                                utility=round(tk_edge, 4),
-                                limit_price=ioc_lim,
-                                reason=f"终局动态不对劲反买 IOC ({flip_sz:.0f}股): {opp_side} ask=${eff_ask:.2f} (配对成本=${pair_cost:.3f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
-                                intent="reversal_flip",
-                            )
+                            if ioc_lim is not None:
+                                return Decision(
+                                    action="taker_buy",
+                                    side=opp_side,
+                                    price=round(eff_ask, 4),
+                                    size=flip_sz,
+                                    utility=round(tk_edge, 4),
+                                    limit_price=ioc_lim,
+                                    reason=f"终局动态不对劲反买 IOC ({flip_sz:.0f}股): {opp_side} ask=${eff_ask:.2f} (配对成本=${pair_cost:.3f}, 对侧P*={p_opp:.2f}, 净边际={tk_edge:+.3f})",
+                                    intent="reversal_flip",
+                                )
             bid = opp_book.best_bid
             if (
                 flip_allow_maker
@@ -763,6 +803,10 @@ def plan_decision(
             urgent=True,
         )
 
+    flips_used_top = int(params.get("FLIPS_USED", 0) or 0)
+    max_flips_top = int(params.get("MAX_FLIPS_PER_WINDOW", 1))
+    flip_allow_multi_top = bool(params.get("FLIP_ALLOW_MULTI", False))
+    is_post_flip_pair_reentry = (u_shares > 1e-4 and d_shares > 1e-4) or (flips_used_top > 0)
     if (
         not bool(params.get("ALLOW_REENTRY_AFTER_PAIR", True))
         and u_shares > 1e-4
@@ -773,6 +817,35 @@ def plan_decision(
             f"v3.3: Max position reached & fully hedged pair / 终局调仓 (UP {u_shares:.0f} / DN {d_shares:.0f})，持有至结算",
             urgent=True,
         )
+    if is_post_flip_pair_reentry and flips_used_top > 0 and not bool(params.get("PYRAMID_ALLOW_AFTER_FLIP", False)):
+        return _wait(
+            f"v3.4: 反手调仓已完成 (UP {u_shares:.0f} / DN {d_shares:.0f})，已禁翻后加仓并持有至结算",
+            urgent=True,
+        )
+
+    # Post-flip / paired-inventory re-entry MUST enforce direction lock (prevent bypassing
+    # MAX_FLIPS_PER_WINDOW=1 via |net_gap|<5 fallthrough) and full PYRAMID_* discipline.
+    locked_post_flip_side: Optional[Side] = None
+    if is_post_flip_pair_reentry:
+        raw_last_flip = params.get("LAST_FLIP_SIDE")
+        if raw_last_flip in ("Up", "Down"):
+            locked_post_flip_side = raw_last_flip
+        elif net_gap > 1e-4:
+            locked_post_flip_side = "Up"
+        elif net_gap < -1e-4:
+            locked_post_flip_side = "Down"
+        if not bool(params.get("ENABLE_PYRAMID_ADD", True)):
+            return _wait("v3.4: 已禁顺势加仓，配平/反手仓位持有至结算", urgent=True)
+        pyr_min_tau_pf = float(params.get("PYRAMID_MIN_TAU_S", 30.0))
+        pyr_max_tau_pf = float(params.get("PYRAMID_MAX_TAU_S", 240.0))
+        early_min_tau_pf = float(params.get("EARLY_PHASE_MIN_TAU_S", 0.0) or 0.0)
+        if early_min_tau_pf > 0.0:
+            pyr_max_tau_pf = min(pyr_max_tau_pf, early_min_tau_pf)
+        if not (pyr_min_tau_pf <= tau_s <= pyr_max_tau_pf):
+            return _wait(
+                f"v3.4: 反手配平后再加仓受中盘时间窗约束 (tau={tau_s:.0f}s 不在 [{pyr_min_tau_pf:.0f}s,{pyr_max_tau_pf:.0f}s])",
+                urgent=True,
+            )
 
     # 5. Flat Inventory Caps & Risk Envelopes
     max_entries = int(params.get("MAX_ENTRIES_PER_WINDOW", 1))
@@ -894,6 +967,29 @@ def plan_decision(
         if p_side < min_prob:
             continue
 
+        # Post-flip / paired-inventory re-entry discipline:
+        # 1) Never buy back the abandoned opposite direction once MAX_FLIPS_PER_WINDOW is spent
+        #    (blocks bypassing MAX_FLIPS_PER_WINDOW=1 when |net_gap| < 5 falls through here).
+        # 2) Enforce the same PYRAMID_* filters (min_prob, max_prob_drop, max_above_avg, allow_maker).
+        side_max_px = max_entry_px
+        side_allow_maker = enable_maker
+        if is_post_flip_pair_reentry:
+            if locked_post_flip_side is not None and side != locked_post_flip_side:
+                if flips_used_top >= max_flips_top or not flip_allow_multi_top:
+                    continue
+            if p_side < float(params.get("PYRAMID_MIN_PROB", 0.54)):
+                continue
+            ent_prob_pf = params.get("ENTRY_SIDE_PROB")
+            max_drop_pf = float(params.get("PYRAMID_MAX_PROB_DROP", 0.0) or 0.0)
+            if ent_prob_pf is not None and max_drop_pf > 0.0 and (float(ent_prob_pf) - p_side) > max_drop_pf + 1e-6:
+                continue
+            side_pos_avg = pos_up.avg_price if side == "Up" else pos_down.avg_price
+            side_max_px = min(side_max_px, float(params.get("PYRAMID_MAX_PRICE", max_entry_px)))
+            max_above_pf = params.get("PYRAMID_MAX_ABOVE_AVG")
+            if max_above_pf is not None and side_pos_avg > 1e-6:
+                side_max_px = min(side_max_px, side_pos_avg + float(max_above_pf))
+            side_allow_maker = bool(params.get("PYRAMID_ALLOW_MAKER", False))
+
         # Guard against partial-fill cap overshoot (e.g. 4.93sh partial fill in first 60s or 9.85sh -> 14.85sh)
         side_after = (u_shares + size) if side == "Up" else (d_shares + size)
         net_after = abs((u_shares + size - d_shares) if side == "Up" else (u_shares - (d_shares + size)))
@@ -929,11 +1025,11 @@ def plan_decision(
 
         side_div_dur = float(params.get("EXTREME_DIV_UP_S" if side == "Up" else "EXTREME_DIV_DOWN_S", 0.0) or 0.0)
         ask = tb.best_ask
-        if ask is not None and min_entry_px <= ask <= max_entry_px + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
+        if ask is not None and min_entry_px <= ask <= side_max_px + 1e-6 and tb.spread <= max_taker_spread + 1e-6:
             # Pre-submission visible L2 VWAP check (no blind best_ask assumption)
             vis_filled, vis_vwap, vis_worst = _walk_ask_vwap(tb, size)
             eff_ask = vis_vwap if vis_filled >= size - 1e-6 else ask
-            if min_entry_px <= eff_ask <= max_entry_px + 1e-6 and vis_filled >= size - 1e-6:
+            if min_entry_px <= eff_ask <= side_max_px + 1e-6 and vis_filled >= size - 1e-6:
                 if (
                     max_plaus_edge > 0.0
                     and (p_side - eff_ask) > max_plaus_edge + 1e-9
@@ -956,28 +1052,29 @@ def plan_decision(
                     else:
                         if best_taker is None or taker_edge > best_taker[0]:
                             ioc_lim = _compute_ioc_buy_limit(
-                                eff_ask, p_side, min_taker_edge, tau_s, fee_rate, params, max_entry_px,
+                                eff_ask, p_side, min_taker_edge, tau_s, fee_rate, params, side_max_px,
                                 min_sweep_px=vis_worst, vol_bps=live_vol,
                             )
-                            best_taker = (taker_edge, side, eff_ask, fee, ioc_lim)
+                            if ioc_lim is not None:
+                                best_taker = (taker_edge, side, eff_ask, fee, ioc_lim)
 
-        # Passive Maker fallback: strictly forbidden during ANY spot shock or high-vol regime
+        # Passive Maker fallback: strictly forbidden during ANY spot shock, high-vol regime, or post-flip add
         bid = tb.best_bid
         if (
-            enable_maker
+            side_allow_maker
             and not is_shock_any
             and tb.spread <= max_book_spread + 1e-6
             and quote_attempts < max_quote_attempts
             and bid is not None
-            and min_entry_px <= bid <= max_entry_px + 1e-6
+            and min_entry_px <= bid <= side_max_px + 1e-6
         ):
             if not maker_vol_ok:
                 high_vol_maker_msg = (
                     f"v3.4: 高波动暂停被动 Maker 挂单 (5m波动率 {live_vol:.1f} > {maker_max_vol:.0f} bps)"
                 )
             else:
-                maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= max_entry_px) else round(bid, 2)
-                maker_px = min(max_entry_px, max(min_entry_px, maker_px))
+                maker_px = round(bid + 0.01, 2) if (ask is not None and bid + 0.01 < ask and bid + 0.01 <= side_max_px) else round(bid, 2)
+                maker_px = min(side_max_px, max(min_entry_px, maker_px))
                 if (
                     max_plaus_edge > 0.0
                     and (p_side - maker_px) > max_plaus_edge + 1e-9

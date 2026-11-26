@@ -357,8 +357,11 @@ class PaperRunner:
         self.window_unwound = False
         self._ext_div_since_up = None
         self._ext_div_since_dn = None
+        self._ext_div_last_seen_up = None
+        self._ext_div_last_seen_dn = None
         self.entries_count = 0
         self.flips_count = 0
+        self.last_flip_side = None
         self.quote_attempts = 0
         self.entry_order_ids = set()
         self.last_entry_fill_t = None
@@ -394,6 +397,7 @@ class PaperRunner:
         self._entry_p_up = None
         self._entry_mkt_up = None
         self._entry_side_prob = None
+        self._active_leg_entry_prob = None
         if resume_from_live:
             self._try_resume_from_live(slug)
 
@@ -464,19 +468,46 @@ class PaperRunner:
             seen_oids = set()
             entry_cnt = 0
             flips_cnt = 0
+            last_flip = None
             sim_u = 0.0
             sim_d = 0.0
-            for f in entry_fills:
-                oid = f.get("order_id")
+            for f in self.fills:
+                purp = str(f.get("purpose") or "entry")
                 f_side = f.get("side")
                 f_sz = float(f.get("size", 0.0) or 0.0)
+                if purp == "unwind":
+                    if f_side == "Up":
+                        sim_u = max(0.0, sim_u - f_sz)
+                    elif f_side == "Down":
+                        sim_d = max(0.0, sim_d - f_sz)
+                    continue
+                if purp != "entry":
+                    if f_side == "Up":
+                        sim_u += f_sz
+                    elif f_side == "Down":
+                        sim_d += f_sz
+                    continue
+                oid = f.get("order_id")
                 pre_gap = sim_u - sim_d
                 is_new_order = (oid is None) or (oid not in seen_oids)
                 if oid is not None:
                     seen_oids.add(oid)
                     self.entry_order_ids.add(oid)
-                if is_new_order and ((f_side == "Up" and pre_gap < -1e-4) or (f_side == "Down" and pre_gap > 1e-4)):
+                is_flip_fill = is_new_order and (
+                    (f_side == "Up" and pre_gap < -1e-4)
+                    or (f_side == "Down" and pre_gap > 1e-4)
+                    or (
+                        abs(pre_gap) <= 1e-4
+                        and sim_u > 1e-4
+                        and sim_d > 1e-4
+                        and last_flip in ("Up", "Down")
+                        and f_side in ("Up", "Down")
+                        and f_side != last_flip
+                    )
+                )
+                if is_flip_fill:
                     flips_cnt += 1
+                    last_flip = f_side
                 if f_side == "Up":
                     sim_u += f_sz
                 elif f_side == "Down":
@@ -485,6 +516,13 @@ class PaperRunner:
                     entry_cnt += 1
             self.entries_count = entry_cnt
             self.flips_count = flips_cnt
+            saved_flip_side = raw.get("last_flip_side")
+            self.last_flip_side = saved_flip_side if saved_flip_side in ("Up", "Down") else last_flip
+            try:
+                saved_qa = int(raw.get("quote_attempts", 0) or 0)
+                self.quote_attempts = max(0, saved_qa)
+            except (TypeError, ValueError):
+                self.quote_attempts = 0
             if entry_fills:
                 try:
                     self.last_entry_fill_t = float(entry_fills[-1].get("t"))
@@ -550,6 +588,14 @@ class PaperRunner:
                 self._basis_ema = float(saved_basis)
                 self._basis_updated_t = saved_now
                 self._basis_sample_count = max(self._basis_sample_count, 10)
+                self._basis_anomaly_active = bool(raw.get("basis_anomaly_active", False))
+                try:
+                    b_dev_saved = float(raw.get("basis_dev_usd", 0.0) or 0.0)
+                    if math.isfinite(b_dev_saved):
+                        self._last_basis_dev_usd = max(0.0, b_dev_saved)
+                except (TypeError, ValueError):
+                    pass
+                self._basis_recover_since = None
         except (TypeError, ValueError):
             pass
 
@@ -558,6 +604,7 @@ class PaperRunner:
             self.decision_timeline = [it for it in restored_tl if isinstance(it, dict)][-50:]
         for attr_name, json_key in (
             ("_entry_side_prob", "entry_side_prob"),
+            ("_active_leg_entry_prob", "active_leg_entry_prob"),
             ("_entry_p_up", "entry_p_up"),
             ("_entry_mkt_up", "entry_mkt_up"),
             ("_mid_p_up", "mid_p_up"),
@@ -569,6 +616,8 @@ class PaperRunner:
                     setattr(self, attr_name, float(val))
             except (TypeError, ValueError):
                 pass
+        if self._active_leg_entry_prob is None and self._entry_side_prob is not None:
+            self._active_leg_entry_prob = self._entry_side_prob
 
         if up_sh > 0 or dn_sh > 0 or self.fills:
             print(
@@ -623,7 +672,7 @@ class PaperRunner:
             prev_slug, prev_start, prev_end, prev_open,
             binance_open_px=float(raw.get("binance_open_px") or prev_open or 0.0),
             poly_spot=prev_close,
-            poly_open_provisional=False,
+            poly_open_provisional=bool(raw.get("poly_open_is_provisional", False)),
             resume_from_live=True,
         )
         self.close_window(close_px=prev_close, official_winner=None, winner_source="spot_fallback")
@@ -687,17 +736,38 @@ class PaperRunner:
             if order_id is None or order_id not in self.entry_order_ids:
                 if order_id is not None:
                     self.entry_order_ids.add(order_id)
-                if (side == "Up" and pre_gap < -1e-4) or (side == "Down" and pre_gap > 1e-4):
+                p_u_now = float(getattr(self, "last_prob_up", 0.5))
+                p_side_now = round(p_u_now if side == "Up" else (1.0 - p_u_now), 4)
+                prev_flip_side = getattr(self, "last_flip_side", None)
+                is_flip_entry = (
+                    (side == "Up" and pre_gap < -1e-4)
+                    or (side == "Down" and pre_gap > 1e-4)
+                    or (
+                        abs(pre_gap) <= 1e-4
+                        and pre_u > 1e-4
+                        and pre_d > 1e-4
+                        and prev_flip_side in ("Up", "Down")
+                        and side in ("Up", "Down")
+                        and side != prev_flip_side
+                    )
+                )
+                if is_flip_entry:
                     self.flips_count = getattr(self, "flips_count", 0) + 1
+                    self.last_flip_side = side
+                    # Reset active-leg probability anchor on flip so post-flip pyramid adds
+                    # evaluate PYRAMID_MAX_PROB_DROP against the new flipped direction, not the abandoned leg.
+                    self._active_leg_entry_prob = p_side_now
                 # Attribute the round to the regime that actually allowed the
                 # first entry, not to whichever regime spent the most ticks.
                 if self.entries_count == 0 and self.entry_regime is None:
                     self.entry_regime = self._last_regime
                 if self.entries_count == 0 and getattr(self, "_entry_p_up", None) is None:
-                    p_u_now = float(getattr(self, "last_prob_up", 0.5))
                     self._entry_p_up = round(p_u_now, 4)
                     self._entry_mkt_up = round(float(getattr(self, "last_poly_up", 0.5)), 4)
-                    self._entry_side_prob = round(p_u_now if side == "Up" else (1.0 - p_u_now), 4)
+                    self._entry_side_prob = p_side_now
+                    self._active_leg_entry_prob = p_side_now
+                elif getattr(self, "_active_leg_entry_prob", None) is None:
+                    self._active_leg_entry_prob = p_side_now
                 self.entries_count += 1
                 # Grant each new entry stage its own fresh quote_attempts budget
                 self.quote_attempts = 0
@@ -1062,14 +1132,20 @@ class PaperRunner:
 
                         # Huber-clip single-sample basis jump once warmed up + slow low-pass EMA
                         # so 60s V-shaped pullbacks do not jerk the exchange basis estimate.
-                        sample = inst_basis
-                        if self._basis_sample_count >= 10:
-                            delta = max(-35.0, min(35.0, inst_basis - self._basis_ema))
-                            sample = self._basis_ema + delta
-                        alpha = 0.03 if self._basis_sample_count >= 10 else 0.15
-                        self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
+                        # CRITICAL: Freeze _basis_ema while basis anomaly is active (or just tripped)
+                        # so corrupted feed samples cannot drag _basis_ema toward the bad value and
+                        # cause a false auto-recovery.
+                        if not self._basis_anomaly_active:
+                            sample = inst_basis
+                            if self._basis_sample_count >= 10:
+                                delta = max(-35.0, min(35.0, inst_basis - self._basis_ema))
+                                sample = self._basis_ema + delta
+                            alpha = 0.03 if self._basis_sample_count >= 10 else 0.15
+                            self._basis_ema = (1.0 - alpha) * self._basis_ema + alpha * sample
+                            self._basis_sample_count += 1
                     self._basis_updated_t = now
-                    self._basis_sample_count += 1
+                    if self._basis_sample_count == 0:
+                        self._basis_sample_count = 1
                     self._last_basis_poly_px = float(poly_spot)
                     if poly_spot_ts is not None and float(poly_spot_ts) > 0.0:
                         self._last_basis_poly_t = float(poly_spot_ts)
@@ -1421,8 +1497,10 @@ class PaperRunner:
             for o in self.pending_cancels
             if getattr(o, "is_buy", True)
         )
+        fee_rate_lock = float(config.PARAMS.get("TAKER_FEE_RATE", 0.07))
         pending_taker_locked = sum(
-            max(0.0, float(pt["want"])) * float(pt["ioc_limit_px"])
+            max(0.0, float(pt["want"]))
+            * (float(pt["ioc_limit_px"]) + taker_fee_per_share(float(pt["ioc_limit_px"]), fee_rate_lock))
             for pt in getattr(self, "pending_takers", [])
             if pt.get("is_buy", True)
         )
@@ -1447,31 +1525,50 @@ class PaperRunner:
             else (self.pos_down.cash if net_gap < -1e-4 else 0.0)
         )
         max_plaus = float(config.PARAMS.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0)
-        if max_plaus > 0.0 and book_up.best_ask is not None and book_down.best_ask is not None:
-            gap_u = float(p_fair) - float(book_up.best_ask)
-            gap_d = (1.0 - float(p_fair)) - float(book_down.best_ask)
-            if gap_u > max_plaus + 1e-9:
-                if getattr(self, "_ext_div_since_up", None) is None:
-                    self._ext_div_since_up = now
-            else:
-                self._ext_div_since_up = None
-            if gap_d > max_plaus + 1e-9:
-                if getattr(self, "_ext_div_since_dn", None) is None:
-                    self._ext_div_since_dn = now
-            else:
-                self._ext_div_since_dn = None
+        div_grace_s = 1.0
+        if max_plaus > 0.0:
+            def _update_side_div(p_s: float, bk: OrderBook, since_attr: str, seen_attr: str):
+                ask_s = bk.best_ask
+                bid_s = bk.best_bid
+                if ask_s is not None:
+                    ref_px = float(ask_s)
+                    if bid_s is not None and float(bid_s) + 0.01 < ref_px:
+                        ref_px = min(ref_px, round(float(bid_s) + 0.01, 2))
+                    if (p_s - ref_px) > max_plaus + 1e-9:
+                        if getattr(self, since_attr, None) is None:
+                            setattr(self, since_attr, now)
+                        setattr(self, seen_attr, now)
+                    else:
+                        setattr(self, since_attr, None)
+                        setattr(self, seen_attr, None)
+                else:
+                    # Tolerate transient 1-frame empty-ask flicker (<1s) without wiping divergence clock
+                    last_seen = getattr(self, seen_attr, None)
+                    if last_seen is None or (now - float(last_seen)) > div_grace_s:
+                        setattr(self, since_attr, None)
+                        setattr(self, seen_attr, None)
+
+            _update_side_div(float(p_fair), book_up, "_ext_div_since_up", "_ext_div_last_seen_up")
+            _update_side_div(1.0 - float(p_fair), book_down, "_ext_div_since_dn", "_ext_div_last_seen_dn")
         else:
             self._ext_div_since_up = None
             self._ext_div_since_dn = None
+            self._ext_div_last_seen_up = None
+            self._ext_div_last_seen_dn = None
         ext_div_up_s = max(0.0, now - self._ext_div_since_up) if getattr(self, "_ext_div_since_up", None) is not None else 0.0
         ext_div_dn_s = max(0.0, now - self._ext_div_since_dn) if getattr(self, "_ext_div_since_dn", None) is not None else 0.0
+
+        active_entry_prob = getattr(self, "_active_leg_entry_prob", None)
+        if active_entry_prob is None:
+            active_entry_prob = getattr(self, "_entry_side_prob", None)
 
         eval_params = dict(
             config.PARAMS,
             AVAILABLE_CAPITAL=available_cap,
             COMMITTED_WINDOW_COST=committed_cost,
             HELD_LEG_COST=held_leg_cost,
-            ENTRY_SIDE_PROB=getattr(self, "_entry_side_prob", None),
+            ENTRY_SIDE_PROB=active_entry_prob,
+            LAST_FLIP_SIDE=getattr(self, "last_flip_side", None),
             SECONDS_SINCE_LAST_ENTRY=secs_since_entry,
             FLIPS_USED=getattr(self, "flips_count", 0),
             HAS_WORKING_ORDERS=any(o.cancel_at is None and o.remaining > 1e-6 for o in self.working_orders),
@@ -2338,11 +2435,13 @@ class PaperRunner:
         unwind_pnl_live = float(getattr(self, "realized_unwind_pnl", 0.0) or 0.0)
         net_pos_cash = self.pos_up.cash + self.pos_down.cash - unwind_pnl_live
         pos_committed = max(0.0, net_pos_cash)
+        fee_rate_live = float(config.PARAMS.get("TAKER_FEE_RATE", 0.07))
         reserved_orders = (
             sum(max(0.0, o.remaining) * o.price for o in self.working_orders if getattr(o, "is_buy", True))
             + sum(max(0.0, o.remaining) * o.price for o in self.pending_cancels if getattr(o, "is_buy", True))
             + sum(
-                max(0.0, float(pt["want"])) * float(pt["ioc_limit_px"])
+                max(0.0, float(pt["want"]))
+                * (float(pt["ioc_limit_px"]) + taker_fee_per_share(float(pt["ioc_limit_px"]), fee_rate_live))
                 for pt in getattr(self, "pending_takers", [])
                 if pt.get("is_buy", True)
             )
@@ -2411,11 +2510,15 @@ class PaperRunner:
             "window_unwound": bool(getattr(self, "window_unwound", False)),
             "basis_anomaly_active": bool(getattr(self, "_basis_anomaly_active", False)),
             "basis_dev_usd": round(float(getattr(self, "_last_basis_dev_usd", 0.0) or 0.0), 2),
+            "poly_open_is_provisional": bool(getattr(self, "poly_open_is_provisional", False)),
+            "quote_attempts": int(getattr(self, "quote_attempts", 0) or 0),
+            "last_flip_side": getattr(self, "last_flip_side", None),
             "network": getattr(self, "net_stats", {}),
             "api_schema_guard": getattr(self, "_api_schema_guard", {"paused": False, "source": "", "reason": ""}),
             "last_decision": self.decisions[-1] if self.decisions else None,
             "decision_timeline": getattr(self, "decision_timeline", [])[-30:],
             "entry_side_prob": getattr(self, "_entry_side_prob", None),
+            "active_leg_entry_prob": getattr(self, "_active_leg_entry_prob", None),
             "entry_p_up": getattr(self, "_entry_p_up", None),
             "entry_mkt_up": getattr(self, "_entry_mkt_up", None),
             "mid_p_up": getattr(self, "_mid_p_up", None),

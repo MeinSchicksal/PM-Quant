@@ -239,13 +239,17 @@ def _public_round(record, detail=None, active=False):
     pos_down = float(pos_down_raw.get("shares", 0.0)) if isinstance(pos_down_raw, dict) else _num(pos_down_raw)
     
     if isinstance(pos_up_raw, dict) and isinstance(pos_down_raw, dict):
-        total_cost = float(pos_up_raw.get("cash", 0.0)) + float(pos_down_raw.get("cash", 0.0))
+        total_cost = (
+            float(pos_up_raw.get("cash", 0.0))
+            + float(pos_down_raw.get("cash", 0.0))
+            + _num(record.get("unwind_cost_basis", 0.0))
+        )
     else:
         total_cost = _num(record.get("total_cost", 0.0))
 
     proceeds = _num(record.get("proceeds", 0.0))
     if active:
-        proceeds = 0.0
+        proceeds = _num(record.get("unwind_proceeds", 0.0))
 
     return {
         "slug": slug,

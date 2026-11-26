@@ -78,6 +78,7 @@ class MarketFeed:
         self._net_lock = threading.Lock()
         self._poly_lock = threading.Lock()
         self._record_lock = threading.Lock()
+        self._fail_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_feed")
         self.last_open_is_official = False
 
@@ -977,13 +978,43 @@ class MarketFeed:
         token_id: str,
         sess: requests.Session = None,
         max_attempts: int = 2,
+        timeout: tuple = (0.9, 1.2),
     ) -> Tuple[Optional[OrderBook], float, int, Optional[dict]]:
         http = sess or self.session
         url = f"https://clob.polymarket.com/book?token_id={token_id}"
+        fail_lock = getattr(self, "_fail_lock", None)
+
+        def _mark_poly_ok():
+            if fail_lock is not None:
+                with fail_lock:
+                    self._consecutive_poly_fails = 0
+            else:
+                self._consecutive_poly_fails = 0
+
+        def _mark_poly_fail():
+            should_reprobe = False
+            now_f = time.time()
+            if fail_lock is not None:
+                with fail_lock:
+                    self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
+                    if self._consecutive_poly_fails >= 4 and (now_f - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
+                        self._last_reprobe_t = now_f
+                        should_reprobe = True
+            else:
+                self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
+                if self._consecutive_poly_fails >= 4 and (now_f - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
+                    self._last_reprobe_t = now_f
+                    should_reprobe = True
+            if should_reprobe and getattr(self, "_executor", None) is not None:
+                try:
+                    self._executor.submit(self.reprobe_connectivity)
+                except Exception:
+                    pass
+
         for attempt in range(max(1, int(max_attempts))):
             t0 = time.perf_counter()
             try:
-                resp = http.get(url, timeout=(0.9, 1.2))
+                resp = http.get(url, timeout=timeout)
                 lat_ms = (time.perf_counter() - t0) * 1000.0
                 byte_count = len(resp.content)
                 if resp.status_code == 200:
@@ -1018,7 +1049,7 @@ class MarketFeed:
                         key=lambda x: x[0],
                     )
                     self.record_api_schema_ok("clob_book")
-                    self._consecutive_poly_fails = 0
+                    _mark_poly_ok()
                     now_t = time.time()
                     raw_ev = {
                         "t": round(now_t, 2),
@@ -1053,25 +1084,13 @@ class MarketFeed:
                     continue
                 if resp.status_code in (400, 410, 422):
                     self.record_api_schema_error("clob_book", f"HTTP {resp.status_code}", threshold=3)
-                self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
-                if self._consecutive_poly_fails >= 4 and (time.time() - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
-                    if getattr(self, "_executor", None) is not None:
-                        try:
-                            self._executor.submit(self.reprobe_connectivity)
-                        except Exception:
-                            pass
+                _mark_poly_fail()
                 return None, lat_ms, byte_count, None
             except Exception:
                 if attempt + 1 < max_attempts:
                     time.sleep(0.10)
                     continue
-                self._consecutive_poly_fails = getattr(self, "_consecutive_poly_fails", 0) + 1
-                if self._consecutive_poly_fails >= 4 and (time.time() - getattr(self, "_last_reprobe_t", 0.0)) >= 30.0:
-                    if getattr(self, "_executor", None) is not None:
-                        try:
-                            self._executor.submit(self.reprobe_connectivity)
-                        except Exception:
-                            pass
+                _mark_poly_fail()
                 return None, 0.0, 0, None
         return None, 0.0, 0, None
 
@@ -1081,11 +1100,12 @@ class MarketFeed:
         outcome_name: str = "token",
         use_worker_session: bool = False,
         max_attempts: int = 2,
+        timeout: tuple = (0.9, 1.2),
     ) -> OrderBook:
         """Fetch Polymarket CLOB order book and last_trade_price (thread-safe when use_worker_session=True)."""
         sess = self._get_worker_session() if use_worker_session else None
         book, lat_ms, byte_count, raw_ev = self._fetch_order_book_raw(
-            token_id, sess=sess, max_attempts=max_attempts
+            token_id, sess=sess, max_attempts=max_attempts, timeout=timeout
         )
         if lat_ms > 0:
             self._record_net("poly", lat_ms, byte_count)

@@ -675,45 +675,62 @@ class PipelineDriver:
                             pass
 
                     def _delayed_book(_side_name: str):
-                        # 非阻塞异步拉取到达时刻真实双边盘口：主循环零阻塞等待，完成瞬间通过 _wake_event 0ms 唤醒收割。
-                        def _one(tok_key: str, label: str):
-                            tok = active_tokens.get(tok_key)
+                        # 非阻塞异步拉取到达时刻真实双边盘口（无同池嵌套提交，杜绝高延迟下线程池自死锁）：
+                        # 直接提交 Up/Down 两个并行 HTTP 任务，由轻量句柄按共享 0.65s 截止时间非阻塞收敛。
+                        tok_u = active_tokens.get("token_up")
+                        tok_d = active_tokens.get("token_down")
+
+                        def _one(tok: str, label: str):
                             if not tok:
                                 return None
-                            rest_bk = self.feed.fetch_order_book(tok, label, use_worker_session=True, max_attempts=1)
+                            rest_bk = self.feed.fetch_order_book(
+                                tok, label, use_worker_session=True, max_attempts=1, timeout=(0.45, 0.55)
+                            )
                             if rest_bk is not None and (rest_bk.best_bid is not None or rest_bk.best_ask is not None):
                                 return rest_bk
                             return self.book_ws.get_order_book(tok, max_age_s=1.5, require_recent_msg=True)
 
-                        def _fetch_both():
-                            f_du = self._taker_book_executor.submit(_one, "token_up", "Up")
-                            f_dd = self._taker_book_executor.submit(_one, "token_down", "Down")
-                            # Share a single parallel 0.65s deadline (< runner 0.85s timeout) so slow REST
-                            # falls back cleanly to fresh live book_ws instead of timing out at 0.75+0.75=1.50s.
-                            futures_wait([f_du, f_dd], timeout=0.65)
-                            r_u = None
-                            if f_du.done():
-                                try:
-                                    r_u = f_du.result(timeout=0.0)
-                                except Exception:
-                                    r_u = None
-                            if r_u is None:
-                                tok_u = active_tokens.get("token_up")
-                                r_u = self.book_ws.get_order_book(tok_u, max_age_s=1.5, require_recent_msg=True) if tok_u else None
-                            r_d = None
-                            if f_dd.done():
-                                try:
-                                    r_d = f_dd.result(timeout=0.0)
-                                except Exception:
-                                    r_d = None
-                            if r_d is None:
-                                tok_d = active_tokens.get("token_down")
-                                r_d = self.book_ws.get_order_book(tok_d, max_age_s=1.5, require_recent_msg=True) if tok_d else None
-                            return (r_u, r_d)
+                        f_du = self._taker_book_executor.submit(_one, tok_u, "Up")
+                        f_dd = self._taker_book_executor.submit(_one, tok_d, "Down")
+                        f_du.add_done_callback(lambda _f: self._wake_event.set())
+                        f_dd.add_done_callback(lambda _f: self._wake_event.set())
+                        deadline_mono = time.monotonic() + 0.65
+                        book_ws_ref = self.book_ws
 
-                        fut = self._taker_book_executor.submit(_fetch_both)
-                        fut.add_done_callback(lambda _f: self._wake_event.set())
-                        return fut
+                        class _DualBookFuture:
+                            def done(self) -> bool:
+                                return (f_du.done() and f_dd.done()) or (time.monotonic() >= deadline_mono)
+
+                            def cancel(self) -> bool:
+                                c1 = f_du.cancel()
+                                c2 = f_dd.cancel()
+                                return bool(c1 or c2)
+
+                            def result(self):
+                                r_u = None
+                                if f_du.done():
+                                    try:
+                                        r_u = f_du.result(timeout=0.0)
+                                    except Exception:
+                                        r_u = None
+                                else:
+                                    f_du.cancel()
+                                if r_u is None and tok_u:
+                                    r_u = book_ws_ref.get_order_book(tok_u, max_age_s=1.5, require_recent_msg=True)
+
+                                r_d = None
+                                if f_dd.done():
+                                    try:
+                                        r_d = f_dd.result(timeout=0.0)
+                                    except Exception:
+                                        r_d = None
+                                else:
+                                    f_dd.cancel()
+                                if r_d is None and tok_d:
+                                    r_d = book_ws_ref.get_order_book(tok_d, max_age_s=1.5, require_recent_msg=True)
+                                return (r_u, r_d)
+
+                        return _DualBookFuture()
 
                     net_summary = dict(self.feed.get_net_summary())
                     net_summary["ws_connected"] = bool(self.trade_stream.connected)

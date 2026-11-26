@@ -147,9 +147,12 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
             self.assertEqual(len(runner.pending_takers), 1)
             self.assertEqual(runner.pos_up.shares, 0.0)
             live = json.loads(runner.live_file.read_text(encoding="utf-8"))
+            import config
+            from core.execution import taker_fee_per_share
+            exp_reserved = 5.0 * (0.54 + taker_fee_per_share(0.54, config.PARAMS["TAKER_FEE_RATE"]))
             self.assertAlmostEqual(live["equity"], 100.0, places=2)
-            self.assertAlmostEqual(live["reserved_orders_cost"], 5.0 * 0.54, places=2)
-            self.assertAlmostEqual(live["available_capital"], 100.0 - 5.0 * 0.54, places=2)
+            self.assertAlmostEqual(live["reserved_orders_cost"], exp_reserved, places=2)
+            self.assertAlmostEqual(live["available_capital"], 100.0 - exp_reserved, places=2)
 
             # 0.15s 时仍未到达，保持等待不重复下单
             runner.step(

@@ -1,6 +1,9 @@
 """Unit tests for v3.4 Volatility-Adaptive Physics, Anomaly/Desync Guards & Extreme Take-Profit."""
+import shutil
 import tempfile
+import time
 import unittest
+from pathlib import Path
 
 import config
 from core.policy import plan_decision, required_entry_edge, _effective_adverse_spot_thresh
@@ -17,9 +20,9 @@ def _book(bid: float, ask: float, depth: float = 50.0) -> OrderBook:
     )
 
 
-def _spot(price: float = 75000.0, open_px: float = 75000.0, vel: float = 0.0, vol: float = 15.0) -> SpotState:
+def _spot(price: float = 75000.0, open_px: float = 75000.0, vel: float = 0.0, vol: float = 15.0, t: float = 1000.0) -> SpotState:
     return SpotState(
-        timestamp=1000.0,
+        timestamp=t,
         price=price,
         open_price=open_px,
         realized_vol_bps=vol,
@@ -286,6 +289,191 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         )
         self.assertEqual(d_mid_ok.action, "taker_buy")
         self.assertEqual(d_mid_ok.side, "Up")
+
+    def test_audit_p0_post_flip_fallthrough_direction_lock_and_pyramid_discipline(self):
+        """P0 #1: After flip leaving |net_gap| < 5, NEVER buy back abandoned side or bypass PYRAMID_* rules."""
+        base = dict(
+            config.PARAMS,
+            AVAILABLE_CAPITAL=100.0,
+            COMMITTED_WINDOW_COST=6.50,
+            SECONDS_SINCE_LAST_ENTRY=15.0,
+            HAS_WORKING_ORDERS=False,
+            FLIPS_USED=1,
+            LAST_FLIP_SIDE="Down",
+            ENTRY_SIDE_PROB=0.65,
+        )
+        # UP=5 (@0.52), DN=7 (@0.557) -> net_gap = -2 < 5
+        pos_u, pos_d = Position(5.0, 2.60), Position(7.0, 3.90)
+
+        # 1) Market reverses back to Up (P*(Up)=0.82 vs ask=$0.55): MUST NOT buy back Up (would be 2nd flip!)
+        d_back = plan_decision(
+            pos_u, pos_d, _book(0.54, 0.55), _book(0.44, 0.45), _spot(vol=15.0), tau_s=100.0,
+            params=base, p_fair=0.82, entries_count=2,
+        )
+        self.assertEqual(d_back.action, "wait")
+
+        # 2) Early phase (tau=250s > 240s): post-flip add MUST be blocked even on locked side Down
+        d_early = plan_decision(
+            pos_u, pos_d, _book(0.30, 0.32), _book(0.66, 0.68), _spot(vol=15.0), tau_s=250.0,
+            params=base, p_fair=0.20, entries_count=2,
+        )
+        self.assertEqual(d_early.action, "wait")
+
+        # 3) Over PYRAMID_MAX_ABOVE_AVG (Down avg=0.557, max=0.707, ask=0.73): MUST be blocked
+        d_over_avg = plan_decision(
+            pos_u, pos_d, _book(0.26, 0.27), _book(0.72, 0.73), _spot(vol=15.0), tau_s=100.0,
+            params=base, p_fair=0.15, entries_count=2,
+        )
+        self.assertEqual(d_over_avg.action, "wait")
+
+        # 4) Maker-only wide spread on Down (ask=0.65 not enough taker edge, bid=0.59 has maker edge):
+        #    PYRAMID_ALLOW_MAKER=False MUST block passive Maker post-flip add
+        d_no_mk = plan_decision(
+            pos_u, pos_d, _book(0.35, 0.41), _book(0.59, 0.65), _spot(vol=15.0), tau_s=100.0,
+            params=base, p_fair=0.33, entries_count=2,
+        )
+        self.assertEqual(d_no_mk.action, "wait")
+
+    def test_audit_p0_flip_resets_active_leg_entry_prob(self):
+        """P0 #2: Flipping resets _active_leg_entry_prob so PYRAMID_MAX_PROB_DROP checks the NEW leg."""
+        tmp = Path(tempfile.mkdtemp(prefix="pm_v34_flip_prob_"))
+        try:
+            r = PaperRunner(ledger_dir=tmp)
+            r.start_window("btc-updown-5m-1800001800", 1800001800.0, 1800002100.0, 60000.0, 60000.0, 60000.0)
+            # First entry Up at P*(Up)=0.72
+            r.last_prob_up = 0.72
+            r.pos_up.shares += 5.0
+            r.pos_up.cash += 2.60
+            r._record_fill(1800001830.0, "Up", 0.52, 5.0, "taker", "entry")
+            self.assertAlmostEqual(r._entry_side_prob, 0.72, places=4)
+            self.assertAlmostEqual(r._active_leg_entry_prob, 0.72, places=4)
+
+            # Reversal flip to Down at P*(Up)=0.38 -> P*(Down)=0.62
+            r.last_prob_up = 0.38
+            r.pos_down.shares += 10.0
+            r.pos_down.cash += 5.00
+            r._record_fill(1800001880.0, "Down", 0.50, 10.0, "taker", "entry")
+            self.assertEqual(r.flips_count, 1)
+            self.assertEqual(r.last_flip_side, "Down")
+            # Initial attribution preserved, but active-leg probability anchor reset to Down's 0.62
+            self.assertAlmostEqual(r._entry_side_prob, 0.72, places=4)
+            self.assertAlmostEqual(r._active_leg_entry_prob, 0.62, places=4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_audit_p1_basis_anomaly_freezes_ema_no_false_recovery(self):
+        """P1 #3: Sustained +$150 basis corruption MUST freeze _basis_ema and never falsely recover."""
+        tmp = Path(tempfile.mkdtemp(prefix="pm_v34_basis_freeze_"))
+        try:
+            r = PaperRunner(ledger_dir=tmp)
+            t0 = 1800002100.0
+            r.start_window("btc-updown-5m-1800002100", t0, t0 + 300.0, 60000.0, 60000.0, 60000.0)
+            bu, bd = _book(0.49, 0.50), _book(0.49, 0.50)
+            for i in range(25):
+                ts = t0 + i * 0.6
+                r.step(ts, _spot(vol=15.0, price=60005.0, t=ts), bu, bd, poly_spot=60000.0, poly_spot_ts=ts, replay_mode=True)
+            ema_before = float(r._basis_ema)
+            self.assertFalse(r._basis_anomaly_active)
+
+            # Feed 60 consecutive corrupted samples (+$150 jump -> 36s of outage):
+            # previously _basis_ema drifted toward the bad feed and auto-recovered falsely!
+            for j in range(60):
+                ts = t0 + 20.0 + j * 0.6
+                r.step(ts, _spot(vol=15.0, price=60005.0, t=ts), bu, bd, poly_spot=59850.0, poly_spot_ts=ts, replay_mode=True)
+            self.assertTrue(r._basis_anomaly_active)
+            self.assertAlmostEqual(float(r._basis_ema), ema_before, places=4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_audit_p1_flip_blocked_by_extreme_divergence_and_early_net_cap(self):
+        """P1 #4 & #6: Flip respects MAX_PLAUSIBLE_EDGE guard and early-phase 5-share net exposure cap."""
+        p = dict(
+            config.PARAMS,
+            AVAILABLE_CAPITAL=100.0,
+            COMMITTED_WINDOW_COST=3.50,
+            HELD_LEG_COST=3.50,
+            SECONDS_SINCE_LAST_ENTRY=20.0,
+            FLIPS_USED=0,
+            EXTREME_DIV_DOWN_S=4.5,
+        )
+        # 1) Sustained extreme divergence on Down (P*(Down)=0.85 vs ask=$0.45, gap=0.40 > 0.24 for 4.5s) -> BLOCK flip!
+        d_div = plan_decision(
+            Position(5.0, 3.50), Position(), _book(0.54, 0.55), _book(0.44, 0.45),
+            _spot(vol=15.0), tau_s=110.0, params=p, p_fair=0.15, entries_count=1,
+        )
+        self.assertEqual(d_div.action, "wait")
+
+        # 2) Early phase (tau=260s > 240s): 5sh Up @$0.70 ($3.50) reversing at Down ask=$0.66
+        #    Breakeven needs 11sh Down -> net_gap would be 6sh > 5sh early cap -> MUST BLOCK!
+        p_early = dict(p, EXTREME_DIV_DOWN_S=0.0)
+        d_cap = plan_decision(
+            Position(5.0, 3.50), Position(), _book(0.33, 0.34), _book(0.65, 0.66),
+            _spot(vol=15.0), tau_s=260.0, params=p_early, p_fair=0.20, entries_count=1,
+        )
+        self.assertEqual(d_cap.action, "wait")
+
+    def test_audit_p2_validate_params_ioc_limit_and_resume_state(self):
+        """P2 #7, #8, #9 & P3 #10: Param invariants, IOC sweep cap, crash-resume state, and server unwind accounting."""
+        from core.policy import _compute_ioc_buy_limit
+        from web.server import _public_round
+
+        # #7 validate_params catches FLIP_MAX_SHARES > MAX_LOTS*LOT_SIZE and PYRAMID_MIN_TAU_S > PYRAMID_MAX_TAU_S
+        bad_flip = dict(config.PARAMS, FLIP_MAX_SHARES=25.0)
+        with self.assertRaises(ValueError):
+            config.validate_params(bad_flip)
+        bad_pyr = dict(config.PARAMS, PYRAMID_MIN_TAU_S=250.0, PYRAMID_MAX_TAU_S=200.0)
+        with self.assertRaises(ValueError):
+            config.validate_params(bad_pyr)
+
+        # #9 _compute_ioc_buy_limit rejects sweep exceeding max_cap_px or leaving no positive EV
+        self.assertIsNone(
+            _compute_ioc_buy_limit(0.73, 0.80, 0.035, 120.0, 0.07, config.PARAMS, 0.74, min_sweep_px=0.76)
+        )
+        self.assertIsNone(
+            _compute_ioc_buy_limit(0.60, 0.60, 0.035, 120.0, 0.07, config.PARAMS, 0.74, min_sweep_px=0.61)
+        )
+
+        # #8 _try_resume_from_live restores basis_anomaly_active, last_flip_side, active_leg_entry_prob, quote_attempts
+        tmp = Path(tempfile.mkdtemp(prefix="pm_v34_resume_"))
+        try:
+            r1 = PaperRunner(ledger_dir=tmp)
+            t0 = 1800002400.0
+            r1.start_window("btc-updown-5m-1800002400", t0, t0 + 300.0, 60000.0, 60000.0, 60000.0)
+            r1._basis_ema = 5.0
+            r1._basis_updated_t = t0 + 10.0
+            r1._basis_sample_count = 15
+            r1._basis_anomaly_active = True
+            r1._last_basis_dev_usd = 120.0
+            r1.last_flip_side = "Down"
+            r1._active_leg_entry_prob = 0.64
+            r1.quote_attempts = 3
+            sp_live = _spot(vol=15.0, price=60005.0, t=time.time())
+            sp_live.spot_source = f"{config.PARAMS.get('SPOT_WS_PROVIDER', 'coinbase')}_ws"
+            r1._write_live(time.time(), sp_live, _book(0.49, 0.50), _book(0.49, 0.50))
+
+            r2 = PaperRunner(ledger_dir=tmp)
+            r2.start_window("btc-updown-5m-1800002400", t0, t0 + 300.0, 60000.0, 60000.0, 60000.0, resume_from_live=True)
+            self.assertTrue(r2._basis_anomaly_active)
+            self.assertEqual(r2.last_flip_side, "Down")
+            self.assertAlmostEqual(r2._active_leg_entry_prob, 0.64, places=4)
+            self.assertEqual(r2.quote_attempts, 3)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # #10 _public_round active mode includes unwind cost and proceeds
+        pub = _public_round({
+            "slug": "btc-updown-5m-1800002400",
+            "start": 1800002400.0,
+            "end": 1800002700.0,
+            "pos_up": {"shares": 0.0, "cash": 0.0},
+            "pos_down": {"shares": 0.0, "cash": 0.0},
+            "unwind_cost_basis": 2.60,
+            "unwind_proceeds": 4.70,
+            "fills_count": 2,
+            "traded": True,
+        }, active=True)
+        self.assertAlmostEqual(pub["total_cost"], 2.60, places=4)
+        self.assertAlmostEqual(pub["proceeds"], 4.70, places=4)
 
 
 if __name__ == "__main__":

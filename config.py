@@ -229,6 +229,21 @@ def validate_params(params=None):
         errors.append("FLIP_MIN_PRICE exceeds FLIP_MAX_PRICE")
     if float(p.get("FLIP_MAX_SHARES", 10.0)) < float(p.get("MIN_ORDER_SHARES", 5.0)):
         errors.append("FLIP_MAX_SHARES is below MIN_ORDER_SHARES")
+    max_side_shares = float(p.get("LOT_SIZE", 5.0)) * int(p.get("MAX_LOTS", 4))
+    if float(p.get("FLIP_MAX_SHARES", 10.0)) > max_side_shares + 1e-6:
+        errors.append(
+            f"FLIP_MAX_SHARES={p.get('FLIP_MAX_SHARES')} exceeds MAX_LOTS*LOT_SIZE={max_side_shares:.1f}"
+        )
+    if float(p.get("MIN_MODEL_VOL_BPS", 14.0)) <= 0.0:
+        errors.append("MIN_MODEL_VOL_BPS must be positive")
+    if float(p.get("VOL_EDGE_PIVOT_BPS", 25.0)) < 0.0:
+        errors.append("VOL_EDGE_PIVOT_BPS must be non-negative")
+    if float(p.get("MAX_PLAUSIBLE_EDGE", 0.0) or 0.0) < 0.0:
+        errors.append("MAX_PLAUSIBLE_EDGE must be non-negative")
+    pyr_min_t = float(p.get("PYRAMID_MIN_TAU_S", 30.0))
+    pyr_max_t = float(p.get("PYRAMID_MAX_TAU_S", 240.0))
+    if pyr_min_t > pyr_max_t:
+        errors.append(f"PYRAMID_MIN_TAU_S={pyr_min_t} exceeds PYRAMID_MAX_TAU_S={pyr_max_t}")
     min_tau = float(p.get("ENTRY_MIN_TAU_S", 15.0))
     late_tau = float(p.get("LATE_NO_NEW_ENTRY_TAU_S", 0.0) or 0.0)
     max_tau = float(p.get("ENTRY_MAX_TAU_S", 280.0))

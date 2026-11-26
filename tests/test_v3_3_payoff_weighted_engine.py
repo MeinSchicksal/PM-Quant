@@ -196,10 +196,14 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         self.assertIn("持有至结算", d_hold.reason)
 
         # 2) In v3.4 default (ALLOW_REENTRY_AFTER_PAIR=True, PYRAMID_ALLOW_AFTER_FLIP=True),
-        #    once 10s cooldown passes and the flipped side confirms strong edge, allows trend add within caps
-        p_after_v34 = dict(p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, COMMITTED_WINDOW_COST=6.5, SECONDS_SINCE_LAST_ENTRY=15.0)
+        #    once 10s cooldown passes and the flipped side confirms strong edge within PYRAMID_MAX_ABOVE_AVG,
+        #    allows same-side trend add within caps
+        p_after_v34 = dict(
+            p, HAS_WORKING_ORDERS=False, FLIPS_USED=1, LAST_FLIP_SIDE="Down",
+            COMMITTED_WINDOW_COST=6.5, SECONDS_SINCE_LAST_ENTRY=15.0, ENTRY_SIDE_PROB=0.80,
+        )
         d_readd = plan_decision(
-            Position(5.0, 2.60), Position(7.0, 3.90), _book(0.26, 0.28), _book(0.70, 0.72),
+            Position(5.0, 2.60), Position(7.0, 3.90), _book(0.30, 0.32), _book(0.66, 0.68),
             _spot(vel=-0.5), tau_s=85.0, params=p_after_v34, p_fair=0.15, entries_count=2,
         )
         self.assertEqual(d_readd.action, "taker_buy")

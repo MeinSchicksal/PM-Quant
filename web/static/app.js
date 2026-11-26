@@ -2086,9 +2086,13 @@ function updateMarket(live) {
       } else if (upShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill up">已买看涨</span><span class="bhv-pos-qty">${fmtShares(upShares)} 股</span>`;
         subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posUp.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(upCost))}</strong>`;
-      } else {
+      } else if (dnShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill down">已买看跌</span><span class="bhv-pos-qty">${fmtShares(dnShares)} 股</span>`;
         subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posDn.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(dnCost))}</strong>`;
+      } else {
+        const uwCls = unwindPnl >= 0 ? "up" : "down";
+        headlineEl.innerHTML = `<span class="bhv-pos-pill ${uwCls}">已落袋清仓</span><span class="bhv-pos-qty">${escapeHtml(fmtUsd(unwindPnl, true))}</span>`;
+        subEl.innerHTML = `<span class="bhv-sub-k">本轮已主动平仓锁定盈亏，等待结算</span>`;
       }
     }
   }
