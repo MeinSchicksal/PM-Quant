@@ -475,8 +475,8 @@ def _plan_inventory_management(
             and (allow_reentry_after_unwind or not window_unwound)
             and bool(params.get("ENABLE_PYRAMID_ADD", False))
             and (allow_add_after_flip or opp_shares < 1e-4)
-            and held_shares < max_net_shares_cap - 1e-4
-            and held_total_shares < max_shares_cap - 1e-4
+            and (held_shares + lot_size) <= max_net_shares_cap + 1e-4
+            and (held_total_shares + lot_size) <= max_shares_cap + 1e-4
             and pyr_min_tau <= tau_s <= pyr_max_tau
             and p_fair_held >= float(params.get("PYRAMID_MIN_PROB", 0.56))
             and held_book.spread <= pyr_max_spread + 1e-6
@@ -785,9 +785,12 @@ def plan_decision(
         return _wait(f"波段再入场冷却 ({float(elapsed_flat):.1f}s < {reentry_cd:.1f}s)", urgent=False)
 
     max_lots = int(params.get("MAX_LOTS", 1))
+    max_net_lots_top = int(params.get("MAX_NET_LOTS", max_lots))
     lot_size = float(params.get("LOT_SIZE", 5.0))
     size = float(lot_size)
     max_shares = lot_size * max_lots
+    max_net_shares_top = lot_size * max_net_lots_top
+    early_phase_min_tau_top = float(params.get("EARLY_PHASE_MIN_TAU_S", 0.0) or 0.0)
     if u_shares >= max_shares - 1e-4 or d_shares >= max_shares - 1e-4:
         return _wait(f"Max position reached ({max(u_shares, d_shares):.0f} shares), holding to settlement", urgent=True)
 
@@ -889,6 +892,17 @@ def plan_decision(
 
     for side, p_side, tb in (("Up", p_up, book_up), ("Down", p_down, book_down)):
         if p_side < min_prob:
+            continue
+
+        # Guard against partial-fill cap overshoot (e.g. 4.93sh partial fill in first 60s or 9.85sh -> 14.85sh)
+        side_after = (u_shares + size) if side == "Up" else (d_shares + size)
+        net_after = abs((u_shares + size - d_shares) if side == "Up" else (u_shares - (d_shares + size)))
+        eff_net_cap = (
+            lot_size
+            if (early_phase_min_tau_top > 0.0 and tau_s > early_phase_min_tau_top)
+            else max_net_shares_top
+        )
+        if side_after > max_shares + 1e-4 or net_after > eff_net_cap + 1e-4:
             continue
 
         # Pre-trade knife-drop guard (zero look-ahead)
