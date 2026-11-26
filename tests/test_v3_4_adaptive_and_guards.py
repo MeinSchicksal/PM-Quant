@@ -475,6 +475,85 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         self.assertAlmostEqual(pub["total_cost"], 2.60, places=4)
         self.assertAlmostEqual(pub["proceeds"], 4.70, places=4)
 
+    def test_audit_round2_estimator_continuity_async_dedup_postonly_and_last_record(self):
+        """Round-2 audit fixes: single-chain tau=60s continuity, async Taker dedup during HTTP wait,
+        no unactivated trade-print Post-Only bypass, and close_window setting runner.last_record."""
+        from core.estimator import estimate_p_fair
+        from core.types import Decision, Order
+
+        # 1) Single-chain estimate_p_fair must be continuous across tau=60s (no 3x eff_tau cliff)
+        sp_sc = _spot(price=60050.0, open_px=60000.0, vol=14.0)
+        sp_sc.basis_ema = None
+        sp_sc.binance_open_price = 60000.0
+        p_60_1 = estimate_p_fair(sp_sc, 60000.0, 60.1, 14.0)
+        p_60_0 = estimate_p_fair(sp_sc, 60000.0, 60.0, 14.0)
+        self.assertLess(abs(p_60_1 - p_60_0), 0.005)
+
+        # 2) Unactivated maker order (now < live_at) MUST NOT be filled by a trade print with tp_t >= live_at
+        tmp = Path(tempfile.mkdtemp(prefix="pm_v34_r2_"))
+        try:
+            r = PaperRunner(ledger_dir=tmp)
+            t0 = 1800003000.0
+            r.start_window("btc-updown-5m-1800003000", t0, t0 + 300.0, 60000.0, 60000.0, 60000.0)
+            o = Order(
+                id=1, client_order_id="test_r2_1", side="Up", price=0.50, size=5.0, remaining=5.0,
+                placed_at=t0 + 50.0, live_at=t0 + 50.20, activated=False, purpose="entry",
+            )
+            r.matcher.register_order(o, _book(0.49, 0.51), latency_s=0.20)
+            r.working_orders.append(o)
+            # Tick at now = t0 + 50.15 (< live_at) with ahead-of-clock trade print at t0 + 50.25:
+            # must NOT activate or fill before activate_order(..., post_only=True) runs!
+            r.step(
+                t0 + 50.15, _spot(price=60000.0, open_px=60000.0, t=t0 + 50.15),
+                _book(0.49, 0.50), _book(0.50, 0.51),
+                trade_prints=[{"outcome": "Up", "side": "SELL", "price": 0.49, "size": 50.0, "timestamp": t0 + 50.25, "received_at": t0 + 50.25}],
+                replay_mode=True,
+            )
+            self.assertEqual(r.pos_up.shares, 0.0)
+            self.assertFalse(o.activated)
+
+            # 3) Async pending taker dedup: if old Maker fills WHILE waiting for async delayed book HTTP,
+            #    the settling Taker MUST still cancel instead of double-filling to 10 shares.
+            r.working_orders.clear()
+            r.pending_cancels.clear()
+            r.pending_takers.clear()
+            flag = {"done": False}
+            class _FakeFut:
+                def done(self):
+                    return flag["done"]
+                def result(self):
+                    return (_book(0.50, 0.51), _book(0.49, 0.50))
+            r.pending_takers.append({
+                "submit_t": t0 + 60.0,
+                "arrive_at": t0 + 60.20,
+                "wire_lat": 0.20,
+                "action": Decision(action="taker_buy", side="Up", price=0.51, size=5.0, limit_price=0.53),
+                "want": 5.0,
+                "is_buy": True,
+                "ioc_limit_px": 0.53,
+                "min_order_sh": 5.0,
+                "pre_side_shares": 0.0,
+            })
+            # First poll at arrive_at launches async fetch (not done yet, pos_up=0)
+            r._settle_due_pending_takers(t0 + 60.20, _book(0.50, 0.51), _book(0.49, 0.50), delayed_book_fetcher=lambda _s: _FakeFut())
+            self.assertEqual(len(r.pending_takers), 1)
+            # While HTTP is in flight, old pending_cancel Maker fills 5 shares!
+            r.pos_up.shares += 5.0
+            r.pos_up.cash += 2.50
+            # Next tick HTTP completes -> Taker must be cancelled (no double-fill to 10 shares)
+            flag["done"] = True
+            r._settle_due_pending_takers(t0 + 60.35, _book(0.50, 0.51), _book(0.49, 0.50), delayed_book_fetcher=lambda _s: _FakeFut())
+            self.assertEqual(len(r.pending_takers), 0)
+            self.assertAlmostEqual(r.pos_up.shares, 5.0, places=4)
+            self.assertTrue(any(a.get("action") == "taker_reject" and "取消重复Taker追单" in (a.get("reason") or "") for a in r.actions))
+
+            # 4) close_window sets runner.last_record directly
+            r.close_window(close_px=60050.0, official_winner="Up", winner_source="ledger")
+            self.assertEqual(r.last_record.get("slug"), "btc-updown-5m-1800003000")
+            self.assertEqual(r.last_record.get("winner"), "Up")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

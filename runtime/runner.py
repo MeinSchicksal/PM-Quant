@@ -216,6 +216,7 @@ class PaperRunner:
         self.working_orders = []
         self.pending_cancels = []
         self.pending_takers = []
+        self.last_record = {}
         self.fills = []
         self.decisions = []
         self.decision_timeline = []
@@ -344,6 +345,7 @@ class PaperRunner:
         self.working_orders = []
         self.pending_cancels = []
         self.pending_takers = []
+        self.last_record = {}
         self.fills = []
         self.decisions = []
         self.decision_timeline = []
@@ -953,17 +955,19 @@ class PaperRunner:
             lat_ms = int(round(float(pt["wire_lat"]) * 1000))
             reject_reason = None
 
-            # 检查传输期间同侧在途撤单是否已成交，防止重复追单超仓（仅首轮调整并回写，保证多次轮询幂等）
-            if action.action == "taker_buy" and not pt.get("_want_adjusted", False):
+            # 持续追踪传输与异步拉盘口期间同侧在途撤单是否已成交，防止旧 Maker 在等待 HTTP 期间成交导致双倍超仓
+            if action.action == "taker_buy":
                 cur_side_shares = self.pos_up.shares if action.side == "Up" else self.pos_down.shares
-                already_filled = max(0.0, cur_side_shares - float(pt.get("pre_side_shares", 0.0)))
-                if already_filled > 1e-6:
-                    want = max(0.0, want - already_filled)
+                prev_side_shares = float(pt.get("pre_side_shares", 0.0))
+                delta_filled = max(0.0, cur_side_shares - prev_side_shares)
+                if delta_filled > 1e-6:
+                    want = max(0.0, want - delta_filled)
                     pt["want"] = want
                     pt["pre_side_shares"] = cur_side_shares
-                    if want < min_order_sh - 1e-4:
-                        reject_reason = f"撤单在途内原挂单已成交({already_filled:.1f}股)，取消重复Taker追单"
-                pt["_want_adjusted"] = True
+                    pt["_cum_already_filled"] = float(pt.get("_cum_already_filled", 0.0)) + delta_filled
+                if want < min_order_sh - 1e-4 and float(pt.get("_cum_already_filled", 0.0)) > 1e-6:
+                    cum_filled = float(pt.get("_cum_already_filled", 0.0))
+                    reject_reason = f"撤单在途内原挂单已成交({cum_filled:.1f}股)，取消重复Taker追单"
 
             post_up, post_dn = book_up, book_down
             if reject_reason is None:
@@ -1350,6 +1354,8 @@ class PaperRunner:
                 tp_dir = str(tp.get("side") or "")
                 tp_t = self._resolve_print_timestamp(tp, now, clock_offset_s=clk_off)
                 for o in active_for_prints:
+                    if not o.activated:
+                        continue
                     if tp_side and o.side != tp_side:
                         continue
                     fill_sz = self.matcher.on_trade_print(
@@ -1838,6 +1844,8 @@ class PaperRunner:
                             tp_dir = str(tp.get("side") or "")
                             tp_t = self._resolve_print_timestamp(tp, delayed_now, clock_offset_s=clk_off)
                             for o in list(self.pending_cancels):
+                                if not o.activated:
+                                    continue
                                 if tp_side and o.side != tp_side:
                                     continue
                                 fill_sz = self.matcher.on_trade_print(
@@ -2156,6 +2164,7 @@ class PaperRunner:
                 pass
         self._fsync_dir(self.summary_file.parent)
         self._settled_slugs.add(self.current_slug)
+        self.last_record = dict(record)
         self._recent_records.append(dict(record))
             
         # Update circuit breaker metrics & total cumulative PnL

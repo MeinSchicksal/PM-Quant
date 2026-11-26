@@ -104,7 +104,9 @@ def estimate_p_fair(
 
     ref_open = bin_open if bin_open > 0 else float(open_px or 0.0)
     if ref_open > 0 and spot_px > 0:
-        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else tau_s
+        if tau_s <= 0.5:
+            return 0.99 if spot_px >= ref_open else 0.01
+        eff_tau = max(10.0, tau_s - 40.0) if tau_s > 60.0 else max(0.5, tau_s / 3.0)
         return estimate_fair_prob(spot_px, ref_open, eff_tau, vol_bps, unit_variance=unit_variance)
     return 0.50
 
