@@ -154,6 +154,56 @@ class TestEventDrivenReplay(unittest.TestCase):
         self.assertEqual(config.PARAMS["ENTRY_MIN_PROB"], original)
         self.assertNotIn("NOT_A_REAL_PARAM", config.PARAMS)
 
+    def test_overnight_gzip_archive_and_seamless_replay_read(self):
+        import os
+        import datetime
+        from runtime.retention import cleanup_old_data
+        from sim.replay import _iter_jsonl, _glob_jsonl
+
+        now_ts = 1800172800.0  # 2027-01-17 00:00:00 UTC (past day: 2027-01-16)
+        today_str = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc).strftime("%Y-%m-%d")
+        yday_str = (datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat()
+
+        m_dir = Path(self.tmp) / "gz_market"
+        l_dir = Path(self.tmp) / "gz_ledgers"
+        g_dir = Path(self.tmp) / "gz_logs"
+        (m_dir / "events" / yday_str).mkdir(parents=True, exist_ok=True)
+        (m_dir / "events" / today_str).mkdir(parents=True, exist_ok=True)
+        (m_dir / "settlements" / yday_str).mkdir(parents=True, exist_ok=True)
+
+        yday_ev = m_dir / "events" / yday_str / f"events_{yday_str}.jsonl"
+        today_ev = m_dir / "events" / today_str / f"events_{today_str}.jsonl"
+        yday_set = m_dir / "settlements" / yday_str / f"settlements_{yday_str}.jsonl"
+        rows = [{"t": now_ts - 500 + i, "token_id": "tok_a", "best_bid": 0.49, "best_ask": 0.51} for i in range(40)]
+        payload = "".join(json.dumps(r) + "\n" for r in rows)
+        yday_ev.write_text(payload, encoding="utf-8")
+        today_ev.write_text(payload, encoding="utf-8")
+        yday_set.write_text(json.dumps({"slug": "s1", "winner": "Up"}) + "\n", encoding="utf-8")
+        # 设为 10 分钟前修改，确保已封存
+        os.utime(yday_ev, (now_ts - 600, now_ts - 600))
+        os.utime(today_ev, (now_ts - 600, now_ts - 600))
+
+        res = cleanup_old_data(
+            market_dir=m_dir, ledgers_dir=l_dir, logs_dir=g_dir,
+            market_days=14, replay_days=7, log_days=7,
+            now=now_ts, update_guard_state=False,
+            disk_usage_fn=lambda _: type("U", (), {"total": 30 * 1024**3, "used": 10 * 1024**3, "free": 20 * 1024**3})(),
+        )
+        yday_gz = yday_ev.with_name(yday_ev.name + ".gz")
+        self.assertEqual(res["compressed_files"], 1)
+        self.assertTrue(yday_gz.exists())
+        self.assertFalse(yday_ev.exists())
+        # 当天活跃文件与 settlements 绝不被压缩
+        self.assertTrue(today_ev.exists())
+        self.assertFalse(today_ev.with_name(today_ev.name + ".gz").exists())
+        self.assertTrue(yday_set.exists())
+
+        # sim/replay.py 无缝扫描并读取 .jsonl.gz，每行数据 100% 无损
+        matched = _glob_jsonl(m_dir / "events" / yday_str, "events_*")
+        self.assertEqual(matched, [yday_gz])
+        loaded = list(_iter_jsonl(yday_gz))
+        self.assertEqual(loaded, rows)
+
 
 if __name__ == "__main__":
     unittest.main()

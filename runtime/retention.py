@@ -16,6 +16,7 @@ CRITICAL INVARIANT:
 - Today's UTC date folder under `data/1_market/` is NEVER deleted.
 """
 import datetime
+import gzip
 import json
 import re
 import shutil
@@ -255,6 +256,42 @@ def cleanup_old_data(
         )
 
 
+def _compress_jsonl_atomic(src_path: Path, compresslevel: int = 3):
+    """Stream-compress a closed past-day .jsonl file to .jsonl.gz atomically (O(1) RAM).
+
+    Writes to .jsonl.gz.tmp first, atomically renames to .jsonl.gz, verifies non-empty
+    output, and only then removes the original .jsonl. Returns (saved_bytes, err_str).
+    """
+    dst_path = src_path.with_name(src_path.name + ".gz")
+    tmp_path = src_path.with_name(src_path.name + ".gz.tmp")
+    try:
+        orig_size = src_path.stat().st_size
+    except OSError as exc:
+        return 0, f"{src_path}: {exc}"
+    if dst_path.exists():
+        return 0, None
+    try:
+        with open(src_path, "rb") as fin, gzip.open(tmp_path, "wb", compresslevel=compresslevel) as fout:
+            while True:
+                chunk = fin.read(262144)
+                if not chunk:
+                    break
+                fout.write(chunk)
+        tmp_path.replace(dst_path)
+        gz_size = dst_path.stat().st_size
+        if orig_size > 0 and gz_size <= 0:
+            raise OSError("compressed output unexpectedly empty")
+        src_path.unlink()
+        return max(0, orig_size - gz_size), None
+    except Exception as exc:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        return 0, f"compress {src_path}: {exc}"
+
+
 def _cleanup_old_data_locked(
     market_dir: Optional[Path] = None,
     ledgers_dir: Optional[Path] = None,
@@ -276,7 +313,8 @@ def _cleanup_old_data_locked(
     l_dir = Path(ledgers_dir) if ledgers_dir is not None else config.LEDGERS_DIR
     g_dir = Path(logs_dir) if logs_dir is not None else config.LOGS_DIR
 
-    m_days = int(config.PARAMS.get("MARKET_RETENTION_DAYS", 3)) if market_days is None else int(market_days)
+    m_days = int(config.PARAMS.get("MARKET_RETENTION_DAYS", 14)) if market_days is None else int(market_days)
+    compress_aged = bool(config.PARAMS.get("COMPRESS_AGED_MARKET_JSONL", True))
     r_days = int(config.PARAMS.get("WINDOW_REPLAY_RETENTION_DAYS", 7)) if replay_days is None else int(replay_days)
     lg_days = int(config.PARAMS.get("RUNTIME_LOG_RETENTION_DAYS", 7)) if log_days is None else int(log_days)
     min_keep_replays = int(config.PARAMS.get("MIN_KEEP_REPLAY_FILES", 30))
@@ -295,6 +333,8 @@ def _cleanup_old_data_locked(
 
     removed_dirs = 0
     removed_files = 0
+    compressed_files = 0
+    compressed_saved_bytes = 0
     freed_bytes = 0
     pressure_removed_dirs = 0
     pressure_removed_files = 0
@@ -327,6 +367,49 @@ def _cleanup_old_data_locked(
                 removed_dirs += 1
                 removed_files += fcnt
                 freed_bytes += sz
+
+    # 1a-bis. Auto-gzip completed past-day 1_market/*.jsonl BEFORE Stage 2 quota checks
+    # so 85-90% space is reclaimed without evicting valuable historical L2 replay days.
+    if compress_aged and m_dir.exists():
+        settle_guard_ts = now_ts - 120.0
+        for cat in _PRUNABLE_MARKET_CATS:
+            cat_dir = m_dir / cat
+            if not cat_dir.is_dir():
+                continue
+            for child in sorted(cat_dir.iterdir()):
+                if child in deleted_paths or not child.is_dir() or not _DATE_DIR_RE.match(child.name):
+                    continue
+                try:
+                    folder_date = datetime.date.fromisoformat(child.name)
+                except ValueError:
+                    continue
+                if folder_date >= today_utc:
+                    continue
+                for jf in sorted(child.glob("*.jsonl")):
+                    if not jf.is_file():
+                        continue
+                    try:
+                        st = jf.stat()
+                    except OSError:
+                        continue
+                    # Skip recently touched files (safe guard around UTC midnight rollover)
+                    if st.st_mtime > settle_guard_ts:
+                        continue
+                    if jf.with_name(jf.name + ".gz").exists():
+                        continue
+                    if dry_run:
+                        est_saved = int(st.st_size * 0.85)
+                        compressed_files += 1
+                        compressed_saved_bytes += est_saved
+                        freed_bytes += est_saved
+                    else:
+                        saved, err = _compress_jsonl_atomic(jf, compresslevel=3)
+                        if err:
+                            errors.append(err)
+                        else:
+                            compressed_files += 1
+                            compressed_saved_bytes += saved
+                            freed_bytes += saved
 
     if r_days > 0 and l_dir.exists():
         for batch_dir in sorted(l_dir.iterdir()):
@@ -399,8 +482,10 @@ def _cleanup_old_data_locked(
             freed_bytes += st.st_size
 
     tmp_cutoff_ts = now_ts - 600.0
-    if l_dir.exists():
-        for tmp_f in l_dir.rglob("*.tmp"):
+    for scan_root in (l_dir, m_dir):
+        if not scan_root.exists():
+            continue
+        for tmp_f in scan_root.rglob("*.tmp"):
             if tmp_f in deleted_paths or not tmp_f.is_file():
                 continue
             try:
@@ -582,6 +667,8 @@ def _cleanup_old_data_locked(
     result = {
         "removed_dirs": removed_dirs,
         "removed_files": removed_files,
+        "compressed_files": compressed_files,
+        "compressed_saved_mb": round(compressed_saved_bytes / (1024.0 * 1024.0), 2),
         "pressure_triggered": pressure_triggered,
         "pressure_removed_dirs": pressure_removed_dirs,
         "pressure_removed_files": pressure_removed_files,

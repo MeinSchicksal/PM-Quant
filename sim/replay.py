@@ -15,6 +15,7 @@ The recorded summary.jsonl is treated as the settlement truth (the .json.gz
 detail files are archival and may be stale).
 """
 import sys
+import gzip
 import json
 import math
 import tempfile
@@ -37,7 +38,13 @@ from runtime.runner import PaperRunner
 # Loading recorded truth
 # --------------------------------------------------------------------------
 def _iter_jsonl(path: Path):
-    with open(path, "r", encoding="utf-8") as f:
+    """Stream JSON objects from plain .jsonl or gzipped .jsonl.gz files transparently."""
+    opener = (
+        lambda p: gzip.open(p, "rt", encoding="utf-8", errors="ignore")
+        if str(p).endswith(".gz")
+        else open(p, "r", encoding="utf-8", errors="ignore")
+    )
+    with opener(path) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -46,6 +53,18 @@ def _iter_jsonl(path: Path):
                 yield json.loads(line)
             except Exception:
                 continue
+
+
+def _glob_jsonl(directory: Path, stem_pattern: str) -> List[Path]:
+    """Return sorted .jsonl and .jsonl.gz files matching `stem_pattern`, deduplicated by stem."""
+    found: Dict[str, Path] = {}
+    for p in sorted(directory.glob(f"{stem_pattern}.jsonl")):
+        found[p.name] = p
+    for p in sorted(directory.glob(f"{stem_pattern}.jsonl.gz")):
+        base = p.name[:-3]
+        if base not in found:
+            found[base] = p
+    return [found[k] for k in sorted(found)]
 
 
 def load_settlements() -> Dict[str, Dict[str, Any]]:
@@ -89,7 +108,7 @@ def _load_date_batch(date_dir: Path, settlements: Dict[str, Dict[str, Any]]):
     trades_by_slug: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     token_map: Dict[str, Tuple[str, str]] = {}
 
-    for path in sorted(date_dir.glob("trades_*.jsonl")):
+    for path in _glob_jsonl(date_dir, "trades_*"):
         for t in _iter_jsonl(path):
             slug = t.get("slug")
             token = t.get("token_id")
@@ -103,7 +122,7 @@ def _load_date_batch(date_dir: Path, settlements: Dict[str, Dict[str, Any]]):
 
     events_by_token: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     tokens = set(token_map)
-    for path in sorted(date_dir.glob("events_*.jsonl")):
+    for path in _glob_jsonl(date_dir, "events_*"):
         for ev in _iter_jsonl(path):
             token = ev.get("token_id")
             if token in tokens:
@@ -135,7 +154,7 @@ def _load_date_batch(date_dir: Path, settlements: Dict[str, Dict[str, Any]]):
     for oracle_dir in oracle_dirs:
         if not oracle_dir.exists():
             continue
-        for path in sorted(oracle_dir.glob("*.jsonl")):
+        for path in _glob_jsonl(oracle_dir, "*"):
             for row in _iter_jsonl(path):
                 t = float(row.get("t", 0.0))
                 kind = row.get("kind")

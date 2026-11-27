@@ -173,7 +173,8 @@ PARAMS = {
 
     # 7. Data Retention & Disk-Full Auto-Guard (summary.jsonl is NEVER deleted)
     "RECORD_RAW_MARKET": True,          # Master toggle for raw data/1_market recording (auto-paused if disk critical)
-    "MARKET_RETENTION_DAYS": 3,         # Keep recent 3 days of raw data/1_market/{events,oracle,books,spot}
+    "COMPRESS_AGED_MARKET_JSONL": True, # Auto-gzip completed past-day 1_market/*.jsonl (85-90% size reduction; replay reads .jsonl.gz natively)
+    "MARKET_RETENTION_DAYS": 14,        # Keep recent 14 days of raw data/1_market/{events,oracle,books,spot} (gzipped past days)
     "WINDOW_REPLAY_RETENTION_DAYS": 7,  # Keep recent 7 days of windows/*.json.gz detail replays
     "MIN_KEEP_REPLAY_FILES": 30,        # Under disk pressure, still try to keep at least 30 newest replay files
     "RUNTIME_LOG_RETENTION_DAYS": 7,    # Keep recent 7 days of runtime logs
