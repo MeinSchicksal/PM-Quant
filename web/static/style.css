@@ -628,7 +628,7 @@ body {
 .control-tray {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .status-pill {
@@ -677,9 +677,9 @@ body {
 }
 
 .icon-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--label);
@@ -687,7 +687,8 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.18s ease;
   flex-shrink: 0;
 }
 
@@ -695,11 +696,39 @@ body {
   background: var(--surface-hover);
   color: var(--ink);
   border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.09), 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.icon-btn:active {
+  transform: translateY(0) scale(0.95);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+[data-theme="dark"] .icon-btn {
+  background: rgba(30, 41, 59, 0.72);
+  border-color: rgba(148, 163, 184, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+[data-theme="dark"] .icon-btn:hover {
+  background: rgba(51, 65, 85, 0.88);
+  border-color: rgba(148, 163, 184, 0.30);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 6px 14px -3px rgba(0, 0, 0, 0.45);
 }
 
 .icon-btn svg {
-  width: 14px;
-  height: 14px;
+  width: 17px;
+  height: 17px;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.icon-btn-settings:hover svg {
+  transform: rotate(28deg);
+}
+
+.icon-btn-theme:hover svg {
+  transform: scale(1.08);
 }
 
 .refresh-btn.spinning svg {
@@ -840,45 +869,126 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Institutional Sliding Segmented Currency Switch */
 .currency-toggle-btn {
-  display: inline-flex;
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
   align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border);
-  background: var(--surface-muted);
+  height: 32px;
+  min-width: 126px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(15, 23, 42, 0.045);
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
   cursor: pointer;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11.5px;
-  font-weight: 600;
-  color: var(--ink-secondary);
-  transition: border-color 0.16s ease, background 0.16s ease;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
   flex-shrink: 0;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .currency-toggle-btn:hover {
-  border-color: var(--brand, #2563eb);
+  border-color: rgba(15, 23, 42, 0.16);
+  background: rgba(15, 23, 42, 0.055);
+}
+
+.currency-toggle-btn:active .curr-thumb {
+  transform: scale(0.96);
+}
+
+.currency-toggle-btn[data-active="CNY"]:active .curr-thumb {
+  transform: translateX(100%) scale(0.96);
+}
+
+.currency-toggle-btn .curr-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  border-radius: 7.5px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.11), 0 4px 10px -3px rgba(15, 23, 42, 0.08), 0 0 0 0.5px rgba(15, 23, 42, 0.05);
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.2s ease, box-shadow 0.2s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.currency-toggle-btn[data-active="CNY"] .curr-thumb {
+  transform: translateX(100%);
 }
 
 .currency-toggle-btn .curr-opt {
-  padding: 3px 9px;
-  border-radius: var(--radius-pill);
-  line-height: 1.2;
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 100%;
+  padding: 0 10px;
+  line-height: 1;
   white-space: nowrap;
-  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+  color: var(--muted);
+  transition: color 0.2s ease;
+}
+
+.currency-toggle-btn .curr-sym {
+  font-style: normal;
+  font-weight: 800;
+  font-size: 12px;
+  opacity: 0.72;
+  transition: color 0.2s ease, opacity 0.2s ease;
 }
 
 .currency-toggle-btn .curr-opt.is-active {
-  background: var(--surface, #ffffff);
   color: var(--ink);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+.currency-toggle-btn .curr-opt.is-active .curr-sym {
+  opacity: 1;
+}
+
+.currency-toggle-btn .curr-opt[data-curr="USD"].is-active .curr-sym {
+  color: var(--accent, #2563eb);
+}
+
+.currency-toggle-btn .curr-opt[data-curr="CNY"].is-active .curr-sym {
+  color: #d97706;
+}
+
+[data-theme="dark"] .currency-toggle-btn {
+  background: rgba(2, 6, 23, 0.52);
+  border-color: rgba(148, 163, 184, 0.16);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+[data-theme="dark"] .currency-toggle-btn:hover {
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+[data-theme="dark"] .currency-toggle-btn .curr-thumb {
+  background: linear-gradient(180deg, rgba(51, 65, 85, 0.94), rgba(30, 41, 59, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 6px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme="dark"] .currency-toggle-btn .curr-opt.is-active {
-  background: rgba(59, 130, 246, 0.22);
   color: #f8fafc;
-  box-shadow: none;
+}
+
+[data-theme="dark"] .currency-toggle-btn .curr-opt[data-curr="USD"].is-active .curr-sym {
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .currency-toggle-btn .curr-opt[data-curr="CNY"].is-active .curr-sym {
+  color: #fbbf24;
 }
 
 /* ==========================================================================
@@ -3459,9 +3569,13 @@ html, body {
     gap: 6px;
   }
   .icon-btn {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+  }
+  .icon-btn svg {
+    width: 15px;
+    height: 15px;
   }
 
   /* Native-style fixed bottom navigation bar on phones */

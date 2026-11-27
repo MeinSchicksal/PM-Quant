@@ -131,23 +131,23 @@
 
       <div class="topbar-actions">
         <div class="control-tray">
-          <button id="settings-btn" class="icon-btn" type="button" aria-label="系统设置与数据占用" title="系统设置与数据占用">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <button id="settings-btn" class="icon-btn icon-btn-settings" type="button" aria-label="系统设置与数据占用" title="系统设置与数据占用">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3"/>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
             </svg>
           </button>
-          <button id="theme-btn" class="icon-btn" type="button" aria-label="切换明暗主题" title="切换明暗主题 (快捷键 T)">
-            <svg class="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <button id="theme-btn" class="icon-btn icon-btn-theme" type="button" aria-label="切换明暗主题" title="切换明暗主题 (快捷键 T)">
+            <svg class="icon-sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="4"/>
               <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/>
             </svg>
-            <svg class="icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="icon-moon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
             </svg>
           </button>
           <button id="refresh-btn" class="icon-btn refresh-btn" type="button" aria-label="立即刷新数据" title="立即刷新数据 (快捷键 R)">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
               <path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/>
             </svg>
           </button>
@@ -218,9 +218,10 @@
         <section class="panel pnl-hero-card" aria-label="累计已结算净收益与收益速率">
           <div class="card-head">
             <h2>累计净收益</h2>
-            <button id="currency-toggle-btn" class="currency-toggle-btn" type="button" aria-label="切换美元或人民币显示" title="点击切换美元 / 人民币显示（汇率每日自动同步一次）">
-              <span class="curr-opt is-active" data-curr="USD">$ USD</span>
-              <span class="curr-opt" data-curr="CNY">¥ 人民币</span>
+            <button id="currency-toggle-btn" class="currency-toggle-btn" type="button" data-active="USD" aria-label="切换美元或人民币显示" title="点击切换美元 / 人民币显示（汇率每日自动同步一次）">
+              <span class="curr-thumb" aria-hidden="true"></span>
+              <span class="curr-opt is-active" data-curr="USD"><i class="curr-sym">$</i>USD</span>
+              <span class="curr-opt" data-curr="CNY"><i class="curr-sym">¥</i>CNY</span>
             </button>
           </div>
 

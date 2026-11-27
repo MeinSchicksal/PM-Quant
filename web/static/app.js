@@ -268,6 +268,7 @@ const VALID_FX_SOURCES = new Set(["open.er-api.com", "frankfurter.app"]);
 function updateCurrencyToggleUI() {
   const btn = $("currency-toggle-btn");
   if (!btn) return;
+  btn.dataset.active = displayCurrency;
   btn.querySelectorAll(".curr-opt").forEach((sp) => {
     sp.classList.toggle("is-active", sp.dataset.curr === displayCurrency);
   });
