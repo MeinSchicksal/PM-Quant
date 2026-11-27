@@ -452,6 +452,78 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_rtds_chainlink_ws_primary_and_rest_fallback(self):
+        import threading
+        import time
+        from unittest.mock import patch
+        from runtime.trade_stream import TradeStreamClient
+        from runtime.market_feed import MarketFeed
+
+        wake = threading.Event()
+        ts_client = TradeStreamClient(record_raw=False, wake_event=wake)
+        ts_client.connected = True
+        ts_client.rtt_ms = 7.8
+
+        # 非 btc/usd 币种或异常值应被忽略
+        self.assertFalse(ts_client._ingest_chainlink({"symbol": "eth/usd", "value": 1727.5, "timestamp": 1795750193000}, 120))
+        self.assertFalse(ts_client._ingest_chainlink({"symbol": "btc/usd", "value": 50.0, "timestamp": 1795750193000}, 120))
+        self.assertFalse(wake.is_set())
+
+        # 有效 btc/usd 毫秒级推送应被接收并立即唤醒主循环
+        now_s = time.time()
+        self.assertTrue(ts_client._ingest_chainlink({
+            "symbol": "btc/usd",
+            "value": 61525.22,
+            "timestamp": int(now_s * 1000),
+        }, raw_bytes=180))
+        self.assertTrue(wake.is_set())
+
+        feed = MarketFeed.__new__(MarketFeed)
+        feed._trade_ws = ts_client
+        feed._spot_ws = None
+        feed._book_ws = None
+        feed._poly_lock = threading.Lock()
+        feed._net_lock = threading.Lock()
+        feed._schema_lock = threading.Lock()
+        feed._schema_counts = {}
+        feed._schema_guard = {"paused": False, "source": "", "reason": "", "detected_at": 0.0}
+        feed._last_poly_btc = None
+        feed._last_poly_btc_t = 0.0
+        feed._last_poly_btc_req_t = 0.0
+        feed._last_poly_poll_t = 0.0
+        feed._poly_btc_poller_active = False
+        feed._chainlink_ws_active = False
+        feed._last_cl_ws_msg_count = 0
+        feed._last_cl_ws_bytes = 0
+        feed.last_poly_btc_ts = 0.0
+        feed.clock_offset_s = 0.0
+        feed.net_stats = {
+            "poly_latency_ms": 6.3, "binance_latency_ms": 99.0, "chainlink_latency_ms": 0.0,
+            "downstream_kbps": 0.0, "total_bytes": 0, "bytes_window": 0,
+            "last_calc_t": now_s, "msg_rate": 0.0, "msgs_window": 0,
+        }
+        recorded_oracle = []
+        feed.record_raw_event = lambda cat, ev: recorded_oracle.append((cat, ev))
+
+        with patch.object(feed, "_ensure_poly_poller") as mock_poller:
+            px = feed.get_polymarket_btc_price(now=now_s)
+            self.assertAlmostEqual(px, 61525.22, places=2)
+            # WS 健康时绝不启动 HTTP REST 轮询
+            mock_poller.assert_not_called()
+            summary = feed.get_net_summary()
+            self.assertTrue(summary["chainlink_ws_connected"])
+            self.assertAlmostEqual(summary["chainlink_latency_ms"], 7.8, places=1)
+            self.assertEqual(len(recorded_oracle), 1)
+            self.assertEqual(recorded_oracle[0][1]["source"], "rtds_ws")
+
+            # WS 断连后自动回退到 REST 轮询兜底
+            ts_client.connected = False
+            feed._poly_poller_wake = threading.Event()
+            px_fallback = feed.get_polymarket_btc_price(now=now_s + 0.5)
+            self.assertAlmostEqual(px_fallback, 61525.22, places=2)  # 复用 10s 内缓存同时触发 REST 刷新
+            mock_poller.assert_called_once()
+            self.assertFalse(feed.get_net_summary()["chainlink_ws_connected"])
+
 
 if __name__ == "__main__":
     unittest.main()

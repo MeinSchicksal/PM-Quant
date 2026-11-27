@@ -814,14 +814,20 @@ function updateNetworkTelemetry(live) {
       setSourceState("dot-trades", "src-trades-val", "bad", "WS 断开", net.ws_last_error || "成交打印 WebSocket 断开重连中");
     }
 
-    // 4. Chainlink 60s TWAP Oracle Source
+    // 4. Chainlink BTC/USD Oracle Source (RTDS WebSocket primary + REST HTTP fallback)
+    const clWsOk = Boolean(net.chainlink_ws_connected);
     if (polyStale) {
       tally("warn");
       const ageLbl = clAge != null ? `滞后 ${Math.round(clAge)}s` : "滞后 >10s";
-      setSourceState("dot-chainlink", "src-chainlink-val", "warn", ageLbl, "Chainlink 60s TWAP 超过 10s 未更新，使用现货+基差估算");
+      setSourceState("dot-chainlink", "src-chainlink-val", "warn", ageLbl, "Chainlink 价格超过 10s 未更新，使用现货+基差估算");
+    } else if (clWsOk) {
+      tally("ok");
+      const clBadge = clMs > 0 ? `WS ${Math.round(clMs)}ms` : "WS 实时";
+      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clBadge, "Polymarket RTDS WebSocket 实时推送 Chainlink BTC/USD");
     } else {
       tally("ok");
-      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clMs > 0 ? `${Math.round(clMs)}ms` : "实时", "Polymarket 官方 Chainlink 60s TWAP");
+      const clBadge = clMs > 0 ? `HTTP ${Math.round(clMs)}ms` : "实时";
+      setSourceState("dot-chainlink", "src-chainlink-val", "ok", clBadge, "Polymarket Chainlink REST 轮询兜底");
     }
   }
 

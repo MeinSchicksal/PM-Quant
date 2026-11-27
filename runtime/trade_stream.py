@@ -70,6 +70,31 @@ class TradeStreamClient(_BaseWSClient):
         self._last_err_log_t = 0.0
         self._dropped_unattributed = 0
         self._latest_price_by_token: Dict[str, tuple] = {}
+        # Real-time Chainlink BTC/USD price pushed over the same RTDS WebSocket
+        self._chainlink_btc_price: Optional[float] = None
+        self._chainlink_btc_recv_t: float = 0.0
+        self._chainlink_btc_oracle_t: float = 0.0
+        self.chainlink_msg_count: int = 0
+        self.chainlink_bytes: int = 0
+
+    def get_latest_chainlink_btc(
+        self, max_age_s: float = 3.5, now: Optional[float] = None
+    ) -> Optional[tuple]:
+        """返回 RTDS WS 最近 max_age_s 秒内的 Chainlink BTC/USD 推送 (price, recv_ts, oracle_ts, msg_count, bytes)。"""
+        if not self.connected:
+            return None
+        t = time.time() if now is None else float(now)
+        with self._lock:
+            px = self._chainlink_btc_price
+            recv_t = self._chainlink_btc_recv_t
+            oracle_t = self._chainlink_btc_oracle_t
+            cnt = self.chainlink_msg_count
+            tot_b = self.chainlink_bytes
+        if px is None or px <= 0.0 or recv_t <= 0.0:
+            return None
+        if (t - recv_t) > max_age_s:
+            return None
+        return (float(px), float(recv_t), float(oracle_t), int(cnt), int(tot_b))
 
     def get_latest_trade(
         self, token_id: str, max_age_s: float = 1.2, now: Optional[float] = None
@@ -172,10 +197,13 @@ class TradeStreamClient(_BaseWSClient):
                 ) as ws:
                     self.connected = True
                     connected_at = time.monotonic()
-                    # Subscribe to global trades activity stream
+                    # Subscribe to global trades activity stream + Chainlink BTC/USD oracle push
                     sub_msg = {
                         "action": "subscribe",
-                        "subscriptions": [{"topic": "activity", "type": "trades"}]
+                        "subscriptions": [
+                            {"topic": "activity", "type": "trades"},
+                            {"topic": "crypto_prices_chainlink", "type": "*"},
+                        ],
                     }
                     await asyncio.wait_for(ws.send(json.dumps(sub_msg)), timeout=5.0)
                     ping_task = asyncio.create_task(
@@ -193,15 +221,30 @@ class TradeStreamClient(_BaseWSClient):
                             except asyncio.TimeoutError:
                                 raw = None
 
+                            topic = ""
                             payload = None
+                            raw_len = 0
                             if raw and raw.strip():
+                                raw_len = len(raw.encode("utf-8", errors="ignore")) if isinstance(raw, str) else len(raw)
                                 try:
                                     msg = json.loads(raw)
-                                    p = msg.get("payload") if isinstance(msg, dict) else None
-                                    if isinstance(p, dict) and p:
-                                        payload = p
+                                    if isinstance(msg, dict):
+                                        topic = str(msg.get("topic") or "")
+                                        p = msg.get("payload")
+                                        if isinstance(p, dict) and p:
+                                            payload = p
                                 except Exception:
                                     payload = None
+
+                            if payload is not None and topic == "crypto_prices_chainlink":
+                                self._ingest_chainlink(payload, raw_bytes=raw_len)
+                                # Do not reset trades idle watchdog on Chainlink ticks so a
+                                # silent stall in the trades topic is still detected cleanly.
+                                if (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
+                                    raise TimeoutError(
+                                        f"TradeStream idle watchdog: no trade payloads for {self.idle_reconnect_s:.1f}s"
+                                    )
+                                continue
 
                             if payload is None:
                                 if (time.monotonic() - last_activity_t) >= self.idle_reconnect_s:
@@ -245,6 +288,29 @@ class TradeStreamClient(_BaseWSClient):
                     )
                 if self.running:
                     await asyncio.sleep(_ws_reconnect_backoff(consec_fails, self.last_error, base_s=2.0, cap_s=30.0))
+
+    def _ingest_chainlink(self, payload: Dict[str, Any], raw_bytes: int = 0) -> bool:
+        """Ingest one RTDS crypto_prices_chainlink payload (keeps btc/usd only)."""
+        sym = str(payload.get("symbol") or "").strip().lower()
+        if sym != "btc/usd":
+            return False
+        px = _safe_float(payload.get("value"), 0.0)
+        if not (1000.0 <= px <= 1_000_000.0):
+            return False
+        recv_t = time.time()
+        raw_ts = _safe_float(payload.get("timestamp"), 0.0)
+        if raw_ts > 1e11:
+            raw_ts /= 1000.0
+        oracle_t = raw_ts if raw_ts > 1e9 else recv_t
+        with self._lock:
+            self._chainlink_btc_price = float(px)
+            self._chainlink_btc_recv_t = float(recv_t)
+            self._chainlink_btc_oracle_t = float(oracle_t)
+            self.chainlink_msg_count += 1
+            self.chainlink_bytes += max(0, int(raw_bytes))
+        if self._wake_event is not None:
+            self._wake_event.set()
+        return True
 
     def _ingest(self, payload: Dict[str, Any]) -> bool:
         """Filter, de-duplicate and queue one raw trade payload.

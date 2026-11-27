@@ -1991,6 +1991,7 @@ class PaperRunner:
                 book_down.best_bid,
                 book_down.best_ask,
                 q_total,
+                round(float(self.last_poly_spot or 0.0), 2),
             )
             last_sig = getattr(self, "_last_live_sig", None)
             if last_w <= 0.0 or (now - last_w) >= 0.15 or live_sig != last_sig:

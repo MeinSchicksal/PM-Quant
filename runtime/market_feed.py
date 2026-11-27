@@ -96,6 +96,9 @@ class MarketFeed:
         self._spot_ws = None
         self._book_ws = None
         self._trade_ws = None
+        self._chainlink_ws_active = False
+        self._last_cl_ws_msg_count = 0
+        self._last_cl_ws_bytes = 0
 
         # Real-time network speed, latency, and traffic accounting
         self.net_stats = {
@@ -155,6 +158,7 @@ class MarketFeed:
             "poly_latency_ms": poly_lat,
             "binance_latency_ms": binance_lat,
             "chainlink_latency_ms": cl_lat,
+            "chainlink_ws_connected": bool(getattr(self, "_chainlink_ws_active", False)),
             "signal_minus_venue_ms": sig_minus_venue,
             "spot_provider": getattr(getattr(self, "_spot_ws", None), "active_provider", "binance"),
             "chainlink_age_s": cl_age,
@@ -684,12 +688,52 @@ class MarketFeed:
         th.start()
 
     def get_polymarket_btc_price(self, now: float = None) -> Optional[float]:
-        """Fetch Polymarket official real-time Chainlink BTC/USD TWAP asynchronously.
+        """Fetch Polymarket official real-time Chainlink BTC/USD price.
 
-        Returns None when the cached TWAP is stale: a dead poller must not keep
-        feeding an old price into basis_ema while Binance keeps moving.
+        Primary path: sub-10ms Polymarket RTDS WebSocket (`crypto_prices_chainlink` btc/usd)
+        multiplexed on TradeStreamClient — zero HTTP polling overhead when healthy.
+        Fallback path: asynchronous REST poller (`polymarket.com/api/crypto/crypto-price`)
+        activated seamlessly whenever WS is disconnected or silent > 3.5s.
         """
         current_t = now or time.time()
+        trade_ws = getattr(self, "_trade_ws", None)
+        ws_getter = getattr(trade_ws, "get_latest_chainlink_btc", None) if trade_ws is not None else None
+        ws_sample = ws_getter(max_age_s=3.5, now=current_t) if callable(ws_getter) else None
+        if ws_sample is not None:
+            px, recv_ts, oracle_ts, msg_cnt, tot_bytes = ws_sample
+            if self._is_valid_btc_price(px):
+                ref_ts = float(oracle_ts) if (oracle_ts > 0.0 and abs(recv_ts - oracle_ts) <= 5.0) else float(recv_ts)
+                lock = getattr(self, "_poly_lock", None)
+                if lock:
+                    lock.acquire()
+                try:
+                    self._last_poly_btc = float(px)
+                    self._last_poly_btc_t = float(recv_ts)
+                    self._last_poly_btc_req_t = ref_ts
+                finally:
+                    if lock:
+                        lock.release()
+                self._chainlink_ws_active = True
+                self.last_poly_btc_ts = ref_ts
+                prev_cnt = int(getattr(self, "_last_cl_ws_msg_count", 0))
+                if msg_cnt != prev_cnt:
+                    prev_bytes = int(getattr(self, "_last_cl_ws_bytes", 0))
+                    delta_bytes = max(0, tot_bytes - prev_bytes) if tot_bytes >= prev_bytes else max(0, tot_bytes)
+                    self._last_cl_ws_msg_count = msg_cnt
+                    self._last_cl_ws_bytes = tot_bytes
+                    ws_rtt = float(getattr(trade_ws, "rtt_ms", 0.0) or 0.0)
+                    self._record_net("chainlink", ws_rtt, delta_bytes)
+                    self.record_api_schema_ok("poly_twap")
+                    self.record_raw_event("oracle", {
+                        "t": float(recv_ts),
+                        "ref_t": ref_ts,
+                        "kind": "poly_twap_live",
+                        "price": float(px),
+                        "source": "rtds_ws",
+                    })
+                return float(px)
+
+        self._chainlink_ws_active = False
         mono_now = time.monotonic()
         if not getattr(self, "_poly_btc_poller_active", False) and (mono_now - getattr(self, "_last_poly_poll_t", 0.0) >= 0.30):
             self._poly_btc_poller_active = True
