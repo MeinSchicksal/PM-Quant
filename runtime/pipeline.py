@@ -72,7 +72,7 @@ class PipelineDriver:
         self._lock_fh = None
         self._check_existing_pipeline()
         self.feed = MarketFeed()
-        self.runner = PaperRunner()
+        self.runner = PaperRunner(async_live_write=True)
         ws_proxy = (self.feed.session.proxies or {}).get("https") or (self.feed.session.proxies or {}).get("http")
         self._wake_event = threading.Event()
         self.trade_stream = TradeStreamClient(record_raw=True, proxy=ws_proxy, wake_event=self._wake_event)
@@ -159,6 +159,10 @@ class PipelineDriver:
                 client.stop()
             except Exception:
                 pass
+        try:
+            self.runner.close()
+        except Exception:
+            pass
         try:
             self.feed.close()
         except Exception:
@@ -796,19 +800,19 @@ class PipelineDriver:
                         last_status_log_mono = loop_mono
                         print(f"[{time.strftime('%H:%M:%S')}] Waiting for contract deployment for {slug}...", flush=True)
 
-                # Event-driven cadence: react within ~20ms on WS spot/book/trade push,
+                # Event-driven cadence: react within ~4ms on WS spot/book/trade push,
                 # while keeping a 0.20s heartbeat ceiling (or 5s low-power sleep when API schema paused).
                 if self.feed.get_api_schema_guard().get("paused"):
                     self._wake_event.wait(timeout=5.0)
                     continue
-                min_interval_s = 0.02
+                min_interval_s = 0.004
                 max_interval_s = 0.20
                 if getattr(self.runner, "pending_takers", None):
                     if any(pt.get("book_future") is not None for pt in self.runner.pending_takers):
-                        max_interval_s = min(max_interval_s, 0.05)
+                        max_interval_s = min(max_interval_s, 0.04)
                     else:
                         next_due = min(float(pt["arrive_at"]) for pt in self.runner.pending_takers)
-                        max_interval_s = min(max_interval_s, max(0.01, next_due - time.time()))
+                        max_interval_s = min(max_interval_s, max(0.004, next_due - time.time()))
                 elapsed = time.monotonic() - loop_mono
                 if elapsed < min_interval_s:
                     time.sleep(min_interval_s - elapsed)

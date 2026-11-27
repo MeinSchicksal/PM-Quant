@@ -11,12 +11,13 @@ import sys
 import math
 import time
 import json
+import queue
 import datetime
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -78,6 +79,11 @@ class MarketFeed:
         self._net_lock = threading.Lock()
         self._poly_lock = threading.Lock()
         self._record_lock = threading.Lock()
+        self._raw_write_queue: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=4096)
+        self._raw_writer_thread = threading.Thread(
+            target=self._raw_disk_writer_loop, daemon=True, name="MarketFeedDiskWriter"
+        )
+        self._raw_writer_thread.start()
         self._fail_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pm_feed")
         self.last_open_is_official = False
@@ -355,25 +361,76 @@ class MarketFeed:
             if lock is not None:
                 lock.release()
 
+    def _flush_raw_batch(self, batch: list):
+        """Write a batch of (category, date_str, json_line) entries grouped by file."""
+        if not batch:
+            return
+        grouped = defaultdict(list)
+        for cat, day_str, line in batch:
+            grouped[(cat, day_str)].append(line)
+        lock = getattr(self, "_record_lock", None)
+        for (cat, day_str), lines in grouped.items():
+            try:
+                target_dir = config.MARKET_DIR / cat / day_str
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / f"{cat}_{day_str}.jsonl"
+                joined = "".join(lines)
+                if lock is not None:
+                    with lock:
+                        with open(target_file, "a", encoding="utf-8") as f:
+                            f.write(joined)
+                else:
+                    with open(target_file, "a", encoding="utf-8") as f:
+                        f.write(joined)
+            except Exception as e:
+                print(f"[MarketFeed] Raw data recording warning ({cat}): {e}")
+
+    def _raw_disk_writer_loop(self):
+        """Background batched disk writer for high-frequency raw market events."""
+        q = self._raw_write_queue
+        while True:
+            try:
+                first = q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if first is None:
+                return
+            batch = [first]
+            stop_after = False
+            while len(batch) < 64:
+                try:
+                    nxt = q.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is None:
+                    stop_after = True
+                    break
+                batch.append(nxt)
+            self._flush_raw_batch(batch)
+            if stop_after:
+                return
+
     def record_raw_event(self, category: str, record: dict):
-        """Append an immutable record to data/1_market/<category>/<date>/."""
-        # Always preserve tiny official settlement records; heavy streams obey retention/disk-full guard
+        """Append an immutable record to data/1_market/<category>/<date>/.
+
+        High-frequency streams are queued to a background batched writer so the
+        trading loop never stalls on disk I/O; rare official settlements write
+        synchronously for immediate durability.
+        """
         if category != "settlements" and not is_raw_recording_allowed():
             return
         try:
             today = time.strftime("%Y-%m-%d", time.gmtime())
-            target_dir = config.MARKET_DIR / category / today
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_file = target_dir / f"{category}_{today}.jsonl"
-            line = json.dumps(record, ensure_ascii=False) + "\n"
-            lock = getattr(self, "_record_lock", None)
-            if lock is not None:
-                with lock:
-                    with open(target_file, "a", encoding="utf-8") as f:
-                        f.write(line)
-            else:
-                with open(target_file, "a", encoding="utf-8") as f:
-                    f.write(line)
+            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            q = getattr(self, "_raw_write_queue", None)
+            th = getattr(self, "_raw_writer_thread", None)
+            if category != "settlements" and q is not None and th is not None and th.is_alive():
+                try:
+                    q.put_nowait((category, today, line))
+                    return
+                except queue.Full:
+                    return
+            self._flush_raw_batch([(category, today, line)])
         except Exception as e:
             # Data recording should never crash the engine
             print(f"[MarketFeed] Raw data recording warning ({category}): {e}")
@@ -793,6 +850,14 @@ class MarketFeed:
         th = getattr(self, "_poly_poller_thread", None)
         if th is not None and th.is_alive():
             th.join(timeout=1.5)
+        raw_th = getattr(self, "_raw_writer_thread", None)
+        raw_q = getattr(self, "_raw_write_queue", None)
+        if raw_th is not None and raw_th.is_alive() and raw_q is not None:
+            try:
+                raw_q.put(None, timeout=0.5)
+            except Exception:
+                pass
+            raw_th.join(timeout=2.0)
         if getattr(self, "_executor", None) is not None:
             try:
                 self._executor.shutdown(wait=False)

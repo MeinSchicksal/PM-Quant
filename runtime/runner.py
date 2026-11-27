@@ -10,6 +10,7 @@ import math
 import random
 import time
 import gzip
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -193,12 +194,25 @@ class PaperRunner:
                 return float(val)
         return None
 
-    def __init__(self, ledger_dir=None):
+    def __init__(self, ledger_dir=None, async_live_write: bool = False):
         self.ledger_dir = Path(ledger_dir) if ledger_dir else config.CURRENT_LEDGER_DIR
         self.summary_file = self.ledger_dir / "summary.jsonl"
         self.live_file = self.ledger_dir / "live.json"
         self.windows_dir = self.ledger_dir / "windows"
         self.windows_dir.mkdir(parents=True, exist_ok=True)
+        self._async_live_write = bool(async_live_write)
+        self._live_write_lock = threading.Lock()
+        self._live_write_event = threading.Event()
+        self._live_write_stop = threading.Event()
+        self._live_idle_event = threading.Event()
+        self._live_idle_event.set()
+        self._live_pending_payload: Optional[str] = None
+        self._live_writer_thread: Optional[threading.Thread] = None
+        if self._async_live_write:
+            self._live_writer_thread = threading.Thread(
+                target=self._live_writer_loop, daemon=True, name="LiveJsonWriter"
+            )
+            self._live_writer_thread.start()
         self.matcher = QueueMatcher(config.PARAMS["LATENCY_S"])
         self._mkt_mid_buf = deque(maxlen=400)
         
@@ -2534,8 +2548,63 @@ class PaperRunner:
             "mid_p_up": getattr(self, "_mid_p_up", None),
             "mid_mkt_up": getattr(self, "_mid_mkt_up", None),
         }
-        self._atomic_write_text(
-            self.live_file,
-            json.dumps(state, indent=2, ensure_ascii=False),
-            tmp_suffix=".tmp",
-        )
+        payload_str = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        if (
+            getattr(self, "_async_live_write", False)
+            and getattr(self, "_live_writer_thread", None) is not None
+            and self._live_writer_thread.is_alive()
+        ):
+            with self._live_write_lock:
+                self._live_pending_payload = payload_str
+                self._live_idle_event.clear()
+            self._live_write_event.set()
+        else:
+            self._atomic_write_text(
+                self.live_file,
+                payload_str,
+                tmp_suffix=".tmp",
+            )
+
+    def _live_writer_loop(self):
+        """Background coalescing writer for live.json: keeps trading hot-path 0ms non-blocking."""
+        while True:
+            self._live_write_event.wait(timeout=0.5)
+            self._live_write_event.clear()
+            while True:
+                with self._live_write_lock:
+                    payload = self._live_pending_payload
+                    self._live_pending_payload = None
+                if payload is None:
+                    break
+                try:
+                    self._atomic_write_text(self.live_file, payload, tmp_suffix=".tmp")
+                except Exception:
+                    pass
+            with self._live_write_lock:
+                if self._live_pending_payload is None:
+                    self._live_idle_event.set()
+            if self._live_write_stop.is_set():
+                with self._live_write_lock:
+                    if self._live_pending_payload is None:
+                        break
+
+    def flush_live(self, timeout: float = 2.0):
+        """Wait until any queued async live.json snapshot is atomically persisted to disk."""
+        if not getattr(self, "_async_live_write", False):
+            return
+        th = getattr(self, "_live_writer_thread", None)
+        if th is None or not th.is_alive():
+            return
+        self._live_write_event.set()
+        self._live_idle_event.wait(timeout=timeout)
+
+    def close(self):
+        """Flush pending live snapshot and cleanly stop background live writer thread."""
+        self.flush_live(timeout=2.0)
+        if getattr(self, "_live_write_stop", None) is not None:
+            self._live_write_stop.set()
+        if getattr(self, "_live_write_event", None) is not None:
+            self._live_write_event.set()
+        th = getattr(self, "_live_writer_thread", None)
+        if th is not None and th.is_alive():
+            th.join(timeout=1.5)

@@ -524,6 +524,59 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
             mock_poller.assert_called_once()
             self.assertFalse(feed.get_net_summary()["chainlink_ws_connected"])
 
+    def test_async_live_writer_and_batched_raw_recorder(self):
+        import json
+        import queue
+        import shutil
+        import tempfile
+        import threading
+        import time
+        from pathlib import Path
+        from unittest.mock import patch
+        import config
+        from runtime.runner import PaperRunner
+        from runtime.market_feed import MarketFeed
+        from core.types import SpotState
+
+        tmp = Path(tempfile.mkdtemp(prefix="pm_async_io_"))
+        try:
+            # 1. PaperRunner async live.json coalescing writer + compact JSON
+            runner = PaperRunner(ledger_dir=tmp / "ledger", async_live_write=True)
+            t0 = 1800000000.0
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 65000.0)
+            for i in range(15):
+                sp = SpotState(timestamp=t0 + 10.0 + i * 0.2, price=65000.0 + i, open_price=65000.0, realized_vol_bps=14.0)
+                runner.last_spot_price = sp.price
+                runner._write_live(t0 + 10.0 + i * 0.2, sp, _book(0.50, 0.51, t=t0 + 10.0 + i), _book(0.49, 0.50, t=t0 + 10.0 + i))
+            runner.flush_live(timeout=2.0)
+            raw_live = runner.live_file.read_text(encoding="utf-8")
+            self.assertNotIn("\n  ", raw_live)  # compact JSON without indent=2 bloat
+            parsed = json.loads(raw_live)
+            self.assertAlmostEqual(parsed["spot"], 65014.0, places=2)
+            self.assertAlmostEqual(parsed["now"], round(t0 + 10.0 + 14 * 0.2, 2), places=2)
+            runner.close()
+            self.assertFalse(runner._live_writer_thread.is_alive())
+
+            # 2. MarketFeed async batched raw event writer flushes completely on close()
+            feed = MarketFeed.__new__(MarketFeed)
+            feed._record_lock = threading.Lock()
+            feed._raw_write_queue = queue.Queue(maxsize=256)
+            feed._raw_writer_thread = threading.Thread(target=feed._raw_disk_writer_loop, daemon=True)
+            feed._raw_writer_thread.start()
+            with patch.object(config, "MARKET_DIR", tmp / "market"), \
+                 patch("runtime.market_feed.is_raw_recording_allowed", return_value=True):
+                for i in range(25):
+                    feed.record_raw_event("oracle", {"t": t0 + i, "kind": "poly_twap_live", "price": 65000.0 + i})
+                feed.close()
+            self.assertFalse(feed._raw_writer_thread.is_alive())
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            out_file = tmp / "market" / "oracle" / today / f"oracle_{today}.jsonl"
+            lines = out_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 25)
+            self.assertEqual(json.loads(lines[-1])["price"], 65024.0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
