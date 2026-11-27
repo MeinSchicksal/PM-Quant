@@ -402,6 +402,61 @@ class TestInvestorDashboard(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_daily_usd_cny_fx_caches_once_per_day(self):
+        import json
+        import shutil
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest.mock import patch
+        import web.server as ws
+
+        tmp = Path(tempfile.mkdtemp(prefix="pm_fx_test_"))
+        calls = []
+
+        def fake_fetch():
+            calls.append(1)
+            return 7.1852, "mock-fx"
+
+        saved_cache = dict(ws._FX_CACHE)
+        try:
+            with patch.object(ws, "_FX_CACHE_FILE", tmp / "fx_usd_cny.json"), \
+                 patch.object(ws, "_fetch_usd_cny_from_web", side_effect=fake_fetch):
+                with ws._FX_CACHE_LOCK:
+                    ws._FX_CACHE.update({
+                        "rate": 7.25,
+                        "date": "",
+                        "source": "default",
+                        "loaded": False,
+                        "refreshing": False,
+                        "last_attempt_mono": 0.0,
+                    })
+                # 首次触发异步同步，不阻塞直接返回默认缓存
+                first = ws._get_usd_cny_fx()
+                self.assertAlmostEqual(first["rate"], 7.25, places=4)
+                self.assertFalse(first["synced_today"])
+                # 等待后台线程写完缓存文件
+                for _ in range(50):
+                    with ws._FX_CACHE_LOCK:
+                        if not ws._FX_CACHE["refreshing"] and ws._FX_CACHE["source"] == "mock-fx":
+                            break
+                    time.sleep(0.02)
+                # 同日再次查询：直接命中缓存，绝不重复抓取外网
+                second = ws._get_usd_cny_fx()
+                third = ws._get_usd_cny_fx()
+                self.assertAlmostEqual(second["rate"], 7.1852, places=4)
+                self.assertTrue(second["synced_today"])
+                self.assertEqual(second["source"], "mock-fx")
+                self.assertEqual(third["rate"], second["rate"])
+                self.assertEqual(len(calls), 1)
+                # 验证磁盘已落盘，重启服务直接复用当日缓存
+                saved = json.loads((tmp / "fx_usd_cny.json").read_text(encoding="utf-8"))
+                self.assertAlmostEqual(saved["rate"], 7.1852, places=4)
+        finally:
+            with ws._FX_CACHE_LOCK:
+                ws._FX_CACHE.update(saved_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

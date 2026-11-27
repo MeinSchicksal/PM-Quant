@@ -22,6 +22,7 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from urllib.request import Request as UrlRequest, urlopen as url_open
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -287,6 +288,106 @@ _SUMMARY_AGG_MAX_ENTRIES = 8
 _ENTRY_MODE_CACHE = OrderedDict()
 _ENTRY_MODE_LOCK = threading.Lock()
 _ENTRY_MODE_MAX_ENTRIES = 2000
+
+_FX_CACHE_LOCK = threading.Lock()
+_FX_CACHE = {
+    "rate": 7.25,
+    "date": "",
+    "source": "default",
+    "loaded": False,
+    "refreshing": False,
+    "last_attempt_mono": 0.0,
+}
+_FX_CACHE_FILE = config.RUNTIME_DIR / "fx_usd_cny.json"
+
+
+def _today_bjt_str() -> str:
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    return datetime.datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def _fetch_usd_cny_from_web() -> tuple:
+    """Fetch live USD->CNY spot rate from free no-key public endpoints (called at most once/day)."""
+    endpoints = (
+        ("open.er-api.com", "https://open.er-api.com/v6/latest/USD"),
+        ("frankfurter.app", "https://api.frankfurter.app/latest?from=USD&to=CNY"),
+    )
+    for src_name, url in endpoints:
+        try:
+            req = UrlRequest(url, headers={"User-Agent": "PM-Quant/3.4", "Accept": "application/json"})
+            with url_open(req, timeout=4.0) as resp:
+                if getattr(resp, "status", 200) != 200:
+                    continue
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            rates = data.get("rates") if isinstance(data, dict) else None
+            raw_cny = rates.get("CNY") if isinstance(rates, dict) else None
+            val = float(raw_cny) if raw_cny is not None else 0.0
+            if math.isfinite(val) and 5.0 <= val <= 10.0:
+                return round(val, 4), src_name
+        except Exception:
+            continue
+    return None, None
+
+
+def _get_usd_cny_fx() -> dict:
+    """Return cached daily USD->CNY rate; asynchronously refreshes at most once per Beijing calendar day."""
+    today = _today_bjt_str()
+    need_fetch = False
+    with _FX_CACHE_LOCK:
+        if not _FX_CACHE["loaded"]:
+            _FX_CACHE["loaded"] = True
+            if _FX_CACHE_FILE.exists():
+                try:
+                    saved = json.loads(_FX_CACHE_FILE.read_text(encoding="utf-8"))
+                    s_rate = float(saved.get("rate", 0.0) or 0.0)
+                    s_date = str(saved.get("date") or "")
+                    s_src = str(saved.get("source") or "cache")
+                    if math.isfinite(s_rate) and 5.0 <= s_rate <= 10.0:
+                        _FX_CACHE["rate"] = round(s_rate, 4)
+                        _FX_CACHE["date"] = s_date
+                        _FX_CACHE["source"] = s_src
+                except Exception:
+                    pass
+        now_m = time.monotonic()
+        if (
+            _FX_CACHE["date"] != today
+            and not _FX_CACHE["refreshing"]
+            and (_FX_CACHE["last_attempt_mono"] <= 0.0 or (now_m - _FX_CACHE["last_attempt_mono"]) >= 1800.0)
+        ):
+            _FX_CACHE["refreshing"] = True
+            _FX_CACHE["last_attempt_mono"] = now_m
+            need_fetch = True
+        snapshot = {
+            "rate": _FX_CACHE["rate"],
+            "date": _FX_CACHE["date"] or today,
+            "source": _FX_CACHE["source"],
+            "synced_today": (_FX_CACHE["date"] == today),
+        }
+
+    if need_fetch:
+        def _bg_fx():
+            rate, src = _fetch_usd_cny_from_web()
+            if rate is not None:
+                try:
+                    _FX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = _FX_CACHE_FILE.with_suffix(".json.tmp")
+                    tmp.write_text(
+                        json.dumps({"rate": rate, "date": today, "source": src}, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    os.replace(tmp, _FX_CACHE_FILE)
+                except Exception:
+                    pass
+            with _FX_CACHE_LOCK:
+                _FX_CACHE["refreshing"] = False
+                if rate is not None:
+                    _FX_CACHE["rate"] = rate
+                    _FX_CACHE["date"] = today
+                    _FX_CACHE["source"] = src
+
+        threading.Thread(target=_bg_fx, daemon=True, name="FxDailySync").start()
+
+    return snapshot
 
 
 def _infer_entry_mode(ledger_dir: Path, record: dict):
@@ -922,6 +1023,10 @@ class QuantHandler(BaseHTTPRequestHandler):
             return
 
         if not self._require_auth():
+            return
+
+        if path == "/api/fx":
+            self.send_json(_get_usd_cny_fx())
             return
 
         if path == "/api/health":

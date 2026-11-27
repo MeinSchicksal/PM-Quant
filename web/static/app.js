@@ -147,6 +147,9 @@ function getPalette() {
 }
 
 let currentPage = "overview";
+let displayCurrency = "USD"; // "USD" | "CNY"
+let fxUsdCny = { rate: 7.25, date: "", source: "default" };
+let _fxRetryTimer = null;
 let chartViewMode = "dual"; // "dual" | "price" | "prob"
 let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss" | "maker" | "taker" | "flip"
 let historyTodayOnly = false;
@@ -233,6 +236,133 @@ function fmtUsd(v, signed = false) {
   if (num > 1e-6) return `+$${abs}`;
   if (num < -1e-6) return `-$${abs}`;
   return `$0.00`;
+}
+
+function getTodayBjtDate() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function fmtMoney(v, signed = false) {
+  const raw = Number(v || 0);
+  const isCny = displayCurrency === "CNY";
+  const rate = isCny && Number.isFinite(fxUsdCny.rate) && fxUsdCny.rate > 0 ? fxUsdCny.rate : 1.0;
+  const num = raw * rate;
+  const sym = isCny ? "¥" : "$";
+  const abs = Math.abs(num).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  if (!signed) return `${sym}${abs}`;
+  if (num > 1e-6) return `+${sym}${abs}`;
+  if (num < -1e-6) return `-${sym}${abs}`;
+  return `${sym}0.00`;
+}
+
+function updateCurrencyToggleUI() {
+  const btn = $("currency-toggle-btn");
+  if (!btn) return;
+  btn.querySelectorAll(".curr-opt").forEach((sp) => {
+    sp.classList.toggle("is-active", sp.dataset.curr === displayCurrency);
+  });
+  const rTxt = Number(fxUsdCny.rate || 7.25).toFixed(4);
+  const dTxt = fxUsdCny.date ? `（${fxUsdCny.date} 每日同步一次）` : "（每日同步一次）";
+  btn.title = `点击切换美元 / 人民币显示 · 当前汇率 1 USD = ${rTxt} CNY ${dTxt}`;
+}
+
+function initCurrency() {
+  try {
+    const savedCurr = localStorage.getItem("pm_quant_currency");
+    if (savedCurr === "CNY" || savedCurr === "USD") {
+      displayCurrency = savedCurr;
+    }
+    const savedFxRaw = localStorage.getItem("pm_quant_fx_usd_cny");
+    if (savedFxRaw) {
+      const parsed = JSON.parse(savedFxRaw);
+      const r = Number(parsed?.rate || 0);
+      if (Number.isFinite(r) && r >= 5.0 && r <= 10.0) {
+        fxUsdCny = {
+          rate: r,
+          date: String(parsed.date || ""),
+          source: String(parsed.source || "cache"),
+        };
+      }
+    }
+  } catch (_) {
+    // ignore storage errors
+  }
+  updateCurrencyToggleUI();
+}
+
+async function syncDailyFxRate(force = false) {
+  const today = getTodayBjtDate();
+  if (!force && fxUsdCny.date === today && fxUsdCny.source !== "default") {
+    updateCurrencyToggleUI();
+    return;
+  }
+  try {
+    const resp = await fetchWithTimeout("/api/fx", {}, 5000);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const r = Number(data?.rate || 0);
+    if (Number.isFinite(r) && r >= 5.0 && r <= 10.0) {
+      fxUsdCny = {
+        rate: r,
+        date: data.synced_today ? today : String(data.date || ""),
+        source: String(data.source || "server"),
+      };
+      try {
+        localStorage.setItem("pm_quant_fx_usd_cny", JSON.stringify(fxUsdCny));
+      } catch (_) {}
+      updateCurrencyToggleUI();
+      if (displayCurrency === "CNY") {
+        rerenderMoneyViews();
+      }
+      // If server kicked off its once-a-day async refresh just now, pick up the updated rate once after 5s
+      if (!data.synced_today && !_fxRetryTimer) {
+        _fxRetryTimer = setTimeout(() => {
+          _fxRetryTimer = null;
+          syncDailyFxRate(true);
+        }, 5000);
+      }
+    }
+  } catch (_) {
+    // keep cached/default rate silently
+  }
+}
+
+function rerenderMoneyViews() {
+  if (cachedHistory) {
+    updateOverview(cachedHistory, cachedLive);
+    drawEquityCurve(cachedHistory);
+    renderHistoryTable(cachedHistory);
+  }
+  if (cachedLive) {
+    updateMarket(cachedLive);
+  }
+  if (cachedModalWindow && !cachedModalWindow.archive_pruned && !$("round-detail-modal")?.hidden) {
+    renderModalDetailContent(cachedModalWindow, cachedModalRecord);
+  }
+}
+
+function toggleCurrency() {
+  displayCurrency = displayCurrency === "CNY" ? "USD" : "CNY";
+  try {
+    localStorage.setItem("pm_quant_currency", displayCurrency);
+  } catch (_) {}
+  updateCurrencyToggleUI();
+  syncDailyFxRate(false);
+  rerenderMoneyViews();
+  const rTxt = Number(fxUsdCny.rate || 7.25).toFixed(4);
+  showToast(
+    displayCurrency === "CNY"
+      ? `已切换人民币显示（1 USD = ¥${rTxt}，每日同步一次）`
+      : "已切换回美元 ($ USD) 显示",
+    "brand"
+  );
 }
 
 function fmtPct(v, signed = true) {
@@ -925,7 +1055,7 @@ function updateOverview(live, hist) {
   // Hero Net PnL
   const pnlEl = $("hero-total-pnl");
   if (pnlEl) {
-    pnlEl.textContent = fmtUsd(totalPnl, true);
+    pnlEl.textContent = fmtMoney(totalPnl, true);
     pnlEl.className = `hero-num ${totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : ""}`;
   }
 
@@ -985,7 +1115,7 @@ function updateOverview(live, hist) {
   const tdW = Number(hist.today_wins || 0);
   const tdL = Number(hist.today_losses || 0);
   if ($("pace-today-pnl")) {
-    $("pace-today-pnl").textContent = fmtUsd(tdPnl, true);
+    $("pace-today-pnl").textContent = fmtMoney(tdPnl, true);
     $("pace-today-pnl").className = `tempo-val ${tdPnl > 1e-6 ? "up" : tdPnl < -1e-6 ? "down" : ""}`;
   }
   if ($("pace-today-wl")) {
@@ -1005,14 +1135,14 @@ function updateOverview(live, hist) {
     ? Boolean(hist.daily_projected)
     : (elapsedH < 24);
   if ($("pace-hourly-pnl")) {
-    $("pace-hourly-pnl").textContent = hasTrades ? `${fmtUsd(hrPnl, true)}` : "$0.00";
+    $("pace-hourly-pnl").textContent = hasTrades ? `${fmtMoney(hrPnl, true)}` : fmtMoney(0);
     $("pace-hourly-pnl").className = `tempo-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-hourly-note")) {
     $("pace-hourly-note").textContent = !hasTrades ? "等待成交" : (hrProjected ? "未满1时折算" : "实测时均");
   }
   if ($("pace-daily-pnl")) {
-    $("pace-daily-pnl").textContent = hasTrades ? `${fmtUsd(dayPnl, true)}` : "$0.00";
+    $("pace-daily-pnl").textContent = hasTrades ? `${fmtMoney(dayPnl, true)}` : fmtMoney(0);
     $("pace-daily-pnl").className = `tempo-val ${hasTrades ? (dayPnl > 1e-6 ? "up" : dayPnl < -1e-6 ? "down" : "") : ""}`;
   }
   if ($("pace-daily-note")) {
@@ -1060,8 +1190,8 @@ function updateOverview(live, hist) {
   const lostEl = $("hero-lost");
   const winBarEl = $("hero-win-bar");
   const pfEl = $("hero-pf-badge");
-  if (wonEl) wonEl.textContent = fmtUsd(totalWon, true);
-  if (lostEl) lostEl.textContent = `-$${totalLost.toFixed(2)}`;
+  if (wonEl) wonEl.textContent = fmtMoney(totalWon, true);
+  if (lostEl) lostEl.textContent = totalLost > 1e-6 ? `-${fmtMoney(totalLost, false)}` : `-${fmtMoney(0, false)}`;
   if (winBarEl) {
     const grossSum = totalWon + totalLost;
     const ratio = grossSum > 0 ? Math.min(98, Math.max(2, (totalWon / grossSum) * 100)) : 50;
@@ -1125,10 +1255,10 @@ function updateOverview(live, hist) {
   }
 
   // Capital Matrix
-  if ($("kpi-available-cap")) $("kpi-available-cap").textContent = fmtUsd(availCap);
-  if ($("hero-free-cap")) $("hero-free-cap").textContent = fmtUsd(freeCap);
-  if ($("hero-initial-cap")) $("hero-initial-cap").textContent = fmtUsd(initialCap);
-  if ($("hero-turnover")) $("hero-turnover").textContent = fmtUsd(turnover);
+  if ($("kpi-available-cap")) $("kpi-available-cap").textContent = fmtMoney(availCap);
+  if ($("hero-free-cap")) $("hero-free-cap").textContent = fmtMoney(freeCap);
+  if ($("hero-initial-cap")) $("hero-initial-cap").textContent = fmtMoney(initialCap);
+  if ($("hero-turnover")) $("hero-turnover").textContent = fmtMoney(turnover);
   const heroRoiEl = $("hero-roi");
   if (heroRoiEl) {
     heroRoiEl.textContent = fmtPct(turnoverRoi, true);
@@ -1156,7 +1286,7 @@ function updateOverview(live, hist) {
     if ($(pctId)) $(pctId).textContent = `${sharePct.toFixed(0)}%`;
     if ($(cntId)) $(cntId).textContent = `${c} 场`;
     if ($(pnlId)) {
-      $(pnlId).textContent = c > 0 ? fmtUsd(p, true) : "$0.00";
+      $(pnlId).textContent = c > 0 ? fmtMoney(p, true) : fmtMoney(0);
       $(pnlId).className = `exec-card-pnl num ${c > 0 ? (p > 1e-6 ? "up" : p < -1e-6 ? "down" : "") : ""}`;
     }
     if ($(barId)) {
@@ -1167,7 +1297,7 @@ function updateOverview(live, hist) {
       $(wrId).textContent = c > 0 ? `胜率 ${wr.toFixed(1)}% (${w}胜 ${l}负)` : "胜率 --";
     }
     if ($(avgId)) {
-      $(avgId).textContent = c > 0 ? `场均 ${fmtUsd(avgPer, true)}` : "场均 --";
+      $(avgId).textContent = c > 0 ? `场均 ${fmtMoney(avgPer, true)}` : "场均 --";
       $(avgId).className = `exec-ch-avg num ${c > 0 ? (avgPer > 1e-6 ? "up" : avgPer < -1e-6 ? "down" : "") : ""}`;
     }
     const card = $(cardId);
@@ -1261,14 +1391,14 @@ function updateOverview(live, hist) {
       const cls = p > 1e-4 ? "is-win" : p < -1e-4 ? "is-loss" : "is-flat";
       const lbl = p > 1e-4 ? "胜" : p < -1e-4 ? "负" : "平";
       const winTxt = slugToWindowText(r.slug, r.start_ts, r.end_ts).range || r.slug;
-      cells.push(`<span class="qm-form-cell ${cls}" title="${escapeHtml(winTxt)} · ${lbl} ${fmtUsd(p, true)}">${lbl}</span>`);
+      cells.push(`<span class="qm-form-cell ${cls}" title="${escapeHtml(winTxt)} · ${lbl} ${fmtMoney(p, true)}">${lbl}</span>`);
     });
     setHtmlIfChanged(winSeqEl, cells.join(""));
   }
 
   const avgPnlEl = $("kpi-avg-pnl");
   if (avgPnlEl) {
-    avgPnlEl.textContent = fmtUsd(avgPnl, true);
+    avgPnlEl.textContent = fmtMoney(avgPnl, true);
     avgPnlEl.className = `qm-val ${avgPnl > 0 ? "up" : avgPnl < 0 ? "down" : ""}`;
   }
 
@@ -1284,8 +1414,8 @@ function updateOverview(live, hist) {
   if (barAvgLossEl) {
     barAvgLossEl.style.width = maxAvgLeg > 1e-6 ? `${Math.max(4, (avgLoss / maxAvgLeg) * 100).toFixed(1)}%` : "0%";
   }
-  if (avgWinAmtEl) avgWinAmtEl.textContent = `+$${avgWin.toFixed(2)}`;
-  if (avgLossAmtEl) avgLossAmtEl.textContent = `-$${avgLoss.toFixed(2)}`;
+  if (avgWinAmtEl) avgWinAmtEl.textContent = fmtMoney(avgWin, true);
+  if (avgLossAmtEl) avgLossAmtEl.textContent = avgLoss > 1e-6 ? `-${fmtMoney(avgLoss, false)}` : `-${fmtMoney(0, false)}`;
   if ($("kpi-avg-split")) {
     if (avgWin > 1e-6 && avgLoss > 1e-6) {
       $("kpi-avg-split").textContent = `单场赚赔比 ${(avgWin / avgLoss).toFixed(2)} : 1`;
@@ -1304,7 +1434,7 @@ function updateOverview(live, hist) {
   const maxDd = Number.isFinite(Number(hist.max_drawdown)) ? Math.max(0, Number(hist.max_drawdown)) : 0;
   const maxDdEl = $("kpi-max-dd");
   if (maxDdEl) {
-    maxDdEl.textContent = maxDd > 1e-4 ? `-$${maxDd.toFixed(2)}` : "$0.00";
+    maxDdEl.textContent = maxDd > 1e-4 ? `-${fmtMoney(maxDd, false)}` : fmtMoney(0);
     maxDdEl.className = `cs-val ${maxDd > 1e-4 ? "down" : ""}`;
   }
   if ($("kpi-total-fills")) {
@@ -1330,7 +1460,7 @@ function updateOverview(live, hist) {
     recentAll.forEach((r) => {
       const winTxt = slugToWindowText(r.slug, r.start_ts, r.end_ts).range || r.slug;
       if (r.traded) {
-        bars.push(`<i class="qm-up-bar is-traded" title="${escapeHtml(winTxt)} · 已出手 (${fmtUsd(r.pnl, true)})"></i>`);
+        bars.push(`<i class="qm-up-bar is-traded" title="${escapeHtml(winTxt)} · 已出手 (${fmtMoney(r.pnl, true)})"></i>`);
       } else {
         bars.push(`<i class="qm-up-bar is-skip" title="${escapeHtml(winTxt)} · 观望未出手"></i>`);
       }
@@ -1348,7 +1478,7 @@ function updateOverview(live, hist) {
   if (turnNoteEl) {
     setHtmlIfChanged(
       turnNoteEl,
-      `净盈亏 ${fmtUsd(totalPnl, true)} · 下注 ${fmtUsd(turnover)} · 周转 <span id="kpi-turnover-mult">${capTurnMultiple.toFixed(2)}x</span>`
+      `净盈亏 ${fmtMoney(totalPnl, true)} · 下注 ${fmtMoney(turnover)} · 周转 <span id="kpi-turnover-mult">${capTurnMultiple.toFixed(2)}x</span>`
     );
   }
   const roiBarEl = $("qm-roi-bar");
@@ -1416,7 +1546,7 @@ function drawEquityCurve(hist) {
     if (p.cum_pnl > peak) peak = p.cum_pnl;
   });
   const peakBadge = $("equity-peak-badge");
-  if (peakBadge) peakBadge.textContent = fmtUsd(peak, true);
+  if (peakBadge) peakBadge.textContent = fmtMoney(peak, true);
 
   if (pts.length < 2) {
     equityChartGeom = null;
@@ -1427,7 +1557,7 @@ function drawEquityCurve(hist) {
     return;
   }
 
-  const padL = 52;
+  const padL = displayCurrency === "CNY" ? 64 : 54;
   const padR = 20;
   const padT = 22;
   const padB = 26;
@@ -1495,7 +1625,7 @@ function drawEquityCurve(hist) {
     ctx.restore();
 
     ctx.fillStyle = pal.axis;
-    ctx.fillText(fmtUsd(val, true), padL - 8, y);
+    ctx.fillText(fmtMoney(val, true), padL - 8, y);
   }
 
   // Zero baseline
@@ -1695,7 +1825,7 @@ function initEquityCurveInteractions() {
       tooltip.innerHTML = `
         <span class="chb-idx">起点 #0</span>
         <span class="chb-sep">·</span>
-        <span>本金 <b>${fmtUsd(cachedHistory?.initial_capital || 100)}</b></span>
+        <span>本金 <b>${fmtMoney(cachedHistory?.initial_capital || 100)}</b></span>
       `;
     } else {
       const winInfo = slugToWindowText(pt.slug, pt.ts);
@@ -1704,9 +1834,9 @@ function initEquityCurveInteractions() {
       tooltip.innerHTML = `
         <span class="chb-idx">#${pt.idx} ${escapeHtml(winInfo.range)}</span>
         <span class="chb-sep">·</span>
-        <span>单场 <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtUsd(delta, true)}</b></span>
+        <span>单场 <b class="${delta > 0 ? "up" : delta < 0 ? "down" : ""}">${fmtMoney(delta, true)}</b></span>
         <span class="chb-sep">·</span>
-        <span>累计 <b class="${cum > 0 ? "up" : cum < 0 ? "down" : ""}">${fmtUsd(cum, true)}</b></span>
+        <span>累计 <b class="${cum > 0 ? "up" : cum < 0 ? "down" : ""}">${fmtMoney(cum, true)}</b></span>
       `;
     }
     tooltip.hidden = false;
@@ -1782,7 +1912,7 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
   const pnlStyle = Math.abs(pnl) > 1e-6 ? "font-weight:700" : "font-weight:600";
 
   const insCol = includeInsuranceCol
-    ? `<td class="center">${fmtUsd(insVal)}</td>`
+    ? `<td class="center">${fmtMoney(insVal)}</td>`
     : "";
 
   const regimeShortMap = {
@@ -1827,9 +1957,9 @@ function buildRoundTableRow(rawRec, includeInsuranceCol = false) {
       </td>
       <td class="center ${upCls}">${fmtShares(upShares)}</td>
       <td class="center ${dnCls}">${fmtShares(dnShares)}</td>
-      <td class="center ${costCls}">${fmtUsd(costVal)}</td>
-      <td class="center ${payoutCls}">${fmtUsd(payoutVal)}</td>
-      <td class="center ${pnlClass}" style="${pnlStyle}">${fmtUsd(pnl, true)}</td>
+      <td class="center ${costCls}">${fmtMoney(costVal)}</td>
+      <td class="center ${payoutCls}">${fmtMoney(payoutVal)}</td>
+      <td class="center ${pnlClass}" style="${pnlStyle}">${fmtMoney(pnl, true)}</td>
       <td class="center">${fillsVal}</td>
       ${insCol}
     </tr>
@@ -2032,12 +2162,12 @@ function updateMarket(live) {
 
   if ($("up-pos-shares")) $("up-pos-shares").textContent = `${fmtShares(upShares)} 股`;
   if ($("up-pos-avg")) $("up-pos-avg").textContent = upShares > 0 ? fmtPriceCents(posUp.avg_px) : "--";
-  if ($("up-pos-cost")) $("up-pos-cost").textContent = fmtUsd(upCost);
+  if ($("up-pos-cost")) $("up-pos-cost").textContent = fmtMoney(upCost);
   if ($("card-up")) $("card-up").classList.toggle("is-holding", upShares > 1e-6);
 
   if ($("down-pos-shares")) $("down-pos-shares").textContent = `${fmtShares(dnShares)} 股`;
   if ($("down-pos-avg")) $("down-pos-avg").textContent = dnShares > 0 ? fmtPriceCents(posDn.avg_px) : "--";
-  if ($("down-pos-cost")) $("down-pos-cost").textContent = fmtUsd(dnCost);
+  if ($("down-pos-cost")) $("down-pos-cost").textContent = fmtMoney(dnCost);
   if ($("card-down")) $("card-down").classList.toggle("is-holding", dnShares > 1e-6);
 
   // Trigger subtle shimmer when new fill increases position on UP or DOWN card
@@ -2070,10 +2200,10 @@ function updateMarket(live) {
     if (totalCost > 0 || Math.abs(unwindPnl) > 1e-6) {
       setHtmlIfChanged(
         el,
-        `<strong class="bhv-pnl-num ${netVal >= 0 ? "up" : "down"}">${escapeHtml(fmtUsd(netVal, true))}</strong>`
+        `<strong class="bhv-pnl-num ${netVal >= 0 ? "up" : "down"}">${escapeHtml(fmtMoney(netVal, true))}</strong>`
       );
     } else {
-      setHtmlIfChanged(el, `<strong class="bhv-pnl-num flat">$0.00</strong>`);
+      setHtmlIfChanged(el, `<strong class="bhv-pnl-num flat">${escapeHtml(fmtMoney(0))}</strong>`);
     }
   };
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);
@@ -2111,16 +2241,16 @@ function updateMarket(live) {
     if (headlineEl && subEl) {
       if (upShares > 1e-6 && dnShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill up">看涨 ${fmtShares(upShares)}股</span><span class="bhv-pos-pill down">看跌 ${fmtShares(dnShares)}股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">总投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(totalCost))}</strong>`;
+        subEl.innerHTML = `<span class="bhv-sub-k">总投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(totalCost))}</strong>`;
       } else if (upShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill up">已买看涨</span><span class="bhv-pos-qty">${fmtShares(upShares)} 股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posUp.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(upCost))}</strong>`;
+        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posUp.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(upCost))}</strong>`;
       } else if (dnShares > 1e-6) {
         headlineEl.innerHTML = `<span class="bhv-pos-pill down">已买看跌</span><span class="bhv-pos-qty">${fmtShares(dnShares)} 股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posDn.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtUsd(dnCost))}</strong>`;
+        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posDn.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(dnCost))}</strong>`;
       } else {
         const uwCls = unwindPnl >= 0 ? "up" : "down";
-        headlineEl.innerHTML = `<span class="bhv-pos-pill ${uwCls}">已落袋清仓</span><span class="bhv-pos-qty">${escapeHtml(fmtUsd(unwindPnl, true))}</span>`;
+        headlineEl.innerHTML = `<span class="bhv-pos-pill ${uwCls}">已落袋清仓</span><span class="bhv-pos-qty">${escapeHtml(fmtMoney(unwindPnl, true))}</span>`;
         subEl.innerHTML = `<span class="bhv-sub-k">本轮已主动平仓锁定盈亏，等待结算</span>`;
       }
     }
@@ -2547,7 +2677,7 @@ function renderActionFeed(actions, startTs = 0) {
             <span class="ex-kpi-sep" aria-hidden="true"></span>
             <div class="ex-kpi is-cost">
               <span class="ex-kpi-k">投入</span>
-              <strong class="ex-kpi-v">${fmtUsd(notional)}</strong>
+              <strong class="ex-kpi-v">${fmtMoney(notional)}</strong>
             </div>` : ""}
           </div>
         `
@@ -3609,8 +3739,8 @@ async function openRoundModal(slug) {
               <span class="settings-sub">${escapeHtml(winInfo.fullLabel)}</span>
             </div>
             <div class="settings-storage-grid">
-              <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(rec.pnl, true)}</div><div class="st-note">结算方向: ${escapeHtml(rec.winner || "--")} · ${fmtUsd(rec.open_px)} → ${fmtUsd(rec.close_px)}</div></div>
-              <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rec.up_shares)} / DN ${fmtShares(rec.down_shares)}</div><div class="st-note">总成本 $${Number(rec.cost || 0).toFixed(2)} → 兑现 $${Number(rec.payout || 0).toFixed(2)}</div></div>
+              <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtMoney(rec.pnl, true)}</div><div class="st-note">结算方向: ${escapeHtml(rec.winner || "--")} · ${fmtUsd(rec.open_px)} → ${fmtUsd(rec.close_px)}</div></div>
+              <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rec.up_shares)} / DN ${fmtShares(rec.down_shares)}</div><div class="st-note">总成本 ${fmtMoney(rec.cost)} → 兑现 ${fmtMoney(rec.payout)}</div></div>
             </div>
             <div class="settings-sub" style="margin-top: 10px;">该场次的逐秒详情回放包已按保留策略自动释放，但永久收益账本（summary.jsonl）已完整保留。</div>
           </div>
@@ -3638,8 +3768,8 @@ async function openRoundModal(slug) {
             <span class="settings-sub">${escapeHtml(winInfo.fullLabel)}</span>
           </div>
           <div class="settings-storage-grid">
-            <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtUsd(pnlVal, true)}</div><div class="st-note">结算方向: ${escapeHtml(rFallback?.winner || "--")} · ${fmtUsd(rFallback?.open_px)} → ${fmtUsd(rFallback?.close_px)}</div></div>
-            <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rFallback?.up_shares)} / DN ${fmtShares(rFallback?.down_shares)}</div><div class="st-note">总成本 $${Number(rFallback?.cost || 0).toFixed(2)} → 兑现 $${Number(rFallback?.payout || 0).toFixed(2)}</div></div>
+            <div class="storage-item"><div class="st-name"><span>单场净收益</span></div><div class="st-val ${pnlCls}">${fmtMoney(pnlVal, true)}</div><div class="st-note">结算方向: ${escapeHtml(rFallback?.winner || "--")} · ${fmtUsd(rFallback?.open_px)} → ${fmtUsd(rFallback?.close_px)}</div></div>
+            <div class="storage-item"><div class="st-name"><span>持仓与成本</span></div><div class="st-val">UP ${fmtShares(rFallback?.up_shares)} / DN ${fmtShares(rFallback?.down_shares)}</div><div class="st-note">总成本 ${fmtMoney(rFallback?.cost)} → 兑现 ${fmtMoney(rFallback?.payout)}</div></div>
           </div>
           <div class="settings-sub" style="margin-top: 10px;">该场次的逐秒详情回放包已按保留策略自动释放，但永久收益账本（summary.jsonl）已完整保留。</div>
         </div>
@@ -3856,10 +3986,10 @@ function renderModalDetailContent(winData, rec) {
       <div class="review-pnl-focal ${focalCls}">
         <span class="review-focal-label">本轮已实现净损益</span>
         <div class="review-focal-row">
-          <span class="review-focal-val ${pnlCls}">${fmtUsd(pnl, true)}</span>
+          <span class="review-focal-val ${pnlCls}">${fmtMoney(pnl, true)}</span>
           ${cost > 0.01 ? `<span class="review-focal-roi ${pnlCls}">ROI ${roiSign}${roiPct}%</span>` : ""}
         </div>
-        <span class="review-focal-sub">总成本 ${fmtUsd(cost)}${!hasUnwindFill && feeDiff >= 0.005 ? ` (${feeText})` : ""} → 期末兑现 ${fmtUsd(payout)}</span>
+        <span class="review-focal-sub">总成本 ${fmtMoney(cost)}${!hasUnwindFill && feeDiff >= 0.005 ? ` (${feeText})` : ""} → 期末兑现 ${fmtMoney(payout)}</span>
       </div>
 
       <!-- Supporting Metric 1: UP Position -->
@@ -3868,7 +3998,7 @@ function renderModalDetailContent(winData, rec) {
         <span class="review-kpi-val ${upShares > 0 ? "up" : "muted"}">${fmtShares(upShares)} 股</span>
         <span class="review-kpi-sub">${
           upShares > 0
-            ? `均价 $${upAvg.toFixed(2)} · 成本 $${upFillCost.toFixed(2)}`
+            ? `均价 $${upAvg.toFixed(2)} · 成本 ${fmtMoney(upFillCost)}`
             : upFillSh > 0
               ? `已提前平仓 · 曾买 ${fmtShares(upFillSh)} 股 ($${upAvg.toFixed(2)})`
               : "本轮未持仓"
@@ -3881,7 +4011,7 @@ function renderModalDetailContent(winData, rec) {
         <span class="review-kpi-val ${dnShares > 0 ? "down" : "muted"}">${fmtShares(dnShares)} 股</span>
         <span class="review-kpi-sub">${
           dnShares > 0
-            ? `均价 $${dnAvg.toFixed(2)} · 成本 $${dnFillCost.toFixed(2)}`
+            ? `均价 $${dnAvg.toFixed(2)} · 成本 ${fmtMoney(dnFillCost)}`
             : dnFillSh > 0
               ? `已提前平仓 · 曾买 ${fmtShares(dnFillSh)} 股 ($${dnAvg.toFixed(2)})`
               : "本轮未持仓"
@@ -3970,7 +4100,7 @@ function renderModalDetailContent(winData, rec) {
                                 <td class="td-side"><span class="side-txt ${item.sideClass || ""}">${escapeHtml(item.sideLabel)}</span></td>
                                 <td class="num td-px" data-lbl="价格">${px > 0 ? "$" + px.toFixed(2) : "--"}</td>
                                 <td class="num td-sz" data-lbl="股数">${sz > 0 ? sz.toFixed(1) : "--"}</td>
-                                <td class="num td-amt" data-lbl="金额">${notional > 0 ? fmtUsd(notional) : "--"}</td>
+                                <td class="num td-amt" data-lbl="金额">${notional > 0 ? fmtMoney(notional) : "--"}</td>
                                 <td class="reason-cell">${escapeHtml(item.reasonStr || "--")}</td>
                               </tr>
                             `;
@@ -4798,7 +4928,7 @@ function renderDecisionBulletin(live) {
       const uPnlLive = Number(live?.realized_unwind_pnl || 0);
       lTag = "已落袋";
       lCls = "is-buy";
-      shortMsg = `本轮已高位止盈落袋（${fmtUsd(uPnlLive, true)}），安心等下一轮`;
+      shortMsg = `本轮已高位止盈落袋（${fmtMoney(uPnlLive, true)}），安心等下一轮`;
     } else if (Boolean(live?.basis_anomaly_active) || /基差瞬变脱锚/i.test(curRawReason)) {
       lTag = "脱锚暂停";
       lCls = "is-warn";
@@ -5045,7 +5175,7 @@ async function refreshHistoryInBackground(isManual = false, curSlug = null, curF
         const winLbl = String(nr.winner || "").toUpperCase() === "UP" ? "UP 胜出" : String(nr.winner || "").toUpperCase() === "DOWN" ? "DOWN 胜出" : "已结算";
         if (nr.traded) {
           const tone = nr.pnl > 1e-6 ? "up" : nr.pnl < -1e-6 ? "down" : "info";
-          showToast(`上轮 ${wInfo.range} 结算：${winLbl} · 净收益 ${fmtUsd(nr.pnl, true)}`, tone);
+          showToast(`上轮 ${wInfo.range} 结算：${winLbl} · 净收益 ${fmtMoney(nr.pnl, true)}`, tone);
         } else if (currentPage === "market") {
           showToast(`上轮 ${wInfo.range} 结算：${winLbl} · 本轮空仓观望`, "info");
         }
@@ -5524,11 +5654,19 @@ function initInteractions() {
 // ============================================================================
 document.addEventListener("DOMContentLoaded", () => {
   initTheme();
+  initCurrency();
   initNavigation();
   initInteractions();
   initEquityCurveInteractions();
   initLiveChartInteractions();
+  const currBtn = $("currency-toggle-btn");
+  if (currBtn) {
+    currBtn.addEventListener("click", toggleCurrency);
+  }
+  syncDailyFxRate(false);
   setInterval(updateSmoothCountdowns, 250);
+  // Check once an hour whether Beijing calendar day rolled over (still fetches at most once/day)
+  setInterval(() => syncDailyFxRate(false), 3600 * 1000);
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {

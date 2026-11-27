@@ -840,6 +840,47 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.currency-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  transition: border-color 0.16s ease, background 0.16s ease;
+  flex-shrink: 0;
+}
+
+.currency-toggle-btn:hover {
+  border-color: var(--brand, #2563eb);
+}
+
+.currency-toggle-btn .curr-opt {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.currency-toggle-btn .curr-opt.is-active {
+  background: var(--surface, #ffffff);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+[data-theme="dark"] .currency-toggle-btn .curr-opt.is-active {
+  background: rgba(59, 130, 246, 0.22);
+  color: #f8fafc;
+  box-shadow: none;
+}
+
 /* ==========================================================================
    3. VIEW 1: TRADING OVERVIEW (交易总览)
    ========================================================================== */
