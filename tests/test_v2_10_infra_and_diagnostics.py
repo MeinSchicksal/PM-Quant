@@ -509,25 +509,52 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
             "downstream_kbps": 0.0, "total_bytes": 0, "bytes_window": 0,
             "last_calc_t": now_s, "msg_rate": 0.0, "msgs_window": 0,
         }
+        feed._poly_poller_wake = threading.Event()
         recorded_oracle = []
         feed.record_raw_event = lambda cat, ev: recorded_oracle.append((cat, ev))
 
         with patch.object(feed, "_ensure_poly_poller") as mock_poller:
+            # 1) 冷启动仅 1 帧瞬时价（未攒满 55s TWAP 窗口）必须走 REST 60s TWAP 兜底，严禁把瞬时价伪装成 60s TWAP
+            px_cold = feed.get_polymarket_btc_price(now=now_s)
+            self.assertIsNone(px_cold)
+            mock_poller.assert_called_once()
+            self.assertFalse(feed.get_net_summary()["chainlink_ws_connected"])
+
+        # 2) 喂入完整 60s Chainlink WS 序列后，本地梯形积分输出真实 60s TWAP，不再启动 REST 轮询
+        ts_full = TradeStreamClient(record_raw=False, wake_event=wake)
+        ts_full.connected = True
+        ts_full.rtt_ms = 7.8
+        t_start = now_s - 60.0
+        for i in range(61):
+            # 前 30s 为 61500，后 30s 为 61550 -> 60s 时间加权均值为 ~61525
+            val = 61500.0 if i < 30 else 61550.0
+            ts_full._ingest_chainlink({
+                "symbol": "btc/usd",
+                "value": val,
+                "timestamp": int((t_start + i) * 1000),
+            }, raw_bytes=180)
+        feed._trade_ws = ts_full
+        feed._poly_btc_poller_active = False
+        feed._last_poly_poll_t = 0.0
+        feed._last_cl_ws_msg_count = 0
+        recorded_oracle.clear()
+
+        with patch.object(feed, "_ensure_poly_poller") as mock_poller:
             px = feed.get_polymarket_btc_price(now=now_s)
-            self.assertAlmostEqual(px, 61525.22, places=2)
-            # WS 健康时绝不启动 HTTP REST 轮询
+            self.assertIsNotNone(px)
+            self.assertAlmostEqual(px, 61525.0, delta=1.5)
+            # WS 攒满 60s 且健康时绝不启动 HTTP REST 轮询
             mock_poller.assert_not_called()
             summary = feed.get_net_summary()
             self.assertTrue(summary["chainlink_ws_connected"])
             self.assertAlmostEqual(summary["chainlink_latency_ms"], 7.8, places=1)
             self.assertEqual(len(recorded_oracle), 1)
-            self.assertEqual(recorded_oracle[0][1]["source"], "rtds_ws")
+            self.assertEqual(recorded_oracle[0][1]["source"], "rtds_ws_twap60")
 
             # WS 断连后自动回退到 REST 轮询兜底
-            ts_client.connected = False
-            feed._poly_poller_wake = threading.Event()
+            ts_full.connected = False
             px_fallback = feed.get_polymarket_btc_price(now=now_s + 0.5)
-            self.assertAlmostEqual(px_fallback, 61525.22, places=2)  # 复用 10s 内缓存同时触发 REST 刷新
+            self.assertAlmostEqual(px_fallback, px, places=2)  # 复用 10s 内缓存同时触发 REST 刷新
             mock_poller.assert_called_once()
             self.assertFalse(feed.get_net_summary()["chainlink_ws_connected"])
 

@@ -639,6 +639,14 @@ class PipelineDriver:
                         now=loop_start,
                         poly_spot=poly_spot,
                     )
+                    # 最后 60 秒结算锁定阶段：优先使用 7.8ms 真实 Chainlink 轨迹计算已锁定均价，
+                    # 消除「Coinbase - 慢速 basis_ema」在平值附近的瞬时基差偏差
+                    if tau_s <= 60.0 and getattr(spot, "twap_realized_60s", None) is None:
+                        cl_locked_60 = self.trade_stream.get_chainlink_window_average(
+                            end_t - 60.0, now=loop_start
+                        )
+                        if cl_locked_60 is not None and cl_locked_60 > 0.0:
+                            spot.twap_realized_60s = cl_locked_60
 
                     # Drain real-time WebSocket trade prints for physical queue deduction
                     trades = self.trade_stream.drain_trades(slug=slug)

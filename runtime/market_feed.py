@@ -763,16 +763,18 @@ class MarketFeed:
         th.start()
 
     def get_polymarket_btc_price(self, now: float = None) -> Optional[float]:
-        """Fetch Polymarket official real-time Chainlink BTC/USD price.
+        """Fetch Polymarket official real-time Chainlink BTC/USD 60s TWAP.
 
         Primary path: sub-10ms Polymarket RTDS WebSocket (`crypto_prices_chainlink` btc/usd)
-        multiplexed on TradeStreamClient — zero HTTP polling overhead when healthy.
-        Fallback path: asynchronous REST poller (`polymarket.com/api/crypto/crypto-price`)
-        activated seamlessly whenever WS is disconnected or silent > 3.5s.
+        integrated locally over a full 60s time-weighted window (`get_chainlink_btc_twap_60s`)
+        so it matches the exact 60s TWAP settlement/basis convention with zero HTTP polling.
+        Fallback path: asynchronous REST poller (`polymarket.com/api/crypto/crypto-price`,
+        60s TWAP) activated seamlessly during the first 55s WS warm-up or whenever WS is
+        disconnected / silent > 3.5s.
         """
         current_t = now or time.time()
         trade_ws = getattr(self, "_trade_ws", None)
-        ws_getter = getattr(trade_ws, "get_latest_chainlink_btc", None) if trade_ws is not None else None
+        ws_getter = getattr(trade_ws, "get_chainlink_btc_twap_60s", None) if trade_ws is not None else None
         ws_sample = ws_getter(max_age_s=3.5, now=current_t) if callable(ws_getter) else None
         if ws_sample is not None:
             px, recv_ts, oracle_ts, msg_cnt, tot_bytes = ws_sample
@@ -806,7 +808,7 @@ class MarketFeed:
                         "ref_t": ref_ts,
                         "kind": "poly_twap_live",
                         "price": float(px),
-                        "source": "rtds_ws",
+                        "source": "rtds_ws_twap60",
                     })
                 return float(px)
 
@@ -816,7 +818,8 @@ class MarketFeed:
             self._poly_btc_poller_active = True
             self._poly_poll_req_t = current_t
             self._ensure_poly_poller()
-            self._poly_poller_wake.set()
+            if getattr(self, "_poly_poller_wake", None) is not None:
+                self._poly_poller_wake.set()
 
         lock = getattr(self, "_poly_lock", None)
         if lock:

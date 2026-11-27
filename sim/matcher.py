@@ -12,7 +12,7 @@ fill from (a) a real trade print that executes at or below its price, or
 (b) a genuinely crossed book. Callers must pass the trade prints recorded /
 streamed from the venue; absence of prints means absence of fills.
 """
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 from core.types import Order, OrderBook
 
@@ -50,6 +50,8 @@ class QueueMatcher:
         # could fill a 5-share resting order with zero trade prints.
         self._crossed_snapshot: Dict[int, tuple] = {}
         self._crossed_avail: Dict[int, float] = {}
+        # 防抖跟踪：防止大做市商 cancel-and-replace 1 帧空档瞬间把 queue_ahead 归零跳队
+        self._zero_depth_since: Dict[int, float] = {}
 
     @staticmethod
     def _crossed_ask_key(book: OrderBook, limit_price: float) -> tuple:
@@ -80,6 +82,7 @@ class QueueMatcher:
         self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
         self._crossed_snapshot.pop(order.id, None)
         self._crossed_avail.pop(order.id, None)
+        self._zero_depth_since.pop(order.id, None)
 
     def activate_order(
         self,
@@ -115,6 +118,7 @@ class QueueMatcher:
             self.queue_ahead[order.id] = self._bid_depth_at_price(book, order.price)
         self._crossed_snapshot.pop(order.id, None)
         self._crossed_avail.pop(order.id, None)
+        self._zero_depth_since.pop(order.id, None)
         return True
 
     def sync_queue_depth(
@@ -123,6 +127,7 @@ class QueueMatcher:
         book: OrderBook,
         now: float,
         conservative_mult: float = 1.03,
+        zero_debounce_s: float = 0.25,
     ) -> float:
         """Conservatively cap queue_ahead using live visible L2 depth at our bid price.
 
@@ -135,9 +140,11 @@ class QueueMatcher:
         phantom-queue bug where makers ahead cancel 95% of a 600-share level while
         the simulator stayed frozen at 600, without ever inventing optimistic fills.
 
-        Never increases `queue_ahead` when new joiners arrive behind us, and never
+        Never increases `queue_ahead` when new joiners arrive behind us, never
         zeros out queue_ahead purely because a momentary empty snapshot arrived
-        while best_bid is still above our price.
+        while best_bid is still above our price, and debounces single-frame
+        zero-depth cancel-and-replace flickers for `zero_debounce_s` before
+        clearing queue_ahead to 0.
         """
         if order.remaining <= 1e-6 or not order.activated or book is None:
             return self.queue_ahead.get(order.id, 0.0)
@@ -153,8 +160,21 @@ class QueueMatcher:
             return self.queue_ahead.get(order.id, 0.0)
         ahead = self.queue_ahead.get(order.id, 0.0)
         if ahead <= 1e-9:
+            self._zero_depth_since.pop(order.id, None)
             return 0.0
         vis_depth = self._bid_depth_at_price(book, order.price)
+        if vis_depth <= 1e-9:
+            # 防单帧 cancel-and-replace 深度闪断瞬间清零免费跳队：需持续 >= zero_debounce_s 仍为空才清零
+            since = self._zero_depth_since.get(order.id)
+            if since is None:
+                self._zero_depth_since[order.id] = float(now)
+                return ahead
+            if (float(now) - since) < max(0.0, float(zero_debounce_s)) - 1e-9:
+                return ahead
+            self.queue_ahead[order.id] = 0.0
+            self._zero_depth_since.pop(order.id, None)
+            return 0.0
+        self._zero_depth_since.pop(order.id, None)
         mult = max(1.0, float(conservative_mult))
         capped = min(ahead, vis_depth * mult)
         if capped < ahead:
@@ -168,6 +188,8 @@ class QueueMatcher:
         trade_size: float,
         now: float,
         trade_side: str = "",
+        current_book: Optional[OrderBook] = None,
+        max_book_drift: float = 0.01,
     ) -> float:
         """Physical queue deduction driven by a real trade print event.
 
@@ -179,6 +201,11 @@ class QueueMatcher:
             trade_side: Optional taker direction ('BUY' or 'SELL'). An aggressive
                 BUY print at our exact bid price lifted an ask and does not hit
                 our resting bid queue unless price strictly traded through below us.
+            current_book: Optional live L2 OrderBook for this token. Guards against
+                1.5-2.3s delayed RTDS trade prints ghost-filling a resting bid when
+                the real CLOB best_bid has already moved strictly above our order.
+            max_book_drift: Allowed 1-tick ($0.01) async WS jitter between CLOB
+                book and RTDS trade stream before rejecting a lagging print.
 
         Returns:
             Filled shares on this print (0.0 if queue not yet exhausted).
@@ -200,6 +227,17 @@ class QueueMatcher:
         side_up = str(trade_side or "").upper()
         if side_up == "BUY" and trade_price >= order.price - 1e-4:
             return 0.0
+
+        # 盘口因果防滞后幽灵单护栏：Polymarket RTDS 成交流常滞后真实 CLOB 盘口 1.5~2.3s。
+        # 若实时买一价已高于挂单价 >= 2 跳（或该笔成交价落后实时买一 >= 2 跳），说明这是
+        # 盘口上涨前的历史旧成交打印，在真实 CLOB 撮合引擎里绝不可能绕过更高买一击中我们。
+        if current_book is not None and current_book.best_bid is not None:
+            live_bid = float(current_book.best_bid)
+            drift = max(0.0, float(max_book_drift))
+            if live_bid > float(order.price) + drift + 1e-6:
+                return 0.0
+            if float(trade_price) < live_bid - drift - 1e-6:
+                return 0.0
 
         # Maker bid fills when real trades execute at or below our bid price
         # (1e-4 slack absorbs Polymarket CLOB merge/mint float rounding like 0.120000014)

@@ -255,10 +255,56 @@ def replay_window(
     def _book_at_time(evs: List[Dict[str, Any]], start_idx: int, target_t: float) -> Optional[OrderBook]:
         if not evs:
             return None
-        j = max(0, start_idx - 1)
+        j = max(0, min(start_idx, len(evs) - 1))
+        while j > 0 and float(evs[j].get("t", 0.0)) > target_t:
+            j -= 1
         while j + 1 < len(evs) and float(evs[j + 1].get("t", 0.0)) <= target_t:
             j += 1
+        if float(evs[j].get("t", 0.0)) > target_t:
+            return None
         return _book_from_event(evs[j])
+
+    def _deduct_competing_asks(
+        bk: Optional[OrderBook],
+        side_label: str,
+        t_from: float,
+        t_to: float,
+    ) -> Optional[OrderBook]:
+        """扣减 (t_from, t_to] 在途期间市场上已发生的同侧同价位成交深度，防吃已被抢走的幽灵卖盘。"""
+        if bk is None or not bk.asks or t_to <= t_from:
+            return bk
+        consumed: Dict[float, float] = {}
+        # 从当前游标附近回扫覆盖 (t_from, t_to] 的真实逐笔成交
+        j = min(it, len(trades))
+        while j > 0:
+            tr_prev = trades[j - 1]
+            tr_t_prev = float(tr_prev.get("received_at") or tr_prev.get("timestamp") or 0.0)
+            if tr_t_prev <= t_from:
+                break
+            j -= 1
+        while j < len(trades):
+            tr = trades[j]
+            tr_t = float(tr.get("received_at") or tr.get("timestamp") or 0.0)
+            if tr_t > t_to:
+                break
+            if tr_t > t_from and tr.get("outcome") == side_label:
+                p_key = round(float(tr.get("price", 0.0) or 0.0), 4)
+                consumed[p_key] = consumed.get(p_key, 0.0) + float(tr.get("size", 0.0) or 0.0)
+            j += 1
+        if not consumed:
+            return bk
+        new_asks = []
+        for px, sz in bk.asks:
+            rem = float(sz) - consumed.get(round(float(px), 4), 0.0)
+            if rem > 1e-4:
+                new_asks.append((px, rem))
+        return OrderBook(
+            bids=list(bk.bids),
+            asks=new_asks,
+            last_trade_price=bk.last_trade_price,
+            source_t=bk.source_t,
+            received_at=bk.received_at,
+        )
 
     for t in times:
         while iu < len(events_up) and float(events_up[iu].get("t", 0.0)) <= t:
@@ -310,11 +356,18 @@ def replay_window(
                     break
 
         def _delayed_replay_book(_side_name: str, _t=t, _iu=iu, _idn=idn):
-            target_t = _t + lat_s
-            return (
-                _book_at_time(events_up, _iu, target_t),
-                _book_at_time(events_dn, _idn, target_t),
-            )
+            # 若存在到站的异步在途 Taker，精准取其 arrive_at 时刻盘口并扣减 (submit_t, arrive_at] 竞争成交深度
+            sub_t = _t
+            arr_t = _t + lat_s
+            for pt in getattr(runner, "pending_takers", []):
+                pt_arr = float(pt.get("arrive_at", 0.0) or 0.0)
+                if pt_arr <= _t + 1e-9:
+                    sub_t = float(pt.get("submit_t", _t) or _t)
+                    arr_t = pt_arr
+                    break
+            bu_arr = _deduct_competing_asks(_book_at_time(events_up, _iu, arr_t), "Up", sub_t, arr_t)
+            bd_arr = _deduct_competing_asks(_book_at_time(events_dn, _idn, arr_t), "Down", sub_t, arr_t)
+            return (bu_arr, bd_arr)
 
         def _delayed_replay_prints(_t=t, _it=it):
             target_t = _t + lat_s
@@ -342,10 +395,34 @@ def replay_window(
             binance_open_price=first_bin,
             velocity_bps=round(vel_bps, 3),
         )
+        # 启用与实盘一致的非阻塞在途队列 (async_taker_delay=True)，杜绝同步偷看未来盘口与 20ms 机枪连发重试
         runner.step(t, spot, book_up, book_dn, trade_prints=prints,
                     poly_spot=last_poly, poly_spot_ts=poly_ts, replay_mode=True,
                     delayed_book_fetcher=_delayed_replay_book,
-                    delayed_prints_fetcher=_delayed_replay_prints)
+                    delayed_prints_fetcher=_delayed_replay_prints,
+                    async_taker_delay=True)
+
+    # 窗尾若有在途 Taker 且 arrive_at <= end，在收盘前按 arrive_at 盘口补结算，避免窗尾稀疏 tick 误丢单
+    if getattr(runner, "pending_takers", None):
+        due_ts = [float(pt["arrive_at"]) for pt in runner.pending_takers if float(pt.get("arrive_at", 0.0)) <= end + 1e-9]
+        if due_ts:
+            settle_t = max(due_ts)
+            bu_end = _book_at_time(events_up, iu, settle_t) or book_up
+            bd_end = _book_at_time(events_dn, idn, settle_t) or book_dn
+            def _tail_delayed_book(_side_name: str):
+                sub_t = settle_t - lat_s
+                arr_t = settle_t
+                for pt in getattr(runner, "pending_takers", []):
+                    pt_arr = float(pt.get("arrive_at", 0.0) or 0.0)
+                    if pt_arr <= settle_t + 1e-9:
+                        sub_t = float(pt.get("submit_t", sub_t) or sub_t)
+                        arr_t = pt_arr
+                        break
+                return (
+                    _deduct_competing_asks(_book_at_time(events_up, iu, arr_t), "Up", sub_t, arr_t),
+                    _deduct_competing_asks(_book_at_time(events_dn, idn, arr_t), "Down", sub_t, arr_t),
+                )
+            runner._settle_due_pending_takers(settle_t, bu_end, bd_end, delayed_book_fetcher=_tail_delayed_book)
 
     if not times:
         # No recorded book data for this window: cannot claim any result.

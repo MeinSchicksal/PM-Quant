@@ -103,7 +103,7 @@ class TestV32UnlockedMultibuy(unittest.TestCase):
         b_dn = _book(0.54, 0.56)  # pair_cost = 0.55 + 0.56 + fee = 1.127 > 0.98
         dec_flip = plan_decision(
             pos_up, pos_dn, b_up, b_dn, _spot(vel_bps=-1.0),
-            tau_s=120.0, params=dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=10.0, FLIPS_USED=0),
+            tau_s=120.0, params=dict(config.PARAMS, ENABLE_REVERSAL_FLIP=True, SECONDS_SINCE_LAST_ENTRY=10.0, FLIPS_USED=0),
             p_fair=0.36, entries_count=1,
         )
         self.assertEqual(dec_flip.action, "taker_buy")
@@ -114,7 +114,7 @@ class TestV32UnlockedMultibuy(unittest.TestCase):
         b_up_comp = _book(0.39, 0.48)
         dec_no_mk = plan_decision(
             pos_up, pos_dn, b_up_comp, b_dn_wide, _spot(vel_bps=-0.2),
-            tau_s=120.0, params=dict(config.PARAMS, SECONDS_SINCE_LAST_ENTRY=10.0, FLIPS_USED=0),
+            tau_s=120.0, params=dict(config.PARAMS, ENABLE_REVERSAL_FLIP=True, SECONDS_SINCE_LAST_ENTRY=10.0, FLIPS_USED=0),
             p_fair=0.38, entries_count=1,
         )
         self.assertEqual(dec_no_mk.action, "wait")

@@ -599,13 +599,15 @@ class TestAudit2026ScientificIntegrityFixes(unittest.TestCase):
             runner.matcher.queue_ahead[old_order.id] = 0.0
             old_order.cancel_effective_at = t0 + 54.0
 
-            # Tick 3: 成交打印把在途旧单吃满 5 股 -> 同侧替代新单必须被立即撤回，绝不残留成 10 股双仓
+            # Tick 3: 卖压把盘口砸回 0.50 且成交打印吃满在途旧单 5 股 -> 同侧替代新单必须被立即撤回，绝不残留成 10 股双仓
+            b_up3 = _book(0.50, 0.52, t=t0 + 53.1)
+            b_dn3 = _book(0.48, 0.50, t=t0 + 53.1)
             prints = [{
                 "outcome": "Up", "side": "SELL", "price": 0.50, "size": 5.0,
                 "timestamp": t0 + 53.1, "received_at": t0 + 53.1,
             }]
             with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="hold")):
-                runner.step(t0 + 53.1, spot2, b_up2, b_dn2, trade_prints=prints, replay_mode=True)
+                runner.step(t0 + 53.1, spot2, b_up3, b_dn3, trade_prints=prints, replay_mode=True)
             self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
             self.assertEqual(len(runner.working_orders), 0, "Replacement working order must be cancelled once pending cancel fills")
         finally:

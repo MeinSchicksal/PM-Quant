@@ -74,13 +74,14 @@ class TradeStreamClient(_BaseWSClient):
         self._chainlink_btc_price: Optional[float] = None
         self._chainlink_btc_recv_t: float = 0.0
         self._chainlink_btc_oracle_t: float = 0.0
+        self._chainlink_btc_buf: deque = deque(maxlen=4000)
         self.chainlink_msg_count: int = 0
         self.chainlink_bytes: int = 0
 
     def get_latest_chainlink_btc(
         self, max_age_s: float = 3.5, now: Optional[float] = None
     ) -> Optional[tuple]:
-        """返回 RTDS WS 最近 max_age_s 秒内的 Chainlink BTC/USD 推送 (price, recv_ts, oracle_ts, msg_count, bytes)。"""
+        """返回 RTDS WS 最近 max_age_s 秒内的 Chainlink BTC/USD 实时瞬时推送 (price, recv_ts, oracle_ts, msg_count, bytes)。"""
         if not self.connected:
             return None
         t = time.time() if now is None else float(now)
@@ -95,6 +96,103 @@ class TradeStreamClient(_BaseWSClient):
         if (t - recv_t) > max_age_s:
             return None
         return (float(px), float(recv_t), float(oracle_t), int(cnt), int(tot_b))
+
+    def get_chainlink_btc_twap_60s(
+        self,
+        max_age_s: float = 3.5,
+        now: Optional[float] = None,
+        min_span_s: float = 55.0,
+    ) -> Optional[tuple]:
+        """将 RTDS WS 瞬时 Chainlink BTC/USD 推流按时间加权积分合成 60s TWAP。
+
+        仅当已攒满 >= min_span_s（默认 55s）且至少 5 个样本时返回
+        (twap_60s, recv_ts, oracle_ts, msg_count, bytes)；
+        冷启动前 55s 返回 None，由调用方无缝走 REST 60s TWAP 兜底，
+        彻底避免把瞬时价伪装成 60s TWAP 导致 basis_ema 混入 30s 动量失真。
+        """
+        if not self.connected:
+            return None
+        t = time.time() if now is None else float(now)
+        with self._lock:
+            recv_t = self._chainlink_btc_recv_t
+            oracle_t = self._chainlink_btc_oracle_t
+            cnt = self.chainlink_msg_count
+            tot_b = self.chainlink_bytes
+            if recv_t <= 0.0 or oracle_t <= 0.0 or (t - recv_t) > max_age_s:
+                return None
+            win_start = oracle_t - 60.0
+            pts = [(ts, px) for ts, px in self._chainlink_btc_buf if win_start <= ts <= oracle_t + 1e-6]
+        if len(pts) < 5:
+            return None
+        span = pts[-1][0] - pts[0][0]
+        if span < float(min_span_s) - 1e-6:
+            return None
+        w_sum = 0.0
+        dt_sum = 0.0
+        for i in range(1, len(pts)):
+            dt = pts[i][0] - pts[i - 1][0]
+            if dt > 0.0:
+                w_sum += 0.5 * (pts[i - 1][1] + pts[i][1]) * dt
+                dt_sum += dt
+        if dt_sum <= 1e-6:
+            return None
+        twap_60s = w_sum / dt_sum
+        return (float(twap_60s), float(recv_t), float(oracle_t), int(cnt), int(tot_b))
+
+    def get_chainlink_window_average(
+        self,
+        win_start_t: float,
+        now: Optional[float] = None,
+        max_age_s: float = 3.5,
+    ) -> Optional[float]:
+        """计算最后 60s 结算锁定区间 [win_start_t, now] 内的真实 Chainlink 时间加权均价。
+
+        用于最后 60 秒替代「Coinbase 现货 - 慢速基差」的倒推估算，消除瞬时基差偏移。
+        仅在 WS 在线、数据新鲜且覆盖率达标时返回；否则返回 None 由上层无缝回退。
+        """
+        if not self.connected:
+            return None
+        t = time.time() if now is None else float(now)
+        w_start = float(win_start_t)
+        elapsed = t - w_start
+        if elapsed <= 0.0:
+            return None
+        with self._lock:
+            recv_t = self._chainlink_btc_recv_t
+            oracle_t = self._chainlink_btc_oracle_t
+            if recv_t <= 0.0 or oracle_t <= 0.0 or (t - recv_t) > max_age_s:
+                return None
+            buf_copy = list(self._chainlink_btc_buf)
+        if not buf_copy:
+            return None
+        # 若存在 win_start 之前 5s 内的前导锚点，将其夹到 win_start 作为左边界消除窗口开头空隙
+        pts = []
+        anchor = None
+        for ts, px in buf_copy:
+            if ts < w_start:
+                if (w_start - ts) <= 5.0:
+                    anchor = px
+            elif ts <= t + 0.5:
+                pts.append((ts, px))
+        if anchor is not None and (not pts or pts[0][0] > w_start + 1e-6):
+            pts.insert(0, (w_start, anchor))
+        if not pts:
+            return None
+        if len(pts) == 1:
+            return float(pts[0][1]) if elapsed < 10.0 else None
+        w_sum = 0.0
+        dt_sum = 0.0
+        for i in range(1, len(pts)):
+            dt = pts[i][0] - pts[i - 1][0]
+            if dt > 0.0:
+                w_sum += 0.5 * (pts[i - 1][1] + pts[i][1]) * dt
+                dt_sum += dt
+        coverage_ok = (elapsed < 10.0) or (dt_sum >= 0.45 * elapsed)
+        if not coverage_ok:
+            return None
+        if dt_sum > 1e-6:
+            return float(w_sum / dt_sum)
+        return float(sum(p for _, p in pts) / len(pts))
 
     def get_latest_trade(
         self, token_id: str, max_age_s: float = 1.2, now: Optional[float] = None
@@ -309,6 +407,13 @@ class TradeStreamClient(_BaseWSClient):
             self._chainlink_btc_price = float(px)
             self._chainlink_btc_recv_t = float(recv_t)
             self._chainlink_btc_oracle_t = float(oracle_t)
+            if self._chainlink_btc_buf and abs(oracle_t - self._chainlink_btc_buf[-1][0]) <= 1e-6:
+                self._chainlink_btc_buf[-1] = (float(oracle_t), float(px))
+            else:
+                self._chainlink_btc_buf.append((float(oracle_t), float(px)))
+            cutoff = float(oracle_t) - 75.0
+            while len(self._chainlink_btc_buf) > 2 and self._chainlink_btc_buf[0][0] < cutoff:
+                self._chainlink_btc_buf.popleft()
             self.chainlink_msg_count += 1
             self.chainlink_bytes += max(0, int(raw_bytes))
         if self._wake_event is not None:

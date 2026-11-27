@@ -39,7 +39,7 @@ class TestV210ExperimentalIntegrityAndDiagnostics(unittest.TestCase):
         self.assertEqual(config.PARAMS["MAX_NET_LOTS"], 2)
         self.assertEqual(config.PARAMS["MAX_ENTRIES_PER_WINDOW"], 4)
         self.assertTrue(config.PARAMS["ENABLE_PYRAMID_ADD"])
-        self.assertTrue(config.PARAMS["ENABLE_REVERSAL_FLIP"])
+        self.assertFalse(config.PARAMS["ENABLE_REVERSAL_FLIP"])
         self.assertTrue(config.PARAMS["FLIP_PAYOFF_SIZING"])
         self.assertTrue(config.PARAMS["FLIP_REQUIRE_BREAKEVEN"])
         self.assertFalse(config.PARAMS["FLIP_ALLOW_MAKER"])

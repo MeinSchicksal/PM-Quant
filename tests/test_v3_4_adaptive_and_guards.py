@@ -604,6 +604,7 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         #    MUST route to breakeven flip (7 shares), NEVER buy 5 shares locking a -$0.55 guaranteed loss!
         p_pf = dict(
             config.PARAMS,
+            ENABLE_REVERSAL_FLIP=True,
             AVAILABLE_CAPITAL=100.0,
             COMMITTED_WINDOW_COST=2.71,
             HELD_LEG_COST=2.71,
@@ -623,6 +624,228 @@ class TestV34AdaptiveAndGuards(unittest.TestCase):
         # 3) validate_params rejects VOL_ADAPTIVE_SHOCK_CAP_BPS > TOXICITY_SHOCK_BPS
         with self.assertRaises(ValueError):
             config.validate_params(dict(config.PARAMS, VOL_ADAPTIVE_SHOCK_CAP_BPS=4.5, TOXICITY_SHOCK_BPS=3.5))
+
+    def test_redteam_rtds_60s_twap_integration_and_cold_start(self):
+        """RTDS Chainlink WS 必须攒满 55s 输出时间加权 60s TWAP，绝不可把瞬时价伪装成 TWAP。"""
+        import time
+        from runtime.trade_stream import TradeStreamClient
+
+        ts = TradeStreamClient(record_raw=False)
+        ts.connected = True
+        now_s = time.time()
+        t0 = now_s - 60.0
+
+        # 冷启动前 40s：返回 None（强制走 REST 60s TWAP 兜底）
+        for i in range(40):
+            ts._ingest_chainlink({"symbol": "btc/usd", "value": 60000.0, "timestamp": int((t0 + i) * 1000)}, 120)
+        self.assertIsNone(ts.get_chainlink_btc_twap_60s(now=now_s))
+
+        # 补足到完整 60s：前 40s 为 60000，后 20s 拉升至 60120 -> 60s TWAP 应接近 60040 而非瞬时 60120
+        for i in range(40, 61):
+            ts._ingest_chainlink({"symbol": "btc/usd", "value": 60120.0, "timestamp": int((t0 + i) * 1000)}, 120)
+        twap_res = ts.get_chainlink_btc_twap_60s(now=now_s)
+        self.assertIsNotNone(twap_res)
+        twap_px = twap_res[0]
+        self.assertAlmostEqual(twap_px, 60040.0, delta=3.0)
+        self.assertLess(twap_px, 60060.0)
+
+    def test_redteam_maker_ghost_fill_guard_and_zero_depth_debounce(self):
+        """拦截 RTDS 滞后 1.5~2.3s 打印造成的 Maker 幽灵单，且单帧 0 深度不得清零队列跳队。"""
+        import tempfile
+        from core.types import Order
+        from runtime.runner import PaperRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = PaperRunner(ledger_dir=tmp)
+            matcher = runner.matcher
+            order = Order(
+                id=1, client_order_id="o1", side="Up", price=0.55, size=5.0, remaining=5.0,
+                placed_at=100.0, live_at=100.1,
+            )
+            book_at_place = OrderBook(bids=[(0.55, 20.0)], asks=[(0.57, 20.0)], source_t=100.1, received_at=100.1)
+            self.assertTrue(matcher.activate_order(order, book_at_place, 100.1, post_only=True))
+            self.assertAlmostEqual(matcher.queue_ahead[1], 20.0, places=4)
+
+            # 1) 盘口已涨到 best_bid=0.58（高出挂单 3¢），滞后 RTDS 历史打印 @ 0.54 不得击中挂单或扣队列
+            book_moved_up = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)], source_t=102.0, received_at=102.0)
+            fill_ghost = matcher.on_trade_print(
+                order, 0.54, 50.0, 102.0,
+                trade_side="SELL", current_book=book_moved_up,
+            )
+            self.assertEqual(fill_ghost, 0.0)
+            self.assertAlmostEqual(matcher.queue_ahead[1], 20.0, places=4)
+
+            # 2) 单帧盘口闪断（0.55 档临时消失 50ms）不得立刻清零 queue_ahead
+            book_blip = OrderBook(bids=[(0.54, 10.0)], asks=[(0.56, 10.0)], source_t=102.05, received_at=102.05)
+            matcher.sync_queue_depth(order, book_blip, now=102.05)
+            self.assertAlmostEqual(matcher.queue_ahead[1], 20.0, places=4)
+            # 持续空档 >= 0.25s 后才确认前方队列撤空
+            matcher.sync_queue_depth(order, book_blip, now=102.35)
+            self.assertAlmostEqual(matcher.queue_ahead[1], 0.0, places=4)
+
+            # 3) 整秒 exch_t 因果上界截断：exch_t=100.0, recv_t=102.5 -> 截断至 <= 101.0，避免穿越 101.8 的新单
+            tp_t = PaperRunner._resolve_print_timestamp({"timestamp": 100.0, "received_at": 102.5}, 102.5, clock_offset_s=0.0)
+            self.assertLessEqual(tp_t, 101.0 + 1e-6)
+
+    def test_redteam_realized_vol_last_point_no_tiny_dt_explosion(self):
+        """末尾非整秒 tick (dt=10ms) 不得通过 r^2/dt 把平静行情波动率炸大数倍。"""
+        from core.estimator import calculate_dynamic_realized_vol
+
+        t0 = 1800000000.0
+        # 60 秒平静行情：每秒 ±1 美元交替（真实 5m 波动率 ~5.8 bps）
+        history = [(t0 + i, 60000.0 + (1.0 if i % 2 == 0 else -1.0)) for i in range(61)]
+        base_vol = calculate_dynamic_realized_vol(history, baseline_vol_bps=15.0, half_life_s=15.0)
+        # 在最后 10ms 追加一笔 3 美元跳动（旧代码直接 append 导致 r^2/0.01 把波动率炸大到 ~30+ bps）
+        history.append((t0 + 60.01, 60004.0))
+        vol_bps = calculate_dynamic_realized_vol(history, baseline_vol_bps=15.0, half_life_s=15.0)
+        self.assertIsNotNone(vol_bps)
+        self.assertLess(vol_bps, base_vol * 2.0)
+        self.assertLess(vol_bps, 12.0)
+
+    def test_redteam_replay_competing_ask_deduction_and_async_taker_delay(self):
+        """回放模式必须按异步在途队列阻塞（禁机枪重试），并扣减在途期间真实同侧卖盘竞争成交深度。"""
+        import tempfile
+        from unittest.mock import patch
+        from runtime.runner import PaperRunner
+        from core.types import Decision
+        from sim.replay import replay_window
+
+        # 1) 端到端 replay_window：卖一 0.50 仅有 5 股，但在途期间市场真实 BUY 成交买走全部 5 股 -> 到站拒单
+        t0 = 1800000000.0
+        events_up = [
+            {"t": t0 + 30.0, "bids": [[0.48, 20.0]], "asks": [[0.50, 5.0], [0.85, 20.0]]},
+            {"t": t0 + 30.25, "bids": [[0.48, 20.0]], "asks": [[0.50, 5.0], [0.85, 20.0]]},
+            {"t": t0 + 35.0, "bids": [[0.48, 20.0]], "asks": [[0.80, 20.0]]},
+        ]
+        events_dn = [
+            {"t": t0 + 30.0, "bids": [[0.48, 20.0]], "asks": [[0.52, 20.0]]},
+            {"t": t0 + 30.25, "bids": [[0.48, 20.0]], "asks": [[0.52, 20.0]]},
+            {"t": t0 + 35.0, "bids": [[0.18, 20.0]], "asks": [[0.20, 20.0]]},
+        ]
+        spot_rows = [
+            {"t": t0 + 30.0, "price": 60120.0},
+            {"t": t0 + 30.25, "price": 60120.0},
+            {"t": t0 + 35.0, "price": 60120.0},
+        ]
+        # 在途窗口 (30.0, 30.2] 内，对手盘已抢光 0.50 全部 5 股，只剩 0.85（远超限价 0.52）
+        trades = [
+            {"outcome": "Up", "side": "BUY", "price": 0.50, "size": 5.0, "received_at": t0 + 30.05},
+        ]
+        dec_once = Decision(action="taker_buy", side="Up", price=0.52, size=5.0, intent="entry", reason="test_compete")
+        call_n = {"c": 0}
+        def _fake_plan(*args, **kwargs):
+            call_n["c"] += 1
+            return dec_once if call_n["c"] == 1 else Decision(action="wait", reason="done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            r_replay = PaperRunner(ledger_dir=tmp)
+            with patch("runtime.runner.plan_decision", side_effect=_fake_plan), \
+                 patch.dict(config.PARAMS, {"LATENCY_S": 0.2, "LATENCY_MIN_S": 0.2, "LATENCY_MAX_S": 0.2}):
+                res = replay_window(
+                    r_replay,
+                    slug="btc-updown-5m-1800000000",
+                    settlement={"start": t0, "end": t0 + 300.0, "open_px": 60000.0, "winner": "Up"},
+                    trades=trades,
+                    events_up=events_up, events_dn=events_dn,
+                    spot_rows=spot_rows, poly_rows=[],
+                )
+            # 0.50 卖一被对手盘在途买光，剩 0.85 超过 max_price 0.52 -> 成交 0 股（未凭空拿到被抢光的筹码）
+            self.assertEqual(res["fills"], 0)
+
+        # 2) replay_mode + async_taker_delay=True：提交后进 pending_takers，在途未到达前不会 20ms 机枪连发
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 60000.0)
+            b_up = OrderBook(bids=[(0.50, 20.0)], asks=[(0.52, 20.0)], source_t=t0 + 30.0, received_at=t0 + 30.0)
+            b_dn = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 20.0)], source_t=t0 + 30.0, received_at=t0 + 30.0)
+            sp = SpotState(timestamp=t0 + 30.0, price=60010.0, open_price=60000.0, realized_vol_bps=15.0)
+            dec = Decision(action="taker_buy", side="Up", price=0.52, size=5.0, intent="entry", reason="test")
+            fetcher = lambda _s: (b_up, b_dn)
+            with patch("runtime.runner.plan_decision", return_value=dec):
+                runner.step(t0 + 30.0, sp, b_up, b_dn, delayed_book_fetcher=fetcher, replay_mode=True, async_taker_delay=True)
+                self.assertEqual(len(runner.pending_takers), 1)
+                self.assertEqual(runner.pos_up.shares, 0.0)
+                # 20ms 后仍在途，绝不能再次排队
+                runner.step(t0 + 30.02, sp, b_up, b_dn, delayed_book_fetcher=fetcher, replay_mode=True, async_taker_delay=True)
+                self.assertEqual(len(runner.pending_takers), 1)
+                arrive_t = runner.pending_takers[0]["arrive_at"] + 0.01
+            # 到达后单次结算（不再发新单）
+            with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="done")):
+                runner.step(arrive_t, sp, b_up, b_dn, delayed_book_fetcher=fetcher, replay_mode=True, async_taker_delay=True)
+                self.assertEqual(len(runner.pending_takers), 0)
+                self.assertAlmostEqual(runner.pos_up.shares, 5.0, places=4)
+
+    def test_redteam_lagging_rtds_print_cannot_bypass_book_guard_and_true_chainlink_locked_twap(self):
+        """验证 1.8s 滞后 RTDS 打印不会绕过盘口护栏，且高频 Chainlink 缓存与最后 60s 真锁定均价生效。"""
+        import tempfile
+        import time
+        from unittest.mock import patch
+        from runtime.runner import PaperRunner
+        from runtime.trade_stream import TradeStreamClient
+        from core.types import Decision
+
+        # 1) 1.8s 滞后 RTDS 打印：exch_t=100, recv_t=now=101.8 -> tp_t=101.0 (now-tp_t=0.8 > 0.5)，
+        #    但挂单 live_at=100.6 <= 101.0 且实时买一已涨到 0.58 -> 实盘与高频回放均必须 100% 拦截！
+        for is_replay in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                t0 = 1800000000.0
+                runner = PaperRunner(ledger_dir=tmp)
+                runner.start_window("btc-updown-5m-1800000000", t0, t0 + 300.0, 60000.0)
+                b_up_place = OrderBook(bids=[(0.55, 10.0)], asks=[(0.57, 10.0)], source_t=t0 + 100.4, received_at=t0 + 100.4)
+                b_dn_place = OrderBook(bids=[(0.43, 10.0)], asks=[(0.45, 10.0)], source_t=t0 + 100.4, received_at=t0 + 100.4)
+                sp0 = SpotState(timestamp=t0 + 100.4, price=60010.0, open_price=60000.0, realized_vol_bps=15.0)
+                q_dec = Decision(action="quote", side="Up", price=0.55, size=5.0, intent="entry", reason="q")
+                with patch("runtime.runner.plan_decision", return_value=q_dec), \
+                     patch.dict(config.PARAMS, {"LATENCY_S": 0.2, "LATENCY_MIN_S": 0.2, "LATENCY_MAX_S": 0.2, "LATENCY_JITTER_PCT": 0.0}):
+                    runner.step(t0 + 100.4, sp0, b_up_place, b_dn_place, replay_mode=is_replay)
+                # 激活挂单（live_at = 100.6）
+                b_up_up = OrderBook(bids=[(0.58, 20.0)], asks=[(0.60, 20.0)], source_t=t0 + 101.8, received_at=t0 + 101.8)
+                b_dn_up = OrderBook(bids=[(0.40, 20.0)], asks=[(0.42, 20.0)], source_t=t0 + 101.8, received_at=t0 + 101.8)
+                sp1 = SpotState(timestamp=t0 + 101.8, price=60030.0, open_price=60000.0, realized_vol_bps=15.0)
+                lagging_print = [{
+                    "outcome": "Up", "side": "SELL", "price": 0.54, "size": 50.0,
+                    "timestamp": t0 + 100.0, "received_at": t0 + 101.8,
+                }]
+                with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="hold")):
+                    runner.step(t0 + 101.8, sp1, b_up_up, b_dn_up, trade_prints=lagging_print, replay_mode=is_replay)
+                self.assertEqual(runner.pos_up.shares, 0.0, f"Lagging RTDS print ghost-filled when replay_mode={is_replay}")
+
+        # 2) 高频 20Hz Chainlink 推送 60s（1200 帧）不得被 deque 挤爆，且最后 60s 真 Chainlink 锁定均价不被覆盖
+        ts = TradeStreamClient(record_raw=False)
+        ts.connected = True
+        now_s = time.time()
+        t_start = now_s - 60.0
+        for i in range(1201):
+            t_cur = t_start + i * 0.05
+            px_cur = 60000.0 if i < 600 else 60100.0
+            ts._ingest_chainlink({"symbol": "btc/usd", "value": px_cur, "timestamp": int(t_cur * 1000)}, 120)
+        twap_res = ts.get_chainlink_btc_twap_60s(now=now_s)
+        self.assertIsNotNone(twap_res)
+        self.assertAlmostEqual(twap_res[0], 60050.0, delta=2.0)
+
+        # 最后 30s (t_start + 30 .. now_s) 全是 60100 -> 真 Chainlink 锁定均价应精准为 60100
+        locked_avg = ts.get_chainlink_window_average(now_s - 30.0, now=now_s)
+        self.assertIsNotNone(locked_avg)
+        self.assertAlmostEqual(locked_avg, 60100.0, delta=1.0)
+
+        # runner.step 保留上游注入的真 Chainlink 锁定均价，不被 spot_buf - basis_ema 覆盖
+        with tempfile.TemporaryDirectory() as tmp:
+            t_win0 = now_s - 270.0
+            runner = PaperRunner(ledger_dir=tmp)
+            runner.start_window("btc-updown-5m-test", t_win0, t_win0 + 300.0, 60000.0)
+            runner._basis_ema = 0.0
+            runner._basis_updated_t = now_s
+            runner.poly_open_is_provisional = False
+            runner._spot_buf = [(now_s - 30.0 + k, 60250.0) for k in range(30)]
+            sp_locked = SpotState(
+                timestamp=now_s, price=60250.0, open_price=60000.0, realized_vol_bps=15.0,
+                twap_realized_60s=locked_avg,
+            )
+            bu = OrderBook(bids=[(0.50, 20.0)], asks=[(0.52, 20.0)], source_t=now_s, received_at=now_s)
+            bd = OrderBook(bids=[(0.48, 20.0)], asks=[(0.50, 20.0)], source_t=now_s, received_at=now_s)
+            with patch("runtime.runner.plan_decision", return_value=Decision(action="wait", reason="hold")):
+                runner.step(now_s, sp_locked, bu, bd, replay_mode=True)
+            self.assertAlmostEqual(sp_locked.twap_realized_60s, 60100.0, delta=1.0)
 
 
 if __name__ == "__main__":

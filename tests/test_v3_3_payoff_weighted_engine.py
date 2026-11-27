@@ -142,6 +142,7 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         # Held 5 Up costing $2.60; reversal confirmed with Down ask=$0.55, P*(Down)=0.65
         p = dict(
             config.PARAMS,
+            ENABLE_REVERSAL_FLIP=True,
             AVAILABLE_CAPITAL=100.0,
             COMMITTED_WINDOW_COST=2.60,
             HELD_LEG_COST=2.60,
@@ -216,6 +217,7 @@ class TestV33PayoffWeightedEngine(unittest.TestCase):
         book_up = OrderBook(bids=[(0.51, 50.0)], asks=[(0.53, 50.0)], source_t=1000.0, received_at=1000.0)
         p = dict(
             config.PARAMS,
+            ENABLE_REVERSAL_FLIP=True,
             AVAILABLE_CAPITAL=100.0,
             COMMITTED_WINDOW_COST=3.00,
             HELD_LEG_COST=3.00,

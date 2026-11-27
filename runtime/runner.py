@@ -837,11 +837,16 @@ class PaperRunner:
         """
         exch_t = float(tp.get("timestamp") or 0.0)
         recv_t = float(tp.get("received_at") or 0.0)
+        clk_off = float(clock_offset_s or 0.0)
         if exch_t > 0.0 and (recv_t <= 0.0 or (-0.5 <= (recv_t - exch_t) <= 5.0)):
             if recv_t > 0.0 and abs(exch_t - round(exch_t)) < 1e-6:
-                return recv_t
-            if recv_t > 0.0 and abs(float(clock_offset_s or 0.0)) > 0.25:
-                return min(recv_t, exch_t + float(clock_offset_s))
+                # 整秒截断的真实成交时刻必在 [exch_t, exch_t + 1.0) 内；
+                # 映射到本机时钟坐标系的理论最晚发生时刻为 exch_t + 1.0 + clk_off，
+                # 严禁滞后 1.5~2.3s 才到达的 RTDS 老成交冒充当前时刻击中刚挂的新单。
+                exch_latest = exch_t + 1.0 + clk_off
+                return min(recv_t, exch_latest)
+            if recv_t > 0.0 and abs(clk_off) > 0.25:
+                return min(recv_t, exch_t + clk_off)
             return exch_t
         return recv_t or exch_t or fallback_now
 
@@ -1185,7 +1190,7 @@ class PaperRunner:
         if basis_ready and open_px > 0:
             spot.basis_ema = self._basis_ema
             spot.open_price = open_px
-            if tau <= 60.0 and self._spot_buf:
+            if tau <= 60.0 and getattr(spot, "twap_realized_60s", None) is None and self._spot_buf:
                 win_start_60 = self.window_end - 60.0
                 elapsed_60 = max(0.0, 60.0 - max(0.0, tau))
                 realized_pts = [(ts, px - self._basis_ema) for ts, px in self._spot_buf if ts >= win_start_60]
@@ -1367,13 +1372,17 @@ class PaperRunner:
                 tp_side = tp.get("outcome")  # "Up" or "Down"
                 tp_dir = str(tp.get("side") or "")
                 tp_t = self._resolve_print_timestamp(tp, now, clock_offset_s=clk_off)
+                tp_recv = float(tp.get("received_at") or tp_t)
+                use_live_book = (not replay_mode) or (abs(now - tp_recv) <= 0.5)
                 for o in active_for_prints:
                     if not o.activated:
                         continue
                     if tp_side and o.side != tp_side:
                         continue
+                    o_book = (book_up if o.side == "Up" else book_down) if use_live_book else None
                     fill_sz = self.matcher.on_trade_print(
-                        o, float(tp["price"]), float(tp["size"]), tp_t, trade_side=tp_dir
+                        o, float(tp["price"]), float(tp["size"]), tp_t,
+                        trade_side=tp_dir, current_book=o_book,
                     )
                     if fill_sz > 0 or o.remaining < o.size - 1e-9:
                         print_touched_ids.add(o.id)
@@ -1809,13 +1818,13 @@ class PaperRunner:
                 )
             elif (
                 async_taker_delay
-                and not replay_mode
                 and bool(config.PARAMS.get("TAKER_REAL_DELAY_CHECK", True))
                 and delayed_book_fetcher is not None
                 and action.price is not None
             ):
-                # 非阻塞在途队列：发单后立刻返回主循环继续摄入现货与撤单，到达 arrive_at 后于后续 tick 撮合
-                wire_lat = self._effective_wire_latency(is_cancel=False, replay_mode=False)
+                # 非阻塞在途队列（实盘与离线回放统一复用）：发单后立刻返回主循环继续摄入盘口与撤单，
+                # 在 [submit_t, arrive_at) 期间自然阻塞重复发单（零机枪重试），到达 arrive_at 后诚实撮合。
+                wire_lat = self._effective_wire_latency(is_cancel=False, replay_mode=replay_mode)
                 pre_side_shares = self.pos_up.shares if action.side == "Up" else self.pos_down.shares
                 self.pending_takers.append({
                     "submit_t": now,
@@ -1857,13 +1866,17 @@ class PaperRunner:
                             tp_side = tp.get("outcome")
                             tp_dir = str(tp.get("side") or "")
                             tp_t = self._resolve_print_timestamp(tp, delayed_now, clock_offset_s=clk_off)
+                            tp_recv_d = float(tp.get("received_at") or tp_t)
+                            use_live_book_d = (not replay_mode) or (abs(delayed_now - tp_recv_d) <= 0.5)
                             for o in list(self.pending_cancels):
                                 if not o.activated:
                                     continue
                                 if tp_side and o.side != tp_side:
                                     continue
+                                o_book_d = (post_up if o.side == "Up" else post_dn) if use_live_book_d else None
                                 fill_sz = self.matcher.on_trade_print(
-                                    o, float(tp["price"]), float(tp["size"]), tp_t, trade_side=tp_dir
+                                    o, float(tp["price"]), float(tp["size"]), tp_t,
+                                    trade_side=tp_dir, current_book=o_book_d,
                                 )
                                 if fill_sz > 0 or o.remaining < o.size - 1e-9:
                                     delayed_touched.add(o.id)

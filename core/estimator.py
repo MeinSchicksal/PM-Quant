@@ -179,12 +179,17 @@ def calculate_dynamic_realized_vol(
 
     # Downsample sub-second high-frequency ticks (e.g. 10Hz bookTicker) to >= 0.9s
     # steps so bid-ask bounce in tiny dt does not inflate r^2 / dt realized variance.
+    # Tail point must also obey >= 0.9s spacing: if closer than 0.9s to sampled[-1],
+    # replace sampled[-1] (when sampled[-2] is >= 0.9s earlier) so a 10ms bounce at
+    # age=0 (maximum EWMA weight) never explodes fast realized vol by 4-5x.
     sampled = [valid[0]]
     for pt in valid[1:-1]:
         if (pt[0] - sampled[-1][0]) >= 0.9:
             sampled.append(pt)
-    if valid[-1][0] > sampled[-1][0]:
+    if (valid[-1][0] - sampled[-1][0]) >= 0.9:
         sampled.append(valid[-1])
+    elif len(sampled) >= 2 and (valid[-1][0] - sampled[-2][0]) >= 0.9:
+        sampled[-1] = valid[-1]
     if len(sampled) >= 5:
         valid = sampled
 

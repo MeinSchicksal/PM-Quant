@@ -114,7 +114,7 @@ PARAMS = {
     "PYRAMID_MAX_SPREAD": 0.08,
     "PYRAMID_MIN_MAKER_EDGE": 0.06,
     "PYRAMID_MIN_TAKER_EDGE": 0.035,  # 与开仓基础边际一致，消除伪精度碎步微调
-    "ENABLE_REVERSAL_FLIP": True,     # 确认反转后按终局保本反算整数股，一步到位 Taker 调仓
+    "ENABLE_REVERSAL_FLIP": False,    # 伦敦服务器实测(56场反手胜率44.6%/仅+$4.98/t=+0.23)与4日回放(69场净亏-$4.79)双证伪：默认关闭反手，保留顺势加仓
     "FLIP_ALLOW_MAKER": False,        # 反转仅使用 Taker IOC
     "FLIP_ALLOW_MULTI": False,        # 单窗最多完整翻面 1 次，防 V 型双杀
     "MAX_FLIPS_PER_WINDOW": 1,
