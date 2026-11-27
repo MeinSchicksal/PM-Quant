@@ -698,6 +698,8 @@ def _cleanup_old_data_locked(
                 "freed_mb": result["freed_mb"],
                 "removed_files": result["removed_files"],
                 "removed_dirs": result["removed_dirs"],
+                "compressed_files": result["compressed_files"],
+                "compressed_saved_mb": result["compressed_saved_mb"],
                 "pressure_triggered": pressure_triggered,
             }
             snapshot = dict(_DISK_GUARD_STATE)

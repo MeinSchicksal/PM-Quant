@@ -5734,19 +5734,26 @@ function initInteractions() {
   if (settingsCleanupBtn) {
     settingsCleanupBtn.addEventListener("click", async () => {
       settingsCleanupBtn.disabled = true;
-      setSettingsFeedback("正在扫描并清理过期数据...");
+      setSettingsFeedback("正在扫描、归档压缩历史行情并清理过期数据...");
       try {
-        const resp = await fetchWithTimeout("/api/cleanup", { method: "POST" }, 15000);
+        const resp = await fetchWithTimeout("/api/cleanup", { method: "POST" }, 60000);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const res = await resp.json();
         if (res.system) {
           renderSystemSettings(res.system);
         }
         const cl = res.cleanup || {};
+        const rmDirs = Number(cl.removed_dirs || 0);
+        const rmFiles = Number(cl.removed_files || 0);
+        const gzFiles = Number(cl.compressed_files || 0);
+        const freedMb = Number(cl.freed_mb || 0);
+        const parts = [];
+        if (gzFiles > 0) parts.push(`压缩归档 ${gzFiles} 个历史行情文件`);
+        if (rmDirs > 0 || rmFiles > 0) parts.push(`删除 ${rmDirs} 个目录、${rmFiles} 个过期文件`);
         setSettingsFeedback(
-          cl.removed_files > 0 || cl.removed_dirs > 0
-            ? `清理完成：删除 ${cl.removed_dirs} 个目录、${cl.removed_files} 个文件，释放 ${Number(cl.freed_mb || 0).toFixed(2)} MB（summary.jsonl 完整保留）`
-            : "当前没有过期数据需要清理，空间状态良好。"
+          parts.length > 0
+            ? `整理完成：${parts.join("，")}，共释放 ${freedMb.toFixed(2)} MB（summary.jsonl 完整保留）`
+            : "当前没有过期或待压缩数据，空间状态良好。"
         );
       } catch (err) {
         setSettingsFeedback(`清理失败: ${err.message}`, true);
