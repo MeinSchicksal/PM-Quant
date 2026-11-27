@@ -416,39 +416,16 @@ class TestInvestorDashboard(unittest.TestCase):
 
         def fake_fetch(timeout=2.5):
             calls.append(1)
-            return 6.6750, "mock-fx"
+            return 6.6750, "open.er-api.com"
 
         saved_cache = dict(ws._FX_CACHE)
         try:
-            with patch.object(ws, "_FX_CACHE_FILE", tmp / "fx_usd_cny.json"), \
+            fx_file = tmp / "fx_usd_cny.json"
+            with patch.object(ws, "_FX_CACHE_FILE", fx_file), \
                  patch.object(ws, "_fetch_usd_cny_from_web", side_effect=fake_fetch):
-                with ws._FX_CACHE_LOCK:
-                    ws._FX_CACHE.update({
-                        "rate": ws._FX_DEFAULT_RATE,
-                        "date": "",
-                        "source": "default",
-                        "loaded": False,
-                        "refreshing": False,
-                        "last_attempt_mono": 0.0,
-                    })
-                # 1. 冷启动无缓存时：当次同步拉取真实汇率再返回，绝不返回过时兜底值
-                first = ws._get_usd_cny_fx()
-                self.assertAlmostEqual(first["rate"], 6.6750, places=4)
-                self.assertTrue(first["synced_today"])
-                self.assertEqual(first["source"], "mock-fx")
-                # 2. 同日多次查询：直接命中缓存，绝不重复抓取外网
-                second = ws._get_usd_cny_fx()
-                third = ws._get_usd_cny_fx()
-                self.assertAlmostEqual(second["rate"], 6.6750, places=4)
-                self.assertEqual(third["rate"], second["rate"])
-                self.assertEqual(len(calls), 1)
-                # 3. 验证磁盘已同步落盘
-                saved = json.loads((tmp / "fx_usd_cny.json").read_text(encoding="utf-8"))
-                self.assertAlmostEqual(saved["rate"], 6.6750, places=4)
-
-                # 4. 跨日热缓存：磁盘已有昨日真实汇率 -> 零阻塞返回昨日汇率并后台刷新今日汇率
-                (tmp / "fx_usd_cny.json").write_text(
-                    json.dumps({"rate": 6.6602, "date": "2020-01-01", "source": "yesterday-fx"}),
+                # 0. 验证脏缓存（非白名单来源，例如 mock-fx）会被自动丢弃并重抓真实源
+                fx_file.write_text(
+                    json.dumps({"rate": 7.1852, "date": ws._today_bjt_str(), "source": "mock-fx"}),
                     encoding="utf-8",
                 )
                 with ws._FX_CACHE_LOCK:
@@ -460,19 +437,48 @@ class TestInvestorDashboard(unittest.TestCase):
                         "refreshing": False,
                         "last_attempt_mono": 0.0,
                     })
+                ws._FX_SYNC_EVENT.set()
+                # 1. 拒绝 mock-fx 脏缓存，当次同步拉取真实汇率再返回
+                first = ws._get_usd_cny_fx()
+                self.assertAlmostEqual(first["rate"], 6.6750, places=4)
+                self.assertTrue(first["synced_today"])
+                self.assertEqual(first["source"], "open.er-api.com")
+                # 2. 同日多次查询：直接命中缓存，绝不重复抓取外网
+                second = ws._get_usd_cny_fx()
+                third = ws._get_usd_cny_fx()
+                self.assertAlmostEqual(second["rate"], 6.6750, places=4)
+                self.assertEqual(third["rate"], second["rate"])
+                self.assertEqual(len(calls), 1)
+                # 3. 验证磁盘已同步覆盖为合法真实缓存
+                saved = json.loads(fx_file.read_text(encoding="utf-8"))
+                self.assertAlmostEqual(saved["rate"], 6.6750, places=4)
+                self.assertEqual(saved["source"], "open.er-api.com")
+
+                # 4. 跨日热缓存：磁盘已有昨日合法真实汇率 -> 零阻塞返回昨日汇率并后台刷新今日汇率
+                fx_file.write_text(
+                    json.dumps({"rate": 6.6602, "date": "2020-01-01", "source": "frankfurter.app"}),
+                    encoding="utf-8",
+                )
+                with ws._FX_CACHE_LOCK:
+                    ws._FX_CACHE.update({
+                        "rate": ws._FX_DEFAULT_RATE,
+                        "date": "",
+                        "source": "default",
+                        "loaded": False,
+                        "refreshing": False,
+                        "last_attempt_mono": 0.0,
+                    })
+                ws._FX_SYNC_EVENT.set()
                 warm = ws._get_usd_cny_fx()
                 self.assertAlmostEqual(warm["rate"], 6.6602, places=4)
                 self.assertFalse(warm["synced_today"])
-                for _ in range(50):
-                    with ws._FX_CACHE_LOCK:
-                        if not ws._FX_CACHE["refreshing"] and ws._FX_CACHE["source"] == "mock-fx":
-                            break
-                    time.sleep(0.02)
+                self.assertTrue(ws._FX_SYNC_EVENT.wait(timeout=2.0))
                 after = ws._get_usd_cny_fx()
                 self.assertAlmostEqual(after["rate"], 6.6750, places=4)
                 self.assertTrue(after["synced_today"])
                 self.assertEqual(len(calls), 2)
         finally:
+            ws._FX_SYNC_EVENT.set()
             with ws._FX_CACHE_LOCK:
                 ws._FX_CACHE.update(saved_cache)
             shutil.rmtree(tmp, ignore_errors=True)

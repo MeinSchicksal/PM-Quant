@@ -263,6 +263,8 @@ function fmtMoney(v, signed = false) {
   return `${sym}0.00`;
 }
 
+const VALID_FX_SOURCES = new Set(["open.er-api.com", "frankfurter.app"]);
+
 function updateCurrencyToggleUI() {
   const btn = $("currency-toggle-btn");
   if (!btn) return;
@@ -270,7 +272,8 @@ function updateCurrencyToggleUI() {
     sp.classList.toggle("is-active", sp.dataset.curr === displayCurrency);
   });
   const rTxt = Number(fxUsdCny.rate || 6.68).toFixed(4);
-  const dTxt = fxUsdCny.date ? `（${fxUsdCny.date} 每日同步一次）` : "（每日同步一次）";
+  const srcTxt = VALID_FX_SOURCES.has(fxUsdCny.source) ? ` · ${fxUsdCny.source}` : "";
+  const dTxt = fxUsdCny.date ? `（${fxUsdCny.date}${srcTxt}，每日同步一次）` : "（每日同步一次）";
   btn.title = `点击切换美元 / 人民币显示 · 当前汇率 1 USD = ${rTxt} CNY ${dTxt}`;
 }
 
@@ -285,13 +288,15 @@ function initCurrency() {
       const parsed = JSON.parse(savedFxRaw);
       const r = Number(parsed?.rate || 0);
       const src = String(parsed?.source || "");
-      // 忽略旧版兜底占位缓存（source=default），确保使用当日真实汇率
-      if (Number.isFinite(r) && r >= 5.0 && r <= 10.0 && src && src !== "default") {
+      // 仅信任白名单权威汇率源，自动清理任何测试/占位脏缓存
+      if (Number.isFinite(r) && r >= 5.0 && r <= 10.0 && VALID_FX_SOURCES.has(src)) {
         fxUsdCny = {
           rate: r,
           date: String(parsed.date || ""),
           source: src,
         };
+      } else {
+        localStorage.removeItem("pm_quant_fx_usd_cny");
       }
     }
   } catch (_) {
@@ -302,7 +307,7 @@ function initCurrency() {
 
 async function syncDailyFxRate(force = false) {
   const today = getTodayBjtDate();
-  if (!force && fxUsdCny.date === today && fxUsdCny.source !== "default") {
+  if (!force && fxUsdCny.date === today && VALID_FX_SOURCES.has(fxUsdCny.source)) {
     updateCurrencyToggleUI();
     return;
   }
@@ -311,15 +316,16 @@ async function syncDailyFxRate(force = false) {
     if (!resp.ok) return;
     const data = await resp.json();
     const r = Number(data?.rate || 0);
-    const src = String(data?.source || "server");
+    const src = String(data?.source || "");
     if (Number.isFinite(r) && r >= 5.0 && r <= 10.0) {
       const prevRate = Number(fxUsdCny.rate || 0);
+      const isTrusted = VALID_FX_SOURCES.has(src);
       fxUsdCny = {
         rate: r,
-        date: data.synced_today ? today : String(data.date || ""),
-        source: src,
+        date: String(data.date || (data.synced_today ? today : "")),
+        source: isTrusted ? src : "default",
       };
-      if (src !== "default") {
+      if (isTrusted) {
         try {
           localStorage.setItem("pm_quant_fx_usd_cny", JSON.stringify(fxUsdCny));
         } catch (_) {}
@@ -440,7 +446,7 @@ function toggleCurrency() {
   updateCurrencyToggleUI();
   refreshVisibleMoneyOnly();
   const today = getTodayBjtDate();
-  if (fxUsdCny.date !== today || fxUsdCny.source === "default") {
+  if (fxUsdCny.date !== today || !VALID_FX_SOURCES.has(fxUsdCny.source)) {
     syncDailyFxRate(false);
   }
   const rTxt = Number(fxUsdCny.rate || 6.68).toFixed(4);

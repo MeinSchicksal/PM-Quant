@@ -290,7 +290,10 @@ _ENTRY_MODE_LOCK = threading.Lock()
 _ENTRY_MODE_MAX_ENTRIES = 2000
 
 _FX_CACHE_LOCK = threading.Lock()
+_FX_SYNC_EVENT = threading.Event()
+_FX_SYNC_EVENT.set()
 _FX_DEFAULT_RATE = 6.68
+_FX_VALID_SOURCES = frozenset({"open.er-api.com", "frankfurter.app"})
 _FX_CACHE = {
     "rate": _FX_DEFAULT_RATE,
     "date": "",
@@ -330,92 +333,117 @@ def _fetch_usd_cny_from_web(timeout: float = 2.5) -> tuple:
     return None, None
 
 
-def _persist_fx_cache(rate: float, date_str: str, src: str) -> None:
+def _persist_fx_cache(rate: float, date_str: str, src: str, cache_file: Path = None) -> None:
+    if src not in _FX_VALID_SOURCES:
+        return
+    target = cache_file or _FX_CACHE_FILE
     try:
-        _FX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _FX_CACHE_FILE.with_suffix(".json.tmp")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps({"rate": rate, "date": date_str, "source": src}, ensure_ascii=False),
             encoding="utf-8",
         )
-        os.replace(tmp, _FX_CACHE_FILE)
+        os.replace(tmp, target)
     except Exception:
         pass
+
+
+def _fx_snapshot_locked(today: str) -> dict:
+    is_valid = _FX_CACHE["source"] in _FX_VALID_SOURCES
+    return {
+        "rate": _FX_CACHE["rate"],
+        "date": _FX_CACHE["date"] if is_valid and _FX_CACHE["date"] else today,
+        "source": _FX_CACHE["source"],
+        "synced_today": (is_valid and _FX_CACHE["date"] == today),
+    }
 
 
 def _get_usd_cny_fx() -> dict:
     """Return cached daily USD->CNY rate; syncs at most once per Beijing calendar day.
 
-    - Cold start (no real cached rate yet): fetches synchronously once so the client
-      never receives an outdated fallback rate.
+    - Cold start (no real cached rate yet): fetches synchronously once (and coalesces
+      concurrent callers via _FX_SYNC_EVENT) so no client receives a stale fallback rate.
     - Warm cache (already has a real rate from yesterday): returns immediately and
       refreshes today's rate asynchronously in the background.
+    - Disk cache enforces _FX_VALID_SOURCES allowlist so polluted/mock data is rejected.
     """
     today = _today_bjt_str()
+    cache_file = _FX_CACHE_FILE
     need_sync_fetch = False
     need_async_fetch = False
+    wait_for_inflight_cold = False
+
     with _FX_CACHE_LOCK:
         if not _FX_CACHE["loaded"]:
             _FX_CACHE["loaded"] = True
-            if _FX_CACHE_FILE.exists():
+            if cache_file.exists():
                 try:
-                    saved = json.loads(_FX_CACHE_FILE.read_text(encoding="utf-8"))
+                    saved = json.loads(cache_file.read_text(encoding="utf-8"))
                     s_rate = float(saved.get("rate", 0.0) or 0.0)
                     s_date = str(saved.get("date") or "")
-                    s_src = str(saved.get("source") or "cache")
-                    if math.isfinite(s_rate) and 5.0 <= s_rate <= 10.0 and s_src != "default":
+                    s_src = str(saved.get("source") or "")
+                    if math.isfinite(s_rate) and 5.0 <= s_rate <= 10.0 and s_src in _FX_VALID_SOURCES:
                         _FX_CACHE["rate"] = round(s_rate, 4)
                         _FX_CACHE["date"] = s_date
                         _FX_CACHE["source"] = s_src
                 except Exception:
                     pass
+        has_real = _FX_CACHE["source"] in _FX_VALID_SOURCES
+        stale_today = (not has_real) or (_FX_CACHE["date"] != today)
         now_m = time.monotonic()
-        stale_today = _FX_CACHE["date"] != today
         cooldown_ok = (_FX_CACHE["last_attempt_mono"] <= 0.0 or (now_m - _FX_CACHE["last_attempt_mono"]) >= 1800.0)
         if stale_today and not _FX_CACHE["refreshing"] and cooldown_ok:
             _FX_CACHE["refreshing"] = True
             _FX_CACHE["last_attempt_mono"] = now_m
-            if _FX_CACHE["source"] == "default":
+            _FX_SYNC_EVENT.clear()
+            if not has_real:
                 need_sync_fetch = True
             else:
                 need_async_fetch = True
-        snapshot = {
-            "rate": _FX_CACHE["rate"],
-            "date": _FX_CACHE["date"] or today,
-            "source": _FX_CACHE["source"],
-            "synced_today": (_FX_CACHE["date"] == today and _FX_CACHE["source"] != "default"),
-        }
+        elif (not has_real) and _FX_CACHE["refreshing"]:
+            wait_for_inflight_cold = True
+        snapshot = _fx_snapshot_locked(today)
 
     if need_sync_fetch:
-        rate, src = _fetch_usd_cny_from_web(timeout=2.5)
-        if rate is not None:
-            _persist_fx_cache(rate, today, src)
-        with _FX_CACHE_LOCK:
-            _FX_CACHE["refreshing"] = False
-            if rate is not None:
-                _FX_CACHE["rate"] = rate
-                _FX_CACHE["date"] = today
-                _FX_CACHE["source"] = src
-            return {
-                "rate": _FX_CACHE["rate"],
-                "date": _FX_CACHE["date"] or today,
-                "source": _FX_CACHE["source"],
-                "synced_today": (_FX_CACHE["date"] == today and _FX_CACHE["source"] != "default"),
-            }
-
-    if need_async_fetch:
-        def _bg_fx():
-            rate, src = _fetch_usd_cny_from_web(timeout=3.5)
-            if rate is not None:
-                _persist_fx_cache(rate, today, src)
+        try:
+            rate, src = _fetch_usd_cny_from_web(timeout=2.5)
+            if rate is not None and src in _FX_VALID_SOURCES:
+                _persist_fx_cache(rate, today, src, cache_file=cache_file)
             with _FX_CACHE_LOCK:
-                _FX_CACHE["refreshing"] = False
-                if rate is not None:
+                if rate is not None and src in _FX_VALID_SOURCES:
                     _FX_CACHE["rate"] = rate
                     _FX_CACHE["date"] = today
                     _FX_CACHE["source"] = src
+                _FX_CACHE["refreshing"] = False
+                return _fx_snapshot_locked(today)
+        finally:
+            with _FX_CACHE_LOCK:
+                _FX_CACHE["refreshing"] = False
+            _FX_SYNC_EVENT.set()
 
-        threading.Thread(target=_bg_fx, daemon=True, name="FxDailySync").start()
+    if wait_for_inflight_cold:
+        _FX_SYNC_EVENT.wait(timeout=3.0)
+        with _FX_CACHE_LOCK:
+            return _fx_snapshot_locked(today)
+
+    if need_async_fetch:
+        def _bg_fx(target_file: Path, target_day: str):
+            try:
+                rate, src = _fetch_usd_cny_from_web(timeout=3.5)
+                if rate is not None and src in _FX_VALID_SOURCES:
+                    _persist_fx_cache(rate, target_day, src, cache_file=target_file)
+                with _FX_CACHE_LOCK:
+                    if rate is not None and src in _FX_VALID_SOURCES:
+                        _FX_CACHE["rate"] = rate
+                        _FX_CACHE["date"] = target_day
+                        _FX_CACHE["source"] = src
+            finally:
+                with _FX_CACHE_LOCK:
+                    _FX_CACHE["refreshing"] = False
+                _FX_SYNC_EVENT.set()
+
+        threading.Thread(target=_bg_fx, args=(cache_file, today), daemon=True, name="FxDailySync").start()
 
     return snapshot
 
