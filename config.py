@@ -68,7 +68,7 @@ PARAMS = {
     "PRICE_EDGE_PIVOT": 0.55,         # No extra price premium at or below $0.55
     "PRICE_EDGE_SLOPE": 0.05,         # +0.5% required edge per +$0.10 above $0.55
     "EARLY_TAU_PIVOT_S": 240.0,
-    "EARLY_TAU_MAX_PREMIUM": 0.0,     # Disabled: first-60s 5-share cap already handles early-window noise
+    "EARLY_TAU_MAX_PREMIUM": 0.025,   # 4日429场L2实证(+$246.26->+$248.77, MaxDD -$44.69->-$41.15, 翻面亏损-$12.79->-$4.79): 前60s线性+2.5%边际过滤早盘高价噪音单
     # v3.4 Volatility-Adaptive Physics (zero change in calm <=25bps regime; smooth protection in storms):
     "VOL_EDGE_PIVOT_BPS": 25.0,       # <=25 bps (~85% of session): zero extra vol edge premium
     "VOL_EDGE_SLOPE": 0.0008,         # +0.8% required edge per +10 bps realized vol above pivot
