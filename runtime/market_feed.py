@@ -92,6 +92,7 @@ class MarketFeed:
         self._last_poly_btc = None
         self._last_poly_btc_t = 0.0
         self._last_poly_btc_req_t = 0.0
+        self._last_poly_srv_ts = 0.0
         self._last_poly_poll_t = 0.0
         self._poly_btc_poller_active = False
         self._poly_poller_stop = threading.Event()
@@ -706,23 +707,40 @@ class MarketFeed:
                         continue
                     px_raw = body.get("openPrice")
                     px_f = float(px_raw) if px_raw is not None else 0.0
+                    raw_srv_ts = body.get("timestamp")
+                    srv_ts = 0.0
+                    if raw_srv_ts is not None:
+                        try:
+                            srv_ts = float(raw_srv_ts)
+                            if srv_ts > 1e11:
+                                srv_ts /= 1000.0
+                        except (TypeError, ValueError):
+                            srv_ts = 0.0
                     if self._is_valid_btc_price(px_f):
                         self.record_api_schema_ok("poly_twap")
                         self._record_net("chainlink", cl_lat_ms, len(resp.content))
+                        accepted = True
                         lock = getattr(self, "_poly_lock", None)
                         if lock:
                             lock.acquire()
                         try:
-                            self._last_poly_btc = px_f
-                            self._last_poly_btc_t = time.time()
-                            # 记录发起请求时的 TWAP 参考时刻，避免把 HTTP 往返耗时错算进基差窗口
-                            self._last_poly_btc_req_t = float(req_t)
+                            prev_srv_ts = float(getattr(self, "_last_poly_srv_ts", 0.0) or 0.0)
+                            # 丢弃 Cloudflare 多边缘节点返回的过期旧缓存帧，彻底消除斜坡锯齿回跳
+                            if srv_ts > 0.0 and prev_srv_ts > 0.0 and srv_ts < prev_srv_ts - 0.001:
+                                accepted = False
+                            else:
+                                self._last_poly_btc = px_f
+                                self._last_poly_btc_t = time.time()
+                                self._last_poly_btc_req_t = float(req_t)
+                                if srv_ts > 0.0:
+                                    self._last_poly_srv_ts = srv_ts
                         finally:
                             if lock:
                                 lock.release()
-                        self.record_raw_event("oracle", {
-                            "t": time.time(), "ref_t": float(req_t), "kind": "poly_twap_live", "price": px_f
-                        })
+                        if accepted:
+                            self.record_raw_event("oracle", {
+                                "t": time.time(), "ref_t": float(req_t), "kind": "poly_twap_live", "price": px_f
+                            })
                 elif resp.status_code in (400, 404, 410, 422):
                     self.record_api_schema_error("poly_twap", f"HTTP {resp.status_code}", threshold=5)
             except Exception:
@@ -767,6 +785,8 @@ class MarketFeed:
                     self._last_poly_btc = float(px)
                     self._last_poly_btc_t = float(recv_ts)
                     self._last_poly_btc_req_t = ref_ts
+                    if ref_ts > float(getattr(self, "_last_poly_srv_ts", 0.0) or 0.0):
+                        self._last_poly_srv_ts = ref_ts
                 finally:
                     if lock:
                         lock.release()

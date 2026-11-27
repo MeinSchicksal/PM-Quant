@@ -303,6 +303,9 @@ class TradeStreamClient(_BaseWSClient):
             raw_ts /= 1000.0
         oracle_t = raw_ts if raw_ts > 1e9 else recv_t
         with self._lock:
+            # Drop out-of-order / stale oracle frames so Chainlink never jumps backward
+            if self._chainlink_btc_oracle_t > 0.0 and oracle_t < self._chainlink_btc_oracle_t - 0.001:
+                return False
             self._chainlink_btc_price = float(px)
             self._chainlink_btc_recv_t = float(recv_t)
             self._chainlink_btc_oracle_t = float(oracle_t)

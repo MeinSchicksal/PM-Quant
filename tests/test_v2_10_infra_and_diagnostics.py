@@ -477,6 +477,13 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
             "timestamp": int(now_s * 1000),
         }, raw_bytes=180))
         self.assertTrue(wake.is_set())
+        # 乱序过期旧时间戳（比已接收更老）必须丢弃，杜绝曲线锯齿回跳
+        self.assertFalse(ts_client._ingest_chainlink({
+            "symbol": "btc/usd",
+            "value": 61520.00,
+            "timestamp": int((now_s - 2.0) * 1000),
+        }, raw_bytes=180))
+        self.assertAlmostEqual(ts_client.get_latest_chainlink_btc(now=now_s)[0], 61525.22, places=2)
 
         feed = MarketFeed.__new__(MarketFeed)
         feed._trade_ws = ts_client

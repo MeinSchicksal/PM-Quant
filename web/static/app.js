@@ -2855,6 +2855,7 @@ function drawLivePriceChart(live) {
     np.poly_spot = lastTwap;
     return np;
   });
+  denoiseCdnSawtooth(pts);
   const xOfSec = (sec) => padL + (Math.min(300, Math.max(0, sec)) / 300) * plotW;
 
   const priceVals = [openPx];
@@ -4190,6 +4191,41 @@ function renderModalDetailContent(winData, rec) {
   });
 }
 
+function denoiseCdnSawtooth(pts) {
+  // Suppress brief (<=2.5s) backward CDN cache-node step-backs on monotonic TWAP slopes
+  // without smoothing genuine peaks, troughs, or reversals.
+  if (!Array.isArray(pts) || pts.length < 4) return pts;
+  const runs = [];
+  for (let i = 0; i < pts.length; i++) {
+    const v = Number(pts[i].poly_spot || 0);
+    if (runs.length > 0 && Math.abs(runs[runs.length - 1].val - v) < 1e-6) {
+      runs[runs.length - 1].end = i;
+    } else {
+      runs.push({ val: v, start: i, end: i });
+    }
+  }
+  for (let k = 1; k < runs.length - 1; k++) {
+    const prev = runs[k - 1];
+    const cur = runs[k];
+    const next = runs[k + 1];
+    const dur = (pts[cur.end].elapsed || 0) - (pts[cur.start].elapsed || 0);
+    if (dur > 2.5) continue;
+    const isUpBacktrack = next.val > prev.val + 1e-6 && cur.val < prev.val - 1e-6;
+    const isDnBacktrack = next.val < prev.val - 1e-6 && cur.val > prev.val + 1e-6;
+    if (!isUpBacktrack && !isDnBacktrack) continue;
+    // Only filter when the backtrack lands near a recent prior level (classic stale CDN edge node)
+    const refVal = k >= 2 ? runs[k - 2].val : prev.val;
+    const maxStep = Math.max(Math.abs(next.val - prev.val), Math.abs(prev.val - refVal)) * 2.5 + 0.5;
+    if (Math.abs(cur.val - prev.val) <= maxStep) {
+      cur.val = prev.val;
+      for (let i = cur.start; i <= cur.end; i++) {
+        pts[i].poly_spot = prev.val;
+      }
+    }
+  }
+  return pts;
+}
+
 function drawModalHistoryChart(winData, rec) {
   const canvas = $("modal-hist-canvas");
   if (!canvas) return;
@@ -4247,6 +4283,38 @@ function drawModalHistoryChart(winData, rec) {
     np.spot_aligned = np.spot > 0 ? np.spot - basis0 : lastTwap;
     return np;
   });
+  denoiseCdnSawtooth(pts);
+
+  // Anchor official settlement close_px at 05:00 so curve endpoint always matches settlement truth
+  const closePx = Number(winData.close_px || rec?.close_px || 0);
+  const wSrc = String(winData.winner_source || rec?.winner_source || "").toLowerCase();
+  const isProvisionalClose = wSrc === "provisional" || wSrc === "provisional_spot";
+  let hasAnchoredClose = false;
+  if (closePx > 0 && !isProvisionalClose && pts.length > 0) {
+    const tail = pts[pts.length - 1];
+    if (tail.elapsed >= 299.6 && Math.abs(tail.poly_spot - closePx) > 1e-4) {
+      pts.push({
+        elapsed: 300,
+        spot: tail.spot,
+        poly_spot: closePx,
+        spot_aligned: closePx,
+        up_mid: tail.up_mid,
+        dn_mid: tail.dn_mid,
+      });
+    } else if (tail.elapsed < 299.6) {
+      pts.push({
+        elapsed: 300,
+        spot: tail.spot,
+        poly_spot: closePx,
+        spot_aligned: closePx,
+        up_mid: tail.up_mid,
+        dn_mid: tail.dn_mid,
+      });
+    } else {
+      tail.poly_spot = closePx;
+    }
+    hasAnchoredClose = true;
+  }
 
   const vals = [openPx];
   pts.forEach((p) => {
@@ -4380,6 +4448,21 @@ function drawModalHistoryChart(winData, rec) {
   ctx.lineWidth = 2.2;
   ctx.lineJoin = "round";
   ctx.stroke();
+
+  if (hasAnchoredClose && pts.length > 0) {
+    const endPt = pts[pts.length - 1];
+    const ex = xOfSec(endPt.elapsed);
+    const ey = yOfPrice(endPt.poly_spot);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ex, ey, 3.6, 0, Math.PI * 2);
+    ctx.fillStyle = endPt.poly_spot >= openPx ? pal.up : pal.down;
+    ctx.fill();
+    ctx.strokeStyle = pal.cardBg;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // Optional de-basis Binance spot overlay aligned to the exact same starting baseline
   if (modalShowDeBasisSpot) {
