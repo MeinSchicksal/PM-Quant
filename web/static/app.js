@@ -347,6 +347,47 @@ async function syncDailyFxRate(force = false) {
   }
 }
 
+function computeOverviewPaceMetrics(hist, live) {
+  const totalPnl = Number(hist?.total_pnl || 0);
+  let expStartTs = Number(hist?.experiment_start_ts || 0);
+  if (!(expStartTs > 0)) {
+    const curveArr = Array.isArray(hist?.equity_curve) ? hist.equity_curve : [];
+    const recArr = Array.isArray(hist?.records) ? hist.records : [];
+    const candidates = [];
+    curveArr.forEach((p) => { if (Number(p?.start) > 0) candidates.push(Number(p.start)); });
+    recArr.forEach((r) => {
+      const s = Number(r?.start || 0);
+      if (s > 0) candidates.push(s);
+      else if (typeof r?.slug === "string") {
+        const tail = r.slug.split("-").pop();
+        if (/^\d{9,}$/.test(tail)) candidates.push(Number(tail));
+      }
+    });
+    if (candidates.length > 0) expStartTs = Math.min(...candidates);
+    else if (live && Number(live.start) > 0) expStartTs = Number(live.start);
+  }
+  const nowSecForPace = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const isCurrentBatch = !hist?.batch_id || !hist?.current_batch || hist.batch_id === hist.current_batch;
+  let elapsedSec = Number(hist?.elapsed_seconds || 0);
+  if (expStartTs > 0 && isCurrentBatch) {
+    elapsedSec = Math.max(elapsedSec, Math.max(0, nowSecForPace - expStartTs));
+  }
+  const hasTrades = Number(hist?.traded_rounds || hist?.count || 0) > 0;
+  const elapsedH = elapsedSec / 3600;
+  const hasServerRates = hist?.hourly_pnl !== undefined && hist?.hourly_pnl !== null;
+  const hrPnl = hasServerRates
+    ? Number(hist.hourly_pnl || 0)
+    : (hasTrades && expStartTs > 0 ? totalPnl / Math.max(1, elapsedH) : 0);
+  const hrProjected = hasServerRates ? Boolean(hist.hourly_projected) : (elapsedH < 1);
+  const dayPnl = (hist?.daily_pnl !== undefined && hist?.daily_pnl !== null)
+    ? Number(hist.daily_pnl || 0)
+    : (hasTrades && expStartTs > 0 ? (elapsedH >= 24 ? totalPnl / (elapsedH / 24) : hrPnl * 24) : 0);
+  const dayProjected = (hist?.daily_projected !== undefined && hist?.daily_projected !== null)
+    ? Boolean(hist.daily_projected)
+    : (elapsedH < 24);
+  return { expStartTs, elapsedSec, hasTrades, hrPnl, hrProjected, dayPnl, dayProjected };
+}
+
 function patchOverviewMoneyTexts(hist, live) {
   if (!hist) return;
   const totalPnl = Number(hist.total_pnl || 0);
@@ -364,18 +405,7 @@ function patchOverviewMoneyTexts(hist, live) {
   const tdPnl = Number(hist.today_pnl || 0);
   if ($("pace-today-pnl")) $("pace-today-pnl").textContent = fmtMoney(tdPnl, true);
 
-  const hasTrades = Number(hist.traded_rounds || hist.count || 0) > 0;
-  const expStartTs = Number(hist.experiment_start_ts || 0);
-  const nowSecForPace = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
-  const isCurrentBatch = !hist.batch_id || !hist.current_batch || hist.batch_id === hist.current_batch;
-  let elapsedSec = Number(hist.elapsed_seconds || 0);
-  if (expStartTs > 0 && isCurrentBatch) elapsedSec = Math.max(elapsedSec, Math.max(0, nowSecForPace - expStartTs));
-  const elapsedH = elapsedSec / 3600;
-  const hasServerRates = hist.hourly_pnl !== undefined && hist.hourly_pnl !== null;
-  const hrPnl = hasServerRates ? Number(hist.hourly_pnl || 0) : (hasTrades && expStartTs > 0 ? totalPnl / Math.max(1, elapsedH) : 0);
-  const dayPnl = (hist.daily_pnl !== undefined && hist.daily_pnl !== null)
-    ? Number(hist.daily_pnl || 0)
-    : (hasTrades && expStartTs > 0 ? (elapsedH >= 24 ? totalPnl / (elapsedH / 24) : hrPnl * 24) : 0);
+  const { hasTrades, hrPnl, dayPnl } = computeOverviewPaceMetrics(hist, live);
   if ($("pace-hourly-pnl")) $("pace-hourly-pnl").textContent = hasTrades ? fmtMoney(hrPnl, true) : fmtMoney(0);
   if ($("pace-daily-pnl")) $("pace-daily-pnl").textContent = hasTrades ? fmtMoney(dayPnl, true) : fmtMoney(0);
 
@@ -1173,29 +1203,7 @@ function updateOverview(live, hist) {
   }
 
   // 实验运行时长、开始时间、今日战绩与时均/日均收益速率条（净值曲线底部）
-  let expStartTs = Number(hist.experiment_start_ts || 0);
-  if (!(expStartTs > 0)) {
-    const curveArr = Array.isArray(hist.equity_curve) ? hist.equity_curve : [];
-    const recArr = Array.isArray(hist.records) ? hist.records : [];
-    const candidates = [];
-    curveArr.forEach((p) => { if (Number(p?.start) > 0) candidates.push(Number(p.start)); });
-    recArr.forEach((r) => {
-      const s = Number(r?.start || 0);
-      if (s > 0) candidates.push(s);
-      else if (typeof r?.slug === "string") {
-        const tail = r.slug.split("-").pop();
-        if (/^\d{9,}$/.test(tail)) candidates.push(Number(tail));
-      }
-    });
-    if (candidates.length > 0) expStartTs = Math.min(...candidates);
-    else if (live && Number(live.start) > 0) expStartTs = Number(live.start);
-  }
-  const nowSecForPace = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
-  const isCurrentBatch = !hist.batch_id || !hist.current_batch || hist.batch_id === hist.current_batch;
-  let elapsedSec = Number(hist.elapsed_seconds || 0);
-  if (expStartTs > 0 && isCurrentBatch) {
-    elapsedSec = Math.max(elapsedSec, Math.max(0, nowSecForPace - expStartTs));
-  }
+  const { expStartTs, elapsedSec, hasTrades, hrPnl, hrProjected, dayPnl, dayProjected } = computeOverviewPaceMetrics(hist, live);
   const fmtDuration = (sec) => {
     const s = Math.max(0, Math.floor(sec));
     const days = Math.floor(s / 86400);
@@ -1234,19 +1242,6 @@ function updateOverview(live, hist) {
   if ($("pace-today-wl")) {
     $("pace-today-wl").textContent = `${tdW}胜 ${tdL}负`;
   }
-  const hasTrades = Number(hist.traded_rounds || hist.count || 0) > 0;
-  const elapsedH = elapsedSec / 3600;
-  const hasServerRates = hist.hourly_pnl !== undefined && hist.hourly_pnl !== null;
-  const hrPnl = hasServerRates
-    ? Number(hist.hourly_pnl || 0)
-    : (hasTrades && expStartTs > 0 ? totalPnl / Math.max(1, elapsedH) : 0);
-  const hrProjected = hasServerRates ? Boolean(hist.hourly_projected) : (elapsedH < 1);
-  const dayPnl = (hist.daily_pnl !== undefined && hist.daily_pnl !== null)
-    ? Number(hist.daily_pnl || 0)
-    : (hasTrades && expStartTs > 0 ? (elapsedH >= 24 ? totalPnl / (elapsedH / 24) : hrPnl * 24) : 0);
-  const dayProjected = (hist.daily_projected !== undefined && hist.daily_projected !== null)
-    ? Boolean(hist.daily_projected)
-    : (elapsedH < 24);
   if ($("pace-hourly-pnl")) {
     $("pace-hourly-pnl").textContent = hasTrades ? `${fmtMoney(hrPnl, true)}` : fmtMoney(0);
     $("pace-hourly-pnl").className = `tempo-val ${hasTrades ? (hrPnl > 1e-6 ? "up" : hrPnl < -1e-6 ? "down" : "") : ""}`;
@@ -1260,33 +1255,6 @@ function updateOverview(live, hist) {
   }
   if ($("pace-daily-note")) {
     $("pace-daily-note").textContent = !hasTrades ? "等待成交" : (dayProjected ? "按24h推算" : "实测日均");
-  }
-
-  const brierTargets = [$("side-brier-score"), $("modal-brier-score")];
-  {
-    const bCnt = Number(hist.brier_count || 0);
-    const bMod = hist.brier_model;
-    const bMkt = hist.brier_market;
-    if (bCnt > 0 && bMod !== null && bMod !== undefined && bMkt !== null && bMkt !== undefined) {
-      const mVal = Number(bMod);
-      const kVal = Number(bMkt);
-      const bText = `${mVal.toFixed(3)} / ${kVal.toFixed(3)}`;
-      const bCls = mVal < kVal - 0.001 ? "is-ok" : mVal > kVal + 0.002 ? "is-warn" : "";
-      const bTitle = `已统计 ${bCnt} 窗中段预测：模型 ${mVal.toFixed(5)} vs 盘口 ${kVal.toFixed(5)}（越小越准）`;
-      brierTargets.forEach((el) => {
-        if (!el) return;
-        el.textContent = bText;
-        el.className = `source-metric-val conn-tile-val ${bCls}`;
-        el.title = bTitle;
-      });
-    } else {
-      brierTargets.forEach((el) => {
-        if (!el) return;
-        el.textContent = "--";
-        el.className = "source-metric-val conn-tile-val";
-        el.title = "";
-      });
-    }
   }
 
   const roiSub = $("kpi-avail-sub");
@@ -2324,11 +2292,8 @@ function updateMarket(live) {
   renderSideForecast("pnl-forecast-up", "UP", upWinNet);
   renderSideForecast("pnl-forecast-down", "DOWN", dnWinNet);
 
-  // Always keep probability track visible; auto-expand holding bottom-line section beneath it when holding or unwound
   const hasAnyHolding = upShares > 1e-6 || dnShares > 1e-6 || totalCost > 1e-6 || Math.abs(unwindPnl) > 1e-6;
-  const holdView = $("battle-holding-view");
   const battleCard = $("copilot-battle-card");
-  if (holdView) holdView.hidden = !hasAnyHolding;
   if (battleCard) battleCard.classList.toggle("is-holding-mode", hasAnyHolding);
 
   // Update active stage label to reflect v3.3 paced phases (早盘轻仓试探 vs 中盘控仓博弈)
@@ -2348,27 +2313,6 @@ function updateMarket(live) {
   }
   if (freezeStageEl) {
     freezeStageEl.textContent = tauNowStage > 0 && tauNowStage <= 15 ? "尾盘锁定" : "尾盘收官";
-  }
-
-  if (hasAnyHolding) {
-    const headlineEl = $("battle-pos-headline");
-    const subEl = $("battle-pos-sub");
-    if (headlineEl && subEl) {
-      if (upShares > 1e-6 && dnShares > 1e-6) {
-        headlineEl.innerHTML = `<span class="bhv-pos-pill up">看涨 ${fmtShares(upShares)}股</span><span class="bhv-pos-pill down">看跌 ${fmtShares(dnShares)}股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">总投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(totalCost))}</strong>`;
-      } else if (upShares > 1e-6) {
-        headlineEl.innerHTML = `<span class="bhv-pos-pill up">已买看涨</span><span class="bhv-pos-qty">${fmtShares(upShares)} 股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posUp.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(upCost))}</strong>`;
-      } else if (dnShares > 1e-6) {
-        headlineEl.innerHTML = `<span class="bhv-pos-pill down">已买看跌</span><span class="bhv-pos-qty">${fmtShares(dnShares)} 股</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">均价</span><strong class="bhv-sub-val">${escapeHtml(fmtPriceCents(posDn.avg_px))}</strong><span class="bhv-sub-sep">·</span><span class="bhv-sub-k">投入</span><strong class="bhv-sub-val">${escapeHtml(fmtMoney(dnCost))}</strong>`;
-      } else {
-        const uwCls = unwindPnl >= 0 ? "up" : "down";
-        headlineEl.innerHTML = `<span class="bhv-pos-pill ${uwCls}">已落袋清仓</span><span class="bhv-pos-qty">${escapeHtml(fmtMoney(unwindPnl, true))}</span>`;
-        subEl.innerHTML = `<span class="bhv-sub-k">本轮已主动平仓锁定盈亏，等待结算</span>`;
-      }
-    }
   }
 
   const upBid = bookUp.best_bid ?? bookUp.bid ?? null;

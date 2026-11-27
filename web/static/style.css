@@ -5180,88 +5180,12 @@ html, body {
   background: var(--surface);
 }
 
-/* Mode B: Holding Bottom-Line Card */
-.battle-holding-view {
-  display: grid;
-  grid-template-columns: minmax(170px, 0.85fr) minmax(0, 1.55fr);
-  align-items: center;
-  gap: 16px;
-}
-
-.bhv-position-col {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-  padding-right: 12px;
-  border-right: 1px solid var(--border-soft);
-}
-
-.bhv-main-pos {
-  font-family: var(--font-mono);
-  font-size: 19px;
-  font-weight: 800;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.25;
-}
-
-.bhv-main-pos .up { color: var(--up); }
-.bhv-main-pos .down { color: var(--down); }
-
-.bhv-sub {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--label);
-  font-variant-numeric: tabular-nums;
-}
-
-.bhv-outcomes-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.bhv-outcome-box {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 11px 13px;
-  border-radius: 11px;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border-soft);
-  cursor: pointer;
-  overflow: hidden;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
-}
-
-.bhv-outcome-box.side-up.is-leading,
-.bhv-outcome-box.side-down.is-leading {
-  background: rgba(37, 99, 235, 0.045);
-  border-color: var(--accent-border);
-}
-
 .prob-teal {
   color: #0d9488;
 }
 
 html[data-theme="dark"] .prob-teal {
   color: #2dd4bf;
-}
-
-.bhv-outcome-box.is-focused {
-  border-color: var(--accent) !important;
-}
-
-.bhv-outcome-box.is-shimmer::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  width: 55%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
-  pointer-events: none;
-  animation: cardShimmerSweep 0.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .bhv-ob-top {
@@ -5314,25 +5238,8 @@ html[data-theme="dark"] .prob-teal {
   .bsv-prob {
     font-size: 15px;
   }
-  
-  .battle-holding-view {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-  }
-  .bhv-position-col {
-    padding-right: 0;
-    padding-bottom: 10px;
-    border-right: none;
-    border-bottom: 1px solid var(--border-soft);
-  }
-  .bhv-main-pos {
-    font-size: 16.5px;
-  }
   .bhv-pnl-num {
     font-size: 19px;
-  }
-  .bhv-outcome-box {
-    padding: 10px 11px;
   }
 }
 
@@ -5459,25 +5366,6 @@ html[data-theme="dark"] .prob-teal {
 .bsv-prob {
   font-size: 18px;
   letter-spacing: -0.02em;
-}
-
-.battle-holding-view {
-  grid-template-columns: minmax(190px, 0.9fr) minmax(0, 1.5fr);
-  gap: 20px;
-}
-
-.bhv-position-col {
-  gap: 6px;
-  padding-right: 16px;
-}
-
-.bhv-main-pos {
-  font-size: 21px;
-  letter-spacing: -0.02em;
-}
-
-.bhv-sub {
-  font-size: 12.5px;
 }
 
 .bhv-outcomes-grid {
@@ -5638,27 +5526,6 @@ html[data-theme="dark"] .prob-teal {
 }
 
 @media (max-width: 780px) {
-  
-  
-  .battle-holding-view {
-    grid-template-columns: minmax(0, 1fr) !important;
-    gap: 12px !important;
-  }
-  .bhv-position-col {
-    flex-direction: row;
-    align-items: baseline;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 4px 10px;
-    padding-right: 0 !important;
-    padding-bottom: 10px !important;
-    border-right: none !important;
-    border-bottom: 1px solid var(--border-soft) !important;
-  }
-  
-  .bhv-main-pos {
-    font-size: 17px;
-  }
   .bhv-sub {
     font-size: 11.5px;
   }
@@ -6021,108 +5888,7 @@ html[data-theme="dark"] .prob-teal {
   }
 }
 
-/* ==========================================================================
-   ALWAYS-ON PROBABILITY TRACK + SLEEK DOCKED HOLDING BOTTOM-LINE (v3.2.87)
-   ========================================================================== */
-.panel.battle-card.is-holding-mode .battle-holding-view {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-soft);
-}
-
-.bhv-main-pos {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.bhv-pos-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.bhv-pos-pill.up {
-  color: var(--up);
-  background: var(--up-soft);
-}
-
-.bhv-pos-pill.down {
-  color: var(--down);
-  background: var(--down-soft);
-}
-
-.bhv-pos-qty {
-  font-family: var(--font-mono);
-  font-size: 17px;
-  font-weight: 800;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.bhv-sub {
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-}
-
-.bhv-sub-k {
-  color: var(--muted);
-}
-
-.bhv-sub-val {
-  font-family: var(--font-mono);
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.bhv-sub-sep {
-  margin: 0 2px;
-  color: var(--border-strong, var(--border));
-}
-
-.bhv-outcome-box {
-  padding: 12px 15px;
-  gap: 6px;
-}
-
 @media (max-width: 780px) {
-  .panel.battle-card.is-holding-mode .battle-holding-view {
-    margin-top: 12px;
-    padding-top: 12px;
-  }
-  .bhv-position-col {
-    align-items: center;
-    padding-bottom: 0 !important;
-    border-bottom: none !important;
-  }
-  .bhv-pos-qty {
-    font-size: 15.5px;
-  }
-  .bhv-sub {
-    font-size: 12.5px;
-    color: var(--muted);
-  }
-  .bhv-sub-val {
-    font-size: 13.5px;
-    color: var(--ink);
-  }
-  .bhv-outcome-box {
-    padding: 11px 12px;
-    gap: 5px;
-  }
   .bhv-pnl-num {
     font-size: 22px;
   }
