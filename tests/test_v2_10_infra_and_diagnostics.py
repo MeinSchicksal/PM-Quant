@@ -577,6 +577,48 @@ class TestV210InfraAndDiagnostics(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_book_ws_dirty_cache_reuses_sorted_levels_and_invalidates_on_delta(self):
+        from runtime.ws_feeds import PolymarketBookWSClient
+
+        cli = PolymarketBookWSClient()
+        cli.connected = True
+        t0 = 1800000100.0
+        cli.apply_message({
+            "event_type": "book",
+            "asset_id": "tok_cache",
+            "bids": [{"price": "0.48", "size": "50"}, {"price": "0.49", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "40"}, {"price": "0.51", "size": "25"}],
+            "timestamp": int(t0 * 1000),
+        }, now=t0)
+
+        b1 = cli.get_order_book("tok_cache", now=t0 + 0.1)
+        b2 = cli.get_order_book("tok_cache", now=t0 + 0.2)
+        self.assertIsNotNone(b1)
+        self.assertIs(b1.bids, b2.bids)
+        self.assertIs(b1.asks, b2.asks)
+        self.assertAlmostEqual(b2.source_t, t0 + 0.2, places=3)
+
+        # last_trade_price 仅更新最新成交价，不触发无谓重排
+        cli.apply_message({
+            "event_type": "last_trade_price",
+            "asset_id": "tok_cache",
+            "price": "0.50",
+        }, now=t0 + 0.3)
+        b3 = cli.get_order_book("tok_cache", now=t0 + 0.35)
+        self.assertIs(b3.bids, b1.bids)
+        self.assertAlmostEqual(b3.last_trade_price, 0.50, places=4)
+
+        # price_change 标脏并重排，立刻反映最新最优价与深度
+        cli.apply_message({
+            "event_type": "price_change",
+            "price_changes": [{"asset_id": "tok_cache", "price": "0.50", "size": "88", "side": "BUY"}],
+            "timestamp": int((t0 + 0.4) * 1000),
+        }, now=t0 + 0.4)
+        b4 = cli.get_order_book("tok_cache", now=t0 + 0.45)
+        self.assertIsNot(b4.bids, b1.bids)
+        self.assertAlmostEqual(b4.best_bid, 0.50, places=4)
+        self.assertAlmostEqual(b4.bids[0][1], 88.0, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

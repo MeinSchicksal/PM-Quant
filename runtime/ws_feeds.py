@@ -687,6 +687,9 @@ class PolymarketBookWSClient(_BaseWSClient):
                     "last_trade": ltp_f if ltp_f > 0.0 else None,
                     "t": ts,
                     "ready": True,
+                    "dirty": True,
+                    "sorted_bids": None,
+                    "sorted_asks": None,
                 }
                 self._resub_attempts.pop(aid, None)
                 self._last_ws_msg_t = ts
@@ -734,6 +737,7 @@ class PolymarketBookWSClient(_BaseWSClient):
                     else:
                         book_side[px] = sz
                     st["t"] = ts
+                    st["dirty"] = True
                     self._resub_attempts.pop(aid, None)
                     touched_aids.add(aid)
                     updated = True
@@ -820,14 +824,23 @@ class PolymarketBookWSClient(_BaseWSClient):
                 if (t - src_t) > max_age_s:
                     return None
                 eff_t = src_t
-            bids_sorted = sorted(st["bids"].items(), key=lambda x: x[0], reverse=True)
-            asks_sorted = sorted(st["asks"].items(), key=lambda x: x[0])
-            # Self-heal corrupted/crossed in-memory L2 book (dropped delta) by invalidating
-            # and forcing an immediate resubscribe + HTTP fallback.
-            if bids_sorted and asks_sorted and bids_sorted[0][0] >= asks_sorted[0][0] - 1e-9:
-                st["ready"] = False
-                self._token_gen += 1
-                return None
+            if st.get("dirty", True) or st.get("sorted_bids") is None or st.get("sorted_asks") is None:
+                bids_sorted = sorted(st["bids"].items(), key=lambda x: x[0], reverse=True)
+                asks_sorted = sorted(st["asks"].items(), key=lambda x: x[0])
+                # Self-heal corrupted/crossed in-memory L2 book (dropped delta) by invalidating
+                # and forcing an immediate resubscribe + HTTP fallback.
+                if bids_sorted and asks_sorted and bids_sorted[0][0] >= asks_sorted[0][0] - 1e-9:
+                    st["ready"] = False
+                    st["sorted_bids"] = None
+                    st["sorted_asks"] = None
+                    self._token_gen += 1
+                    return None
+                st["sorted_bids"] = bids_sorted
+                st["sorted_asks"] = asks_sorted
+                st["dirty"] = False
+            else:
+                bids_sorted = st["sorted_bids"]
+                asks_sorted = st["sorted_asks"]
             ltp = st.get("last_trade")
         return OrderBook(
             bids=bids_sorted,
