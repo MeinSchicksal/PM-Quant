@@ -290,8 +290,9 @@ _ENTRY_MODE_LOCK = threading.Lock()
 _ENTRY_MODE_MAX_ENTRIES = 2000
 
 _FX_CACHE_LOCK = threading.Lock()
+_FX_DEFAULT_RATE = 6.68
 _FX_CACHE = {
-    "rate": 7.25,
+    "rate": _FX_DEFAULT_RATE,
     "date": "",
     "source": "default",
     "loaded": False,
@@ -306,7 +307,7 @@ def _today_bjt_str() -> str:
     return datetime.datetime.now(tz).strftime("%Y-%m-%d")
 
 
-def _fetch_usd_cny_from_web() -> tuple:
+def _fetch_usd_cny_from_web(timeout: float = 2.5) -> tuple:
     """Fetch live USD->CNY spot rate from free no-key public endpoints (called at most once/day)."""
     endpoints = (
         ("open.er-api.com", "https://open.er-api.com/v6/latest/USD"),
@@ -315,7 +316,7 @@ def _fetch_usd_cny_from_web() -> tuple:
     for src_name, url in endpoints:
         try:
             req = UrlRequest(url, headers={"User-Agent": "PM-Quant/3.4", "Accept": "application/json"})
-            with url_open(req, timeout=4.0) as resp:
+            with url_open(req, timeout=timeout) as resp:
                 if getattr(resp, "status", 200) != 200:
                     continue
                 data = json.loads(resp.read().decode("utf-8", errors="ignore"))
@@ -329,10 +330,30 @@ def _fetch_usd_cny_from_web() -> tuple:
     return None, None
 
 
+def _persist_fx_cache(rate: float, date_str: str, src: str) -> None:
+    try:
+        _FX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _FX_CACHE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"rate": rate, "date": date_str, "source": src}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, _FX_CACHE_FILE)
+    except Exception:
+        pass
+
+
 def _get_usd_cny_fx() -> dict:
-    """Return cached daily USD->CNY rate; asynchronously refreshes at most once per Beijing calendar day."""
+    """Return cached daily USD->CNY rate; syncs at most once per Beijing calendar day.
+
+    - Cold start (no real cached rate yet): fetches synchronously once so the client
+      never receives an outdated fallback rate.
+    - Warm cache (already has a real rate from yesterday): returns immediately and
+      refreshes today's rate asynchronously in the background.
+    """
     today = _today_bjt_str()
-    need_fetch = False
+    need_sync_fetch = False
+    need_async_fetch = False
     with _FX_CACHE_LOCK:
         if not _FX_CACHE["loaded"]:
             _FX_CACHE["loaded"] = True
@@ -342,42 +363,51 @@ def _get_usd_cny_fx() -> dict:
                     s_rate = float(saved.get("rate", 0.0) or 0.0)
                     s_date = str(saved.get("date") or "")
                     s_src = str(saved.get("source") or "cache")
-                    if math.isfinite(s_rate) and 5.0 <= s_rate <= 10.0:
+                    if math.isfinite(s_rate) and 5.0 <= s_rate <= 10.0 and s_src != "default":
                         _FX_CACHE["rate"] = round(s_rate, 4)
                         _FX_CACHE["date"] = s_date
                         _FX_CACHE["source"] = s_src
                 except Exception:
                     pass
         now_m = time.monotonic()
-        if (
-            _FX_CACHE["date"] != today
-            and not _FX_CACHE["refreshing"]
-            and (_FX_CACHE["last_attempt_mono"] <= 0.0 or (now_m - _FX_CACHE["last_attempt_mono"]) >= 1800.0)
-        ):
+        stale_today = _FX_CACHE["date"] != today
+        cooldown_ok = (_FX_CACHE["last_attempt_mono"] <= 0.0 or (now_m - _FX_CACHE["last_attempt_mono"]) >= 1800.0)
+        if stale_today and not _FX_CACHE["refreshing"] and cooldown_ok:
             _FX_CACHE["refreshing"] = True
             _FX_CACHE["last_attempt_mono"] = now_m
-            need_fetch = True
+            if _FX_CACHE["source"] == "default":
+                need_sync_fetch = True
+            else:
+                need_async_fetch = True
         snapshot = {
             "rate": _FX_CACHE["rate"],
             "date": _FX_CACHE["date"] or today,
             "source": _FX_CACHE["source"],
-            "synced_today": (_FX_CACHE["date"] == today),
+            "synced_today": (_FX_CACHE["date"] == today and _FX_CACHE["source"] != "default"),
         }
 
-    if need_fetch:
-        def _bg_fx():
-            rate, src = _fetch_usd_cny_from_web()
+    if need_sync_fetch:
+        rate, src = _fetch_usd_cny_from_web(timeout=2.5)
+        if rate is not None:
+            _persist_fx_cache(rate, today, src)
+        with _FX_CACHE_LOCK:
+            _FX_CACHE["refreshing"] = False
             if rate is not None:
-                try:
-                    _FX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = _FX_CACHE_FILE.with_suffix(".json.tmp")
-                    tmp.write_text(
-                        json.dumps({"rate": rate, "date": today, "source": src}, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
-                    os.replace(tmp, _FX_CACHE_FILE)
-                except Exception:
-                    pass
+                _FX_CACHE["rate"] = rate
+                _FX_CACHE["date"] = today
+                _FX_CACHE["source"] = src
+            return {
+                "rate": _FX_CACHE["rate"],
+                "date": _FX_CACHE["date"] or today,
+                "source": _FX_CACHE["source"],
+                "synced_today": (_FX_CACHE["date"] == today and _FX_CACHE["source"] != "default"),
+            }
+
+    if need_async_fetch:
+        def _bg_fx():
+            rate, src = _fetch_usd_cny_from_web(timeout=3.5)
+            if rate is not None:
+                _persist_fx_cache(rate, today, src)
             with _FX_CACHE_LOCK:
                 _FX_CACHE["refreshing"] = False
                 if rate is not None:
@@ -1672,6 +1702,7 @@ def start_server_in_background(port=8900, host=None):
     except OSError as e:
         print(f"[Web] 端口 {port} 已被占用 ({e})，复用既有看板服务。")
         return None
+    threading.Thread(target=_get_usd_cny_fx, daemon=True, name="FxWarmup").start()
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     return httpd
@@ -1684,6 +1715,7 @@ def run(port=8900, host=None):
     _validate_bind_security(bind_host)
     server_address = (bind_host, port)
     httpd = _HardenedHTTPServer(server_address, QuantHandler)
+    threading.Thread(target=_get_usd_cny_fx, daemon=True, name="FxWarmup").start()
     disp_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
     auth_note = " [BasicAuth 已开启]" if os.environ.get("PM_WEB_PASS") else ""
     print(f"PM-Quant investor dashboard: http://{disp_host}:{port}/{auth_note}")

@@ -148,8 +148,9 @@ function getPalette() {
 
 let currentPage = "overview";
 let displayCurrency = "USD"; // "USD" | "CNY"
-let fxUsdCny = { rate: 7.25, date: "", source: "default" };
+let fxUsdCny = { rate: 6.68, date: "", source: "default" };
 let _fxRetryTimer = null;
+const _renderedCurrency = { overview: null, market: null, history: null };
 let chartViewMode = "dual"; // "dual" | "price" | "prob"
 let historyFilterMode = "all"; // "all" | "traded" | "win" | "loss" | "maker" | "taker" | "flip"
 let historyTodayOnly = false;
@@ -268,7 +269,7 @@ function updateCurrencyToggleUI() {
   btn.querySelectorAll(".curr-opt").forEach((sp) => {
     sp.classList.toggle("is-active", sp.dataset.curr === displayCurrency);
   });
-  const rTxt = Number(fxUsdCny.rate || 7.25).toFixed(4);
+  const rTxt = Number(fxUsdCny.rate || 6.68).toFixed(4);
   const dTxt = fxUsdCny.date ? `（${fxUsdCny.date} 每日同步一次）` : "（每日同步一次）";
   btn.title = `点击切换美元 / 人民币显示 · 当前汇率 1 USD = ${rTxt} CNY ${dTxt}`;
 }
@@ -283,11 +284,13 @@ function initCurrency() {
     if (savedFxRaw) {
       const parsed = JSON.parse(savedFxRaw);
       const r = Number(parsed?.rate || 0);
-      if (Number.isFinite(r) && r >= 5.0 && r <= 10.0) {
+      const src = String(parsed?.source || "");
+      // 忽略旧版兜底占位缓存（source=default），确保使用当日真实汇率
+      if (Number.isFinite(r) && r >= 5.0 && r <= 10.0 && src && src !== "default") {
         fxUsdCny = {
           rate: r,
           date: String(parsed.date || ""),
-          source: String(parsed.source || "cache"),
+          source: src,
         };
       }
     }
@@ -308,20 +311,24 @@ async function syncDailyFxRate(force = false) {
     if (!resp.ok) return;
     const data = await resp.json();
     const r = Number(data?.rate || 0);
+    const src = String(data?.source || "server");
     if (Number.isFinite(r) && r >= 5.0 && r <= 10.0) {
+      const prevRate = Number(fxUsdCny.rate || 0);
       fxUsdCny = {
         rate: r,
         date: data.synced_today ? today : String(data.date || ""),
-        source: String(data.source || "server"),
+        source: src,
       };
-      try {
-        localStorage.setItem("pm_quant_fx_usd_cny", JSON.stringify(fxUsdCny));
-      } catch (_) {}
-      updateCurrencyToggleUI();
-      if (displayCurrency === "CNY") {
-        rerenderMoneyViews();
+      if (src !== "default") {
+        try {
+          localStorage.setItem("pm_quant_fx_usd_cny", JSON.stringify(fxUsdCny));
+        } catch (_) {}
       }
-      // If server kicked off its once-a-day async refresh just now, pick up the updated rate once after 5s
+      updateCurrencyToggleUI();
+      // 仅当汇率确实变化且当前正在查看人民币时，静默更新当前可见页金额
+      if (displayCurrency === "CNY" && Math.abs(r - prevRate) >= 1e-4) {
+        refreshVisibleMoneyOnly();
+      }
       if (!data.synced_today && !_fxRetryTimer) {
         _fxRetryTimer = setTimeout(() => {
           _fxRetryTimer = null;
@@ -334,14 +341,91 @@ async function syncDailyFxRate(force = false) {
   }
 }
 
-function rerenderMoneyViews() {
-  if (cachedHistory) {
-    updateOverview(cachedHistory, cachedLive);
-    drawEquityCurve(cachedHistory);
-    renderHistoryTable(cachedHistory);
+function patchOverviewMoneyTexts(hist, live) {
+  if (!hist) return;
+  const totalPnl = Number(hist.total_pnl || 0);
+  const totalWon = Number(hist.total_won || 0);
+  const totalLost = Math.abs(Number(hist.total_lost || 0));
+  const initialCap = Number(hist.initial_capital || 100);
+  const availCap = Number(hist.available_capital ?? initialCap + totalPnl);
+  const freeCap = Number(hist.free_capital ?? availCap);
+  const turnover = Number(hist.turnover || 0);
+
+  if ($("hero-total-pnl")) $("hero-total-pnl").textContent = fmtMoney(totalPnl, true);
+  if ($("hero-won")) $("hero-won").textContent = fmtMoney(totalWon, true);
+  if ($("hero-lost")) $("hero-lost").textContent = totalLost > 1e-6 ? `-${fmtMoney(totalLost, false)}` : `-${fmtMoney(0, false)}`;
+
+  const tdPnl = Number(hist.today_pnl || 0);
+  if ($("pace-today-pnl")) $("pace-today-pnl").textContent = fmtMoney(tdPnl, true);
+
+  const hasTrades = Number(hist.traded_rounds || hist.count || 0) > 0;
+  const expStartTs = Number(hist.experiment_start_ts || 0);
+  const nowSecForPace = live?.server_time ? Number(live.server_time) : (Date.now() / 1000);
+  const isCurrentBatch = !hist.batch_id || !hist.current_batch || hist.batch_id === hist.current_batch;
+  let elapsedSec = Number(hist.elapsed_seconds || 0);
+  if (expStartTs > 0 && isCurrentBatch) elapsedSec = Math.max(elapsedSec, Math.max(0, nowSecForPace - expStartTs));
+  const elapsedH = elapsedSec / 3600;
+  const hasServerRates = hist.hourly_pnl !== undefined && hist.hourly_pnl !== null;
+  const hrPnl = hasServerRates ? Number(hist.hourly_pnl || 0) : (hasTrades && expStartTs > 0 ? totalPnl / Math.max(1, elapsedH) : 0);
+  const dayPnl = (hist.daily_pnl !== undefined && hist.daily_pnl !== null)
+    ? Number(hist.daily_pnl || 0)
+    : (hasTrades && expStartTs > 0 ? (elapsedH >= 24 ? totalPnl / (elapsedH / 24) : hrPnl * 24) : 0);
+  if ($("pace-hourly-pnl")) $("pace-hourly-pnl").textContent = hasTrades ? fmtMoney(hrPnl, true) : fmtMoney(0);
+  if ($("pace-daily-pnl")) $("pace-daily-pnl").textContent = hasTrades ? fmtMoney(dayPnl, true) : fmtMoney(0);
+
+  if ($("kpi-available-cap")) $("kpi-available-cap").textContent = fmtMoney(availCap);
+  if ($("hero-free-cap")) $("hero-free-cap").textContent = fmtMoney(freeCap);
+  if ($("hero-initial-cap")) $("hero-initial-cap").textContent = fmtMoney(initialCap);
+  if ($("hero-turnover")) $("hero-turnover").textContent = fmtMoney(turnover);
+
+  const eb = hist.execution_breakdown || {};
+  [
+    ["maker", "exec-maker-pnl", "exec-maker-avg"],
+    ["taker", "exec-taker-pnl", "exec-taker-avg"],
+    ["flip", "exec-flip-pnl", "exec-flip-avg"],
+  ].forEach(([key, pnlId, avgId]) => {
+    const item = eb[key] || { count: 0, pnl: 0 };
+    const c = Number(item.count || 0);
+    const p = Number(item.pnl || 0);
+    const avgPer = c > 0 ? p / c : 0;
+    if ($(pnlId)) $(pnlId).textContent = c > 0 ? fmtMoney(p, true) : fmtMoney(0);
+    if ($(avgId)) $(avgId).textContent = c > 0 ? `场均 ${fmtMoney(avgPer, true)}` : "场均 --";
+  });
+
+  const avgPnl = Number(hist.avg_pnl || 0);
+  const avgWin = Number(hist.avg_win || 0);
+  const avgLoss = Math.abs(Number(hist.avg_loss || 0));
+  if ($("kpi-avg-pnl")) $("kpi-avg-pnl").textContent = fmtMoney(avgPnl, true);
+  if ($("kpi-avgwin-amt")) $("kpi-avgwin-amt").textContent = fmtMoney(avgWin, true);
+  if ($("kpi-avgloss-amt")) $("kpi-avgloss-amt").textContent = avgLoss > 1e-6 ? `-${fmtMoney(avgLoss, false)}` : `-${fmtMoney(0, false)}`;
+
+  const maxDd = Number.isFinite(Number(hist.max_drawdown)) ? Math.max(0, Number(hist.max_drawdown)) : 0;
+  if ($("kpi-max-dd")) $("kpi-max-dd").textContent = maxDd > 1e-4 ? `-${fmtMoney(maxDd, false)}` : fmtMoney(0);
+
+  const capTurnMultiple = initialCap > 0 ? turnover / initialCap : 0;
+  if ($("kpi-turnover-note")) {
+    setHtmlIfChanged(
+      $("kpi-turnover-note"),
+      `净盈亏 ${fmtMoney(totalPnl, true)} · 下注 ${fmtMoney(turnover)} · 周转 <span id="kpi-turnover-mult">${capTurnMultiple.toFixed(2)}x</span>`
+    );
   }
-  if (cachedLive) {
-    updateMarket(cachedLive);
+  drawEquityCurve(hist);
+  _renderedCurrency.overview = displayCurrency;
+}
+
+function refreshVisibleMoneyOnly() {
+  if (currentPage === "overview") {
+    if (cachedHistory) patchOverviewMoneyTexts(cachedHistory, cachedLive);
+  } else if (currentPage === "history") {
+    if (cachedHistory) {
+      renderHistoryTable(cachedHistory);
+      _renderedCurrency.history = displayCurrency;
+    }
+  } else if (currentPage === "market") {
+    if (cachedLive) {
+      updateMarket(cachedLive);
+      _renderedCurrency.market = displayCurrency;
+    }
   }
   if (cachedModalWindow && !cachedModalWindow.archive_pruned && !$("round-detail-modal")?.hidden) {
     renderModalDetailContent(cachedModalWindow, cachedModalRecord);
@@ -354,9 +438,12 @@ function toggleCurrency() {
     localStorage.setItem("pm_quant_currency", displayCurrency);
   } catch (_) {}
   updateCurrencyToggleUI();
-  syncDailyFxRate(false);
-  rerenderMoneyViews();
-  const rTxt = Number(fxUsdCny.rate || 7.25).toFixed(4);
+  refreshVisibleMoneyOnly();
+  const today = getTodayBjtDate();
+  if (fxUsdCny.date !== today || fxUsdCny.source === "default") {
+    syncDailyFxRate(false);
+  }
+  const rTxt = Number(fxUsdCny.rate || 6.68).toFixed(4);
   showToast(
     displayCurrency === "CNY"
       ? `已切换人民币显示（1 USD = ¥${rTxt}，每日同步一次）`
@@ -504,10 +591,23 @@ function switchPage(page) {
 
   requestAnimationFrame(() => {
     if (target === "overview" && cachedHistory) {
-      drawEquityCurve(cachedHistory);
+      if (_renderedCurrency.overview !== displayCurrency) {
+        patchOverviewMoneyTexts(cachedHistory, cachedLive);
+      } else {
+        drawEquityCurve(cachedHistory);
+      }
+    }
+    if (target === "history" && cachedHistory && _renderedCurrency.history !== displayCurrency) {
+      renderHistoryTable(cachedHistory);
+      _renderedCurrency.history = displayCurrency;
     }
     if (target === "market" && cachedLive) {
-      drawLivePriceChart(cachedLive);
+      if (_renderedCurrency.market !== displayCurrency) {
+        updateMarket(cachedLive);
+        _renderedCurrency.market = displayCurrency;
+      } else {
+        drawLivePriceChart(cachedLive);
+      }
     }
   });
 }
@@ -1032,6 +1132,7 @@ function translateDecisionReason(rawReason) {
 // ============================================================================
 function updateOverview(live, hist) {
   if (!hist) return;
+  _renderedCurrency.overview = displayCurrency;
 
   const totalPnl = Number(hist.total_pnl || 0);
   const totalWon = Number(hist.total_won || 0);
@@ -1975,6 +2076,7 @@ function renderHistoryTable(hist) {
   const tbody = $("history-tbody");
   const countEl = $("history-count");
   if (!tbody) return;
+  _renderedCurrency.history = displayCurrency;
 
   const rawRecords = Array.isArray(hist?.records) ? hist.records : [];
   const totalServerRounds = Number(hist?.records_total || hist?.total_rounds || rawRecords.length);
@@ -2066,6 +2168,7 @@ function triggerCardShimmer(cardEl) {
 
 function updateMarket(live) {
   if (!live || live.status === "idle") return;
+  _renderedCurrency.market = displayCurrency;
 
   if (live.slug && live.slug !== liveSelectedActionSlug) {
     liveSelectedActionIdx = null;
