@@ -101,7 +101,7 @@
             </div>
           </div>
 
-          <div class="conn-subhead">网络延迟与准度基准</div>
+          <div class="conn-subhead">网络延迟与实时吞吐</div>
           <div class="conn-bench-grid">
             <div class="conn-tile" title="4 条核心行情链路的平均往返延迟">
               <span class="conn-tile-label">平均 RTT</span>
@@ -111,9 +111,9 @@
               <span class="conn-tile-label">信号-交易所差</span>
               <strong class="source-metric-val conn-tile-val" id="side-net-sig-diff">--</strong>
             </div>
-            <div class="conn-tile conn-tile-wide" title="窗口中段 Brier Score (越小越准)：左侧模型 P* vs 右侧盘口市价；模型更小变绿，明显更大变黄">
-              <span class="conn-tile-label">Brier 准度 (模型 / 盘口)</span>
-              <strong class="source-metric-val conn-tile-val" id="side-brier-score">--</strong>
+            <div class="conn-tile conn-tile-wide" title="每秒有效行情下行流量与消息推送速率（悬停查看累计流量）">
+              <span class="conn-tile-label">实时流量 / 消息速率</span>
+              <strong class="source-metric-val conn-tile-val" id="side-net-throughput">--</strong>
             </div>
           </div>
         </div>
@@ -847,7 +847,7 @@
           </div>
         </div>
 
-        <div class="conn-subhead">网络延迟与准度基准</div>
+        <div class="conn-subhead">网络延迟与实时吞吐</div>
         <div class="conn-bench-grid">
           <div class="conn-tile">
             <span class="conn-tile-label">平均 RTT</span>
@@ -858,8 +858,8 @@
             <strong class="source-metric-val conn-tile-val" id="modal-net-sig-diff">--</strong>
           </div>
           <div class="conn-tile conn-tile-wide">
-            <span class="conn-tile-label">Brier 准度 (模型 / 盘口)</span>
-            <strong class="source-metric-val conn-tile-val" id="modal-brier-score">--</strong>
+            <span class="conn-tile-label">实时流量 / 消息速率</span>
+            <strong class="source-metric-val conn-tile-val" id="modal-net-throughput">--</strong>
           </div>
         </div>
       </div>
@@ -904,7 +904,7 @@
         </div>
 
         <div class="guide-section">
-          <h3 class="guide-section-title">二、网络延迟与准度基准（判断真 Alpha 的核心指标）</h3>
+          <h3 class="guide-section-title">二、网络延迟与实时吞吐（监控行情链路活力）</h3>
           <div class="guide-list">
             <div class="guide-item">
               <span class="guide-metric">平均 RTT</span>
@@ -915,8 +915,8 @@
               <div class="guide-desc">公式：<code>现货源延迟 − Polymarket 盘口延迟</code>。<strong>绿色（≤ +30ms）</strong>表示链路延迟同步；<strong>黄色（&gt; +100ms）</strong>说明现货链路往返偏慢。注意：优先选用高流动性主所（如欧美低延迟节点用 <code>coinbase</code>，全球定价中心用 <code>binance</code>），慎用 Kraken 等薄盘口小所，以免价格发现失真引发逆向选择。</div>
             </div>
             <div class="guide-item">
-              <span class="guide-metric">Brier (模型 / 盘口)</span>
-              <div class="guide-desc">固定中段（<code>tau ≤ 150s</code>）预测均方误差，<strong>越小越准</strong>（<code>0</code>=神准，<code>0.25</code>=瞎猜 50/50）。<strong>绿色</strong>代表模型预测打赢盘口市价（存在独立概率 Alpha）；<strong>黄色</strong>代表模型暂时弱于盘口（小样本有噪声，建议观察 ≥300 窗）。</div>
+              <span class="guide-metric">实时流量 / 消息速率</span>
+              <div class="guide-desc">每秒实时接收的有效行情下行流量（<code>KB/s</code>）与每秒推送条数（<code>条/s</code>），用于直观判断实时行情流是否持续活跃、是否存在静默卡死；悬停可查看累计接收总流量。</div>
             </div>
           </div>
         </div>

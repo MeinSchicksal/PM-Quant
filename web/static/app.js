@@ -462,6 +462,29 @@ function updateNetworkTelemetry(live) {
   const nowSec = live && live.server_time ? Number(live.server_time) : (Date.now() / 1000);
   const liveAge = (live && live.now) ? Math.abs(nowSec - Number(live.now)) : Infinity;
   const isIdle = !live || live.status === "idle" || liveAge > 10;
+
+  const tpTargets = [$("side-net-throughput"), $("modal-net-throughput")];
+  if (tpTargets.some(Boolean)) {
+    const kbps = Number(net.downstream_kbps ?? 0);
+    const msgRate = Number(net.msg_rate ?? 0);
+    const totalMb = Number(net.total_mb ?? 0);
+    let tpText = "--";
+    let tpCls = "";
+    let tpTitle = "实时行情下行流量与消息推送速率";
+    if (!isIdle && Number.isFinite(kbps) && Number.isFinite(msgRate)) {
+      const rateStr = kbps >= 1024 ? `${(kbps / 1024).toFixed(2)} MB/s` : `${kbps.toFixed(1)} KB/s`;
+      const msgStr = msgRate >= 10 ? `${Math.round(msgRate)} 条/s` : `${msgRate.toFixed(1)} 条/s`;
+      tpText = `${rateStr} · ${msgStr}`;
+      tpCls = (msgRate <= 0.01 && kbps <= 0.01) ? "is-warn" : "";
+      tpTitle = `每秒有效流量 ${rateStr}，消息速率 ${msgStr}` + (Number.isFinite(totalMb) && totalMb > 0 ? `（本次运行累计 ${totalMb.toFixed(1)} MB）` : "");
+    }
+    tpTargets.forEach((el) => {
+      if (!el) return;
+      el.textContent = tpText;
+      el.className = `source-metric-val conn-tile-val ${tpCls}`;
+      el.title = tpTitle;
+    });
+  }
   const spotStale = Boolean(live && live.spot_stale);
   const polyStale = Boolean(live && live.poly_spot_stale);
   const spotSrc = String((live && live.spot_source) || "").toLowerCase();
